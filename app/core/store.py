@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, fields, field
 
 
 @dataclass
@@ -32,6 +32,14 @@ class Settings:
     ssh_profiles: list[SshProfile] = field(default_factory=list)
 
 
+def _filter_dataclass_kwargs(dataclass_type, data: dict) -> dict:
+    """dataclass의 유효한 필드만 추출하고 나머지는 제거"""
+    if not isinstance(data, dict):
+        raise TypeError(f"Expected dict, got {type(data).__name__}")
+    field_names = {f.name for f in fields(dataclass_type)}
+    return {k: v for k, v in data.items() if k in field_names}
+
+
 def default_settings_path() -> str:
     base = os.environ.get("APPDATA") or os.path.expanduser("~")
     return os.path.join(base, "CloudflareTunnelGUI", "settings.json")
@@ -44,14 +52,44 @@ class SettingsStore:
 
     def load(self) -> Settings:
         if os.path.exists(self.path):
-            with open(self.path, encoding="utf-8") as f:
-                raw = json.load(f)
-            self.settings = Settings(
-                root_domain=raw.get("root_domain", ""),
-                cloudflared_path=raw.get("cloudflared_path", ""),
-                tunnels={k: TunnelMeta(**v) for k, v in raw.get("tunnels", {}).items()},
-                ssh_profiles=[SshProfile(**p) for p in raw.get("ssh_profiles", [])],
-            )
+            try:
+                with open(self.path, encoding="utf-8") as f:
+                    raw = json.load(f)
+            except (json.JSONDecodeError, IOError):
+                # JSON 파싱 실패 또는 파일 읽기 실패 시 기본값으로 폴백
+                return self.settings
+
+            try:
+                # 유효한 터널만 로드
+                tunnels = {}
+                for k, v in raw.get("tunnels", {}).items():
+                    try:
+                        tunnel_data = _filter_dataclass_kwargs(TunnelMeta, v)
+                        tunnels[k] = TunnelMeta(**tunnel_data)
+                    except (TypeError, ValueError):
+                        # 유효하지 않은 항목은 스킵
+                        continue
+
+                # 유효한 SSH 프로필만 로드
+                ssh_profiles = []
+                for p in raw.get("ssh_profiles", []):
+                    try:
+                        profile_data = _filter_dataclass_kwargs(SshProfile, p)
+                        ssh_profiles.append(SshProfile(**profile_data))
+                    except (TypeError, ValueError):
+                        # 유효하지 않은 항목은 스킵
+                        continue
+
+                self.settings = Settings(
+                    root_domain=raw.get("root_domain", ""),
+                    cloudflared_path=raw.get("cloudflared_path", ""),
+                    tunnels=tunnels,
+                    ssh_profiles=ssh_profiles,
+                )
+            except (TypeError, KeyError, ValueError):
+                # 예상치 못한 형식 에러 시 기본값으로 폴백
+                self.settings = Settings()
+
         return self.settings
 
     def save(self) -> None:
