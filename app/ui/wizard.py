@@ -197,8 +197,9 @@ class TunnelWizard(QDialog):
         def progress(idx, msg, ok):
             self._events.append(("log", f"{'✅' if ok else '❌'} {msg}"))
             # idx >= 1이면 create_tunnel(idx==0)이 성공했다는 뜻
+            # 워커 스레드에서 동기 설정 (이벤트 드레인 대기 불필요)
             if idx >= 1:
-                self._events.append(("created",))
+                self._tunnel_created = True
 
         def work():
             try:
@@ -237,9 +238,6 @@ class TunnelWizard(QDialog):
             if ev[0] == "log":
                 self.status_label.setText(
                     (self.status_label.text() + "\n" + ev[1]).strip())
-            elif ev[0] == "created":
-                # 터널이 성공적으로 생성됨
-                self._tunnel_created = True
             elif ev[0] == "done":
                 _, name, hostname, service = ev
                 self.created_meta = TunnelMeta(
