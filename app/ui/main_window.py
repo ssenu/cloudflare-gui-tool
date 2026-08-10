@@ -176,6 +176,14 @@ class MainWindow(QWidget):
         self._timer.timeout.connect(self._tick)
         self._timer.start(1000)
 
+        # 단축키 등록
+        from PyQt6.QtGui import QKeySequence, QShortcut
+        for i in range(1, 10):
+            sc = QShortcut(QKeySequence(f"Ctrl+{i}"), self)
+            sc.activated.connect(lambda n=i - 1: self._shortcut_tunnel(n))
+            sc2 = QShortcut(QKeySequence(f"Ctrl+Shift+{i}"), self)
+            sc2.activated.connect(lambda n=i - 1: self._shortcut_server(n))
+
     # ---- 대상 전환 ----
     def _reload_targets(self):
         self.target_combo.blockSignals(True)
@@ -302,3 +310,25 @@ class MainWindow(QWidget):
     def _tick(self):
         for c in self.cards:
             c.update_state()
+
+    # ---- 단축키 ----
+    def _shortcut_tunnel(self, idx: int):
+        if idx < len(self.cards):
+            self.cards[idx].toggle_tunnel()
+
+    def _shortcut_server(self, idx: int):
+        if idx < len(self.cards):
+            self.cards[idx].toggle_server()
+
+    # ---- 종료 정리 ----
+    def closeEvent(self, event):
+        if self.ctx.manager.any_running():
+            ok = QMessageBox.question(
+                self, "종료", "실행 중인 터널/서버가 있습니다.\n"
+                              "종료하면 모두 중지됩니다. 종료할까요?")
+            if ok != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+        self.ctx.manager.stop_all()
+        self.ctx.set_local()  # SSH 연결 정리
+        event.accept()
