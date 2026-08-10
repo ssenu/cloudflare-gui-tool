@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QMenu,
@@ -72,7 +74,7 @@ class TunnelCard(QFrame):
     # ---- 동작 ----
     def toggle_tunnel(self):
         ctx = self.win.ctx
-        st = ctx.manager.tunnel_state(self.tunnel_name)
+        st = ctx.manager.tunnel_state(self.tunnel_name, ctx.runner.name)
         try:
             if st in (TunnelState.STOPPED, TunnelState.ERROR):
                 if not ctx.runner.file_exists(ctx.client.config_path(self.tunnel_name)):
@@ -82,10 +84,10 @@ class TunnelCard(QFrame):
                     return
                 ctx.manager.start_tunnel(self.tunnel_name, ctx.runner, ctx.client)
                 if self.meta.start_together and self.meta.server_cmd \
-                        and not ctx.manager.server_running(self.tunnel_name):
+                        and not ctx.manager.server_running(self.tunnel_name, ctx.runner.name):
                     ctx.manager.start_server(self.meta, ctx.runner)
             else:
-                ctx.manager.stop_tunnel(self.tunnel_name)
+                ctx.manager.stop_tunnel(self.tunnel_name, ctx.runner.name)
         except Exception as ex:
             QMessageBox.critical(self, "오류", str(ex))
         self.update_state()
@@ -93,8 +95,8 @@ class TunnelCard(QFrame):
     def toggle_server(self):
         ctx = self.win.ctx
         try:
-            if ctx.manager.server_running(self.tunnel_name):
-                ctx.manager.stop_server(self.tunnel_name)
+            if ctx.manager.server_running(self.tunnel_name, ctx.runner.name):
+                ctx.manager.stop_server(self.tunnel_name, ctx.runner.name)
             else:
                 ctx.manager.start_server(self.meta, ctx.runner)
         except Exception as ex:
@@ -113,13 +115,14 @@ class TunnelCard(QFrame):
 
     # ---- 표시 갱신 ----
     def update_state(self):
-        st = self.win.ctx.manager.tunnel_state(self.tunnel_name)
+        ctx = self.win.ctx
+        st = ctx.manager.tunnel_state(self.tunnel_name, ctx.runner.name)
         self.dot.setStyleSheet(f"color: {STATE_COLORS[st]}; font-size: 16px;")
         self.state_label.setText(STATE_LABELS[st])
         running = st in (TunnelState.STARTING, TunnelState.RUNNING)
         self.toggle_btn.setText("■ 끄기" if running else "▶ 켜기")
         if self.meta.server_cmd:
-            s_run = self.win.ctx.manager.server_running(self.tunnel_name)
+            s_run = ctx.manager.server_running(self.tunnel_name, ctx.runner.name)
             self.server_btn.setText("■ 서버" if s_run else "▶ 서버")
 
 
@@ -129,6 +132,7 @@ class MainWindow(QWidget):
         self.ctx = ctx
         self.cards: list[TunnelCard] = []
         self._log_viewers: dict[str, "LogViewer"] = {}
+        self._current_target_index = 0
         self.setWindowTitle("Cloudflare Tunnel GUI")
         self.resize(780, 580)
 
@@ -194,6 +198,17 @@ class MainWindow(QWidget):
         self.target_combo.blockSignals(False)
 
     def _switch_target(self):
+        if self.ctx.manager.any_running():
+            ok = QMessageBox.question(
+                self, "대상 전환",
+                "대상 전환 시 현재 대상에서 실행 중인 터널/서버가 모두 중지됩니다. 계속할까요?")
+            if ok != QMessageBox.StandardButton.Yes:
+                self.target_combo.blockSignals(True)
+                self.target_combo.setCurrentIndex(self._current_target_index)
+                self.target_combo.blockSignals(False)
+                return
+            self.ctx.manager.stop_all()
+
         profile = self.target_combo.currentData()
         self.banner.hide()
         try:
@@ -202,6 +217,7 @@ class MainWindow(QWidget):
             else:
                 self.setCursor(Qt.CursorShape.WaitCursor)
                 self.ctx.set_remote(profile)
+            self._current_target_index = self.target_combo.currentIndex()
         except Exception as ex:
             self.banner.setText(f"SSH 연결 실패: {ex}")
             self.banner.show()
@@ -209,6 +225,7 @@ class MainWindow(QWidget):
             self.target_combo.setCurrentIndex(0)
             self.target_combo.blockSignals(False)
             self.ctx.set_local()
+            self._current_target_index = 0
         finally:
             self.unsetCursor()
         self.refresh()
@@ -218,6 +235,7 @@ class MainWindow(QWidget):
         try:
             self.setCursor(Qt.CursorShape.WaitCursor)
             infos = self.ctx.client.list_tunnels()
+            self.banner.hide()
         except Exception as ex:
             self.banner.setText(f"터널 목록 조회 실패: {ex}")
             self.banner.show()
@@ -229,12 +247,16 @@ class MainWindow(QWidget):
             c.setParent(None)
         self.cards.clear()
 
+        # tunnels dict는 local/remote 대상 간에 공유된다 (v1 한계: 이름 충돌 시 메타가 섞일 수 있음)
         metas = self.ctx.store.settings.tunnels
+        self._meta_restored = False
         for info in infos:
             meta = metas.get(info.name) or self._meta_from_config(info.name)
             card = TunnelCard(self, info, meta)
             self.list_lay.insertWidget(self.list_lay.count() - 1, card)
             self.cards.append(card)
+        if self._meta_restored:
+            self.ctx.store.save()
 
     def _meta_from_config(self, name: str) -> TunnelMeta:
         """settings.json에 없는 터널: config yml에서 hostname/service 복원."""
@@ -247,7 +269,7 @@ class MainWindow(QWidget):
         except Exception:
             pass
         self.ctx.store.settings.tunnels[name] = meta
-        self.ctx.store.save()
+        self._meta_restored = True
         return meta
 
     # ---- 생성/편집/삭제 ----
@@ -275,17 +297,38 @@ class MainWindow(QWidget):
             "- DNS CNAME 레코드는 Cloudflare 대시보드에서 직접 삭제해야 합니다")
         if ok != QMessageBox.StandardButton.Yes:
             return
+        runner_name = self.ctx.runner.name
+        self.ctx.manager.stop_tunnel(name, runner_name)
+        self.ctx.manager.stop_server(name, runner_name)
+        # 프로세스가 완전히 종료될 때까지 잠시 대기 (cloudflared가 연결을 정리할 시간)
+        for _ in range(10):
+            if self.ctx.manager.tunnel_state(name, runner_name) in (
+                    TunnelState.STOPPED, TunnelState.ERROR):
+                break
+            time.sleep(0.2)
+
+        deleted = False
         try:
-            self.ctx.manager.stop_tunnel(name)
-            self.ctx.manager.stop_server(name)
             self.ctx.client.delete_tunnel(name)
-            path = self.ctx.client.config_path(name)
-            if self.ctx.runner.file_exists(path):
-                self.ctx.runner.remove_file(path)
+            deleted = True
+        except CloudflaredError as ex:
+            msg = str(ex)
+            if "active connection" in msg.lower():
+                msg += "\n\n잠시 후 다시 시도해주세요."
+            QMessageBox.critical(self, "삭제 실패", msg)
+        except Exception as ex:
+            QMessageBox.critical(self, "삭제 실패", str(ex))
+
+        if deleted:
             self.ctx.store.settings.tunnels.pop(name, None)
             self.ctx.store.save()
-        except CloudflaredError as ex:
-            QMessageBox.critical(self, "삭제 실패", str(ex))
+            try:
+                path = self.ctx.client.config_path(name)
+                if self.ctx.runner.file_exists(path):
+                    self.ctx.runner.remove_file(path)
+            except Exception as ex:
+                QMessageBox.warning(self, "파일 삭제 실패",
+                                    f"터널은 삭제되었지만 config 파일 삭제에 실패했습니다.\n{ex}")
         self.refresh()
 
     # ---- 이후 태스크에서 연결 ----

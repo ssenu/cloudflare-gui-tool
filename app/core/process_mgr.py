@@ -64,10 +64,12 @@ class LogBuffer:
 
 
 class _Handle:
-    def __init__(self, proc: ManagedProcess, tracker: StatusTracker, log: LogBuffer):
+    def __init__(self, proc: ManagedProcess, tracker: StatusTracker, log: LogBuffer,
+                 runner_name: str):
         self.proc = proc
         self.tracker = tracker
         self.log = log
+        self.runner_name = runner_name
 
 
 class ProcessManager:
@@ -91,17 +93,17 @@ class ProcessManager:
 
         proc = runner.spawn(client.run_args(name), on_line=on_line,
                             on_exit=tracker.on_exit)
-        self._tunnels[name] = _Handle(proc, tracker, log)
+        self._tunnels[name] = _Handle(proc, tracker, log, runner.name)
 
-    def stop_tunnel(self, name: str) -> None:
+    def stop_tunnel(self, name: str, runner_name: str | None = None) -> None:
         h = self._tunnels.get(name)
-        if h:
+        if h and (runner_name is None or h.runner_name == runner_name):
             h.tracker.mark_stopping()
             h.proc.stop()
 
-    def tunnel_state(self, name: str) -> TunnelState:
+    def tunnel_state(self, name: str, runner_name: str | None = None) -> TunnelState:
         h = self._tunnels.get(name)
-        if not h:
+        if not h or (runner_name is not None and h.runner_name != runner_name):
             return TunnelState.STOPPED
         if h.tracker.state == TunnelState.RUNNING and not h.proc.is_running():
             return TunnelState.ERROR
@@ -124,17 +126,19 @@ class ProcessManager:
         proc = runner.spawn(cmd, cwd=meta.server_cwd or None,
                             on_line=lambda s, l: log.append(s, l),
                             on_exit=tracker.on_exit)
-        self._servers[name] = _Handle(proc, tracker, log)
+        self._servers[name] = _Handle(proc, tracker, log, runner.name)
 
-    def stop_server(self, name: str) -> None:
+    def stop_server(self, name: str, runner_name: str | None = None) -> None:
         h = self._servers.get(name)
-        if h:
+        if h and (runner_name is None or h.runner_name == runner_name):
             h.tracker.mark_stopping()
             h.proc.stop()
 
-    def server_running(self, name: str) -> bool:
+    def server_running(self, name: str, runner_name: str | None = None) -> bool:
         h = self._servers.get(name)
-        return bool(h and h.proc.is_running())
+        if not h or (runner_name is not None and h.runner_name != runner_name):
+            return False
+        return bool(h.proc.is_running())
 
     def server_log(self, name: str) -> LogBuffer:
         h = self._servers.get(name)
