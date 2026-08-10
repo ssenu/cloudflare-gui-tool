@@ -60,25 +60,34 @@ class SettingsStore:
                 return self.settings
 
             try:
+                # 최상위가 dict인지 검증
+                if not isinstance(raw, dict):
+                    self.settings = Settings()
+                    return self.settings
+
                 # 유효한 터널만 로드
                 tunnels = {}
-                for k, v in raw.get("tunnels", {}).items():
-                    try:
-                        tunnel_data = _filter_dataclass_kwargs(TunnelMeta, v)
-                        tunnels[k] = TunnelMeta(**tunnel_data)
-                    except (TypeError, ValueError):
-                        # 유효하지 않은 항목은 스킵
-                        continue
+                tunnels_data = raw.get("tunnels", {})
+                if isinstance(tunnels_data, dict):
+                    for k, v in tunnels_data.items():
+                        try:
+                            tunnel_data = _filter_dataclass_kwargs(TunnelMeta, v)
+                            tunnels[k] = TunnelMeta(**tunnel_data)
+                        except (TypeError, ValueError):
+                            # 유효하지 않은 항목은 스킵
+                            continue
 
                 # 유효한 SSH 프로필만 로드
                 ssh_profiles = []
-                for p in raw.get("ssh_profiles", []):
-                    try:
-                        profile_data = _filter_dataclass_kwargs(SshProfile, p)
-                        ssh_profiles.append(SshProfile(**profile_data))
-                    except (TypeError, ValueError):
-                        # 유효하지 않은 항목은 스킵
-                        continue
+                ssh_profiles_data = raw.get("ssh_profiles", [])
+                if isinstance(ssh_profiles_data, list):
+                    for p in ssh_profiles_data:
+                        try:
+                            profile_data = _filter_dataclass_kwargs(SshProfile, p)
+                            ssh_profiles.append(SshProfile(**profile_data))
+                        except (TypeError, ValueError):
+                            # 유효하지 않은 항목은 스킵
+                            continue
 
                 self.settings = Settings(
                     root_domain=raw.get("root_domain", ""),
@@ -86,7 +95,7 @@ class SettingsStore:
                     tunnels=tunnels,
                     ssh_profiles=ssh_profiles,
                 )
-            except (TypeError, KeyError, ValueError):
+            except (TypeError, KeyError, ValueError, AttributeError):
                 # 예상치 못한 형식 에러 시 기본값으로 폴백
                 self.settings = Settings()
 

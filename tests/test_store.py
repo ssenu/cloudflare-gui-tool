@@ -103,3 +103,38 @@ def test_load_ignores_bad_entries(tmp_path):
     # 유효한 SSH 프로필만 로드됨
     assert len(s.ssh_profiles) == 1
     assert s.ssh_profiles[0].name == "good_ssh"
+
+
+def test_load_non_object_root_falls_back(tmp_path):
+    """최상위 JSON이 객체가 아니면 기본값으로 폴백"""
+    path = str(tmp_path / "settings.json")
+    # 배열 JSON (객체가 아님)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump([1, 2, 3], f)
+
+    store = SettingsStore(path=path)
+    # AttributeError가 발생하지 않고 기본값을 반환해야 함
+    s = store.load()
+    assert s.root_domain == ""
+    assert s.tunnels == {}
+    assert s.ssh_profiles == []
+
+
+def test_load_tunnels_wrong_type_skipped(tmp_path):
+    """tunnels이 dict가 아니면 빈 dict로 처리"""
+    path = str(tmp_path / "settings.json")
+    bad_json = {
+        "root_domain": "example.com",
+        "cloudflared_path": "/path/to/cloudflared",
+        "tunnels": ["a", "b"]  # dict가 아닌 list
+    }
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(bad_json, f)
+
+    store = SettingsStore(path=path)
+    # AttributeError가 발생하지 않고 터널을 빈 dict로 처리
+    s = store.load()
+    assert s.root_domain == "example.com"
+    assert s.tunnels == {}  # 형식이 잘못되었으므로 빈 dict
+    assert s.ssh_profiles == []
