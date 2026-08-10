@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest
 from app.core.cloudflared import CloudflaredClient, CloudflaredError
 from app.core.runner import CommandRunner, RunResult
@@ -64,6 +66,14 @@ def test_version_none_when_missing():
             raise FileNotFoundError
 
     assert CloudflaredClient(Boom({})).version() is None
+
+
+def test_version_none_on_timeout():
+    class TimeoutRunner(FakeRunner):
+        def run(self, cmd, timeout=60.0):
+            raise subprocess.TimeoutExpired("x", 1)
+
+    assert CloudflaredClient(TimeoutRunner({})).version() is None
 
 
 def test_paths_and_run_args():

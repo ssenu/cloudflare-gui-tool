@@ -29,3 +29,20 @@ def test_update_service_keeps_rest():
     assert cfg["ingress"][0]["service"] == "http://localhost:5173"
     assert cfg["ingress"][0]["hostname"] == "a.example.com"
     assert cfg["tunnel"] == TID
+
+
+def test_non_dict_ingress_entries_ignored():
+    text = f"""
+tunnel: {TID}
+credentials-file: {CRED}
+ingress:
+  - "not-a-dict-entry"
+  - hostname: a.example.com
+    service: http://localhost:9000
+  - service: http_status:404
+"""
+    cfg = parse_config(text)
+    assert get_main_ingress(cfg) == ("a.example.com", "http://localhost:9000")
+    new = update_service(text, "http://localhost:5173")
+    new_cfg = parse_config(new)
+    assert get_main_ingress(new_cfg) == ("a.example.com", "http://localhost:5173")

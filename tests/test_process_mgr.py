@@ -49,3 +49,20 @@ def test_server_start_stop():
     time.sleep(0.3)
     assert not mgr.server_running("t1")
     mgr.stop_all()
+
+
+def test_handles_scoped_by_runner():
+    mgr = ProcessManager()
+    runner = LocalRunner()
+    meta = TunnelMeta(name="t2",
+                      server_cmd=f'"{sys.executable}" -c "import time; time.sleep(60)"')
+    mgr.start_server(meta, runner)
+    try:
+        assert mgr.server_running("t2", "local") is True
+        assert mgr.server_running("t2", "ssh:rpi") is False
+        assert mgr.tunnel_state("t2", "ssh:rpi") == TunnelState.STOPPED
+        # 다른 러너 이름으로는 stop이 no-op이어야 한다
+        mgr.stop_server("t2", "ssh:rpi")
+        assert mgr.server_running("t2", "local") is True
+    finally:
+        mgr.stop_all()
