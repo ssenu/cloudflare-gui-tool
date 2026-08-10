@@ -13,6 +13,11 @@ def main() -> int:
     app.setApplicationName("Cloudflare Tunnel GUI")
     app.setStyleSheet(APP_QSS)
     ctx = AppContext()
+    from app.ui.onboarding import OnboardingDialog, needs_onboarding
+    if needs_onboarding(ctx):
+        dlg = OnboardingDialog(ctx)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return 0
     win = QMainWindow()  # Task 10에서 MainWindow(ctx)로 교체
     win.setWindowTitle("Cloudflare Tunnel GUI")
     win.resize(760, 560)
