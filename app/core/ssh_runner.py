@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shlex
+import socket
 import threading
 
 import paramiko
@@ -23,18 +24,25 @@ class SshProcess(ManagedProcess):
 
     def _pump(self, on_line: OnLine | None):
         buf = ""
-        while True:
-            data = self._ch.recv(4096)
-            if not data:
-                break
-            buf += data.decode("utf-8", errors="replace")
-            while "\n" in buf:
-                line, buf = buf.split("\n", 1)
-                if on_line:
-                    on_line("stdout", line.rstrip("\r"))
-        code = self._ch.recv_exit_status() if not self._closed else 0
-        if self._on_exit:
-            self._on_exit(0 if self._closed else code)
+        code = 1  # default error code
+        try:
+            while True:
+                data = self._ch.recv(4096)
+                if not data:
+                    break
+                buf += data.decode("utf-8", errors="replace")
+                while "\n" in buf:
+                    line, buf = buf.split("\n", 1)
+                    if on_line:
+                        on_line("stdout", line.rstrip("\r"))
+            code = self._ch.recv_exit_status() if not self._closed else 0
+        except Exception:
+            # recv() or recv_exit_status() raised; code stays 1 (error)
+            pass
+        finally:
+            # Guarantee on_exit is called exactly once
+            if self._on_exit:
+                self._on_exit(code)
 
     def is_running(self) -> bool:
         return not self._ch.closed and not self._ch.exit_status_ready()
@@ -84,9 +92,14 @@ class SshRunner(CommandRunner):
     def run(self, cmd: list[str], timeout: float = 60.0) -> RunResult:
         _, stdout, stderr = self._require().exec_command(quote_cmd(cmd),
                                                          timeout=timeout)
-        out = stdout.read().decode("utf-8", errors="replace")
-        err = stderr.read().decode("utf-8", errors="replace")
-        return RunResult(stdout.channel.recv_exit_status(), out, err)
+        try:
+            # paramiko's timeout is per-recv inactivity, not overall command time.
+            # If command is slow but still outputting, stdout.read() can raise socket.timeout.
+            out = stdout.read().decode("utf-8", errors="replace")
+            err = stderr.read().decode("utf-8", errors="replace")
+            return RunResult(stdout.channel.recv_exit_status(), out, err)
+        except socket.timeout:
+            raise TimeoutError(f"SSH 명령 시간 초과: {' '.join(cmd)}")
 
     def spawn(self, cmd, cwd=None, on_line=None, on_exit=None) -> ManagedProcess:
         transport = self._require().get_transport()
