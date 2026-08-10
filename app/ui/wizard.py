@@ -20,7 +20,9 @@ class TunnelWizard(QDialog):
         self.existing = existing_names
         self.created_meta: TunnelMeta | None = None
         self._events: list[tuple] = []  # 워커 스레드 → UI 폴링 큐
+        self._next_mode = "nav"  # "nav" | "close" | "done"
         self._tunnel_created = False  # 터널 생성 성공 여부 추적
+        self._current_tunnel_name = ""  # 롤백용 터널 이름
         self.setWindowTitle("터널 생성")
         self.setMinimumSize(520, 380)
 
@@ -39,7 +41,7 @@ class TunnelWizard(QDialog):
         self.rollback_btn = QPushButton("🗑 터널 롤백(삭제)")
         self.rollback_btn.setVisible(False)
         self.back_btn.clicked.connect(self._back)
-        self.next_btn.clicked.connect(self._next)
+        self.next_btn.clicked.connect(self._on_next_clicked)  # 상태 기반 디스패처
         self.rollback_btn.clicked.connect(self._start_rollback)
 
         lay = QVBoxLayout(self)
@@ -144,6 +146,14 @@ class TunnelWizard(QDialog):
         self.err.clear()
         self._update_preview()
 
+        # 페이지 0-3으로 이동하면 상태 초기화 (재시도 경로)
+        if i < 4:
+            self._next_mode = "nav"
+            self.next_btn.setEnabled(True)
+            self.rollback_btn.setVisible(False)
+            self.status_label.setText("")
+            self._tunnel_created = False
+
     def _back(self):
         i = self.stack.currentIndex()
         # 실행 페이지(4)에서 뒤로가면 페이지 3으로 돌아가고, 생성 시작 버튼 준비
@@ -151,6 +161,15 @@ class TunnelWizard(QDialog):
             self._go(3)
         else:
             self._go(i - 1)
+
+    def _on_next_clicked(self):
+        """상태 기반 next_btn 디스패처 (signal rewiring 제거)"""
+        if self._next_mode == "nav":
+            self._next()
+        elif self._next_mode == "close":
+            self.reject()
+        elif self._next_mode == "done":
+            self.accept()
 
     def _next(self):
         e = self._validate_current()
@@ -177,9 +196,9 @@ class TunnelWizard(QDialog):
 
         def progress(idx, msg, ok):
             self._events.append(("log", f"{'✅' if ok else '❌'} {msg}"))
-            # 터널 생성 완료 감지 (첫 번째 단계 두 번째 호출)
-            if idx == 0 and "완료" in msg:
-                self._tunnel_created = True
+            # idx >= 1이면 create_tunnel(idx==0)이 성공했다는 뜻
+            if idx >= 1:
+                self._events.append(("created",))
 
         def work():
             try:
@@ -218,6 +237,9 @@ class TunnelWizard(QDialog):
             if ev[0] == "log":
                 self.status_label.setText(
                     (self.status_label.text() + "\n" + ev[1]).strip())
+            elif ev[0] == "created":
+                # 터널이 성공적으로 생성됨
+                self._tunnel_created = True
             elif ev[0] == "done":
                 _, name, hostname, service = ev
                 self.created_meta = TunnelMeta(
@@ -227,35 +249,30 @@ class TunnelWizard(QDialog):
                     start_together=self.together_chk.isChecked())
                 # 루트 도메인 기억
                 self.ctx.store.settings.root_domain = self.domain_edit.text().strip()
+                self._next_mode = "done"
                 self.next_btn.setText("완료")
                 self.next_btn.setEnabled(True)
-                self.next_btn.clicked.disconnect()
-                self.next_btn.clicked.connect(self.accept)
             elif ev[0] == "fail":
                 _, msg, tunnel_created, name = ev
                 self.status_label.setText(
                     self.status_label.text() + f"\n❌ 실패: {msg}")
                 # 터널이 생성됐으면 롤백 버튼 표시, 아니면 닫기만
+                self._next_mode = "close"
+                self.next_btn.setText("닫기")
+                self.next_btn.setEnabled(True)
                 if tunnel_created:
                     self.rollback_btn.setVisible(True)
                     self._current_tunnel_name = name
-                    self.next_btn.setText("닫기")
-                    self.next_btn.setEnabled(True)
-                    self.next_btn.clicked.disconnect()
-                    self.next_btn.clicked.connect(self.reject)
                     # 재시도 가능하도록 뒤로가기 버튼 표시
                     self.back_btn.setVisible(True)
-                else:
-                    self.next_btn.setText("닫기")
-                    self.next_btn.setEnabled(True)
-                    self.next_btn.clicked.disconnect()
-                    self.next_btn.clicked.connect(self.reject)
             elif ev[0] == "rollback_ok":
                 self.status_label.setText(
                     self.status_label.text() + "\n✅ 터널 삭제 완료")
                 self.rollback_btn.setVisible(False)
                 self.next_btn.setText("닫기")
+                self._next_mode = "close"
             elif ev[0] == "rollback_fail":
                 self.status_label.setText(
                     self.status_label.text() + f"\n❌ 롤백 실패: {ev[1]}")
                 self.next_btn.setText("닫기")
+                self._next_mode = "close"
