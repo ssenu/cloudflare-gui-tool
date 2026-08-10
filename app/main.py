@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 
-from PyQt6.QtWidgets import QApplication, QMainWindow
+from PyQt6.QtWidgets import QApplication
 
 from app.context import AppContext
 from app.ui.theme import APP_QSS
@@ -18,9 +18,8 @@ def main() -> int:
         dlg = OnboardingDialog(ctx)
         if dlg.exec() != dlg.DialogCode.Accepted:
             return 0
-    win = QMainWindow()  # Task 10에서 MainWindow(ctx)로 교체
-    win.setWindowTitle("Cloudflare Tunnel GUI")
-    win.resize(760, 560)
+    from app.ui.main_window import MainWindow
+    win = MainWindow(ctx)
     win.show()
     return app.exec()
 
