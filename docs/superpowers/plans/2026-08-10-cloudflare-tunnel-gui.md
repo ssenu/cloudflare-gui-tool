@@ -2056,7 +2056,9 @@ class MainWindow(QWidget):
 
 - [ ] **Step 4: Commit** — `git add -A && git commit -m "feat: 메인 화면 터널 카드 리스트"`
 
----### Task 11: 로그 뷰어 (log_viewer.py)
+---
+
+### Task 11: 로그 뷰어 (log_viewer.py)
 
 **Files:**
 - Create: `app/ui/log_viewer.py`
