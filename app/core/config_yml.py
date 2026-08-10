@@ -21,16 +21,21 @@ def parse_config(text: str) -> dict:
 
 
 def get_main_ingress(cfg: dict) -> tuple[str, str]:
-    for rule in cfg.get("ingress", []):
-        if "hostname" in rule:
+    ingress = cfg.get("ingress") or []
+    if not isinstance(ingress, list):
+        return "", ""
+    for rule in ingress:
+        if isinstance(rule, dict) and "hostname" in rule:
             return rule.get("hostname", ""), rule.get("service", "")
     return "", ""
 
 
 def update_service(text: str, service: str) -> str:
     cfg = parse_config(text)
-    for rule in cfg.get("ingress", []):
-        if "hostname" in rule:
-            rule["service"] = service
-            break
+    ingress = cfg.get("ingress") or []
+    if isinstance(ingress, list):
+        for rule in ingress:
+            if isinstance(rule, dict) and "hostname" in rule:
+                rule["service"] = service
+                break
     return yaml.dump(cfg, sort_keys=False, allow_unicode=True)

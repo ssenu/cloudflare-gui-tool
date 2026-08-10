@@ -59,6 +59,7 @@ class SshRunner(CommandRunner):
         self.name = f"ssh:{profile.name}"
         self._client: paramiko.SSHClient | None = None
         self._sftp: paramiko.SFTPClient | None = None
+        self._home: str | None = None
 
     def connect(self) -> None:
         client = paramiko.SSHClient()
@@ -70,8 +71,12 @@ class SshRunner(CommandRunner):
         if self.password:
             kwargs["password"] = self.password
         client.connect(**kwargs)
+        try:
+            self._sftp = client.open_sftp()
+        except Exception:
+            client.close()
+            raise
         self._client = client
-        self._sftp = client.open_sftp()
 
     def close(self) -> None:
         if self._sftp:
@@ -79,6 +84,7 @@ class SshRunner(CommandRunner):
         if self._client:
             self._client.close()
         self._client = self._sftp = None
+        self._home = None
 
     def is_connected(self) -> bool:
         t = self._client.get_transport() if self._client else None
@@ -135,7 +141,9 @@ class SshRunner(CommandRunner):
 
     def home_dir(self) -> str:
         assert self._sftp
-        return self._sftp.normalize(".")
+        if self._home is None:
+            self._home = self._sftp.normalize(".")
+        return self._home
 
     def _expand(self, path: str) -> str:
         if path.startswith("~"):
