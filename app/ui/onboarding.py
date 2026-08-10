@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QMessageBox,
                              QPushButton, QVBoxLayout)
@@ -47,30 +49,59 @@ class OnboardingDialog(QDialog):
         self.done_btn.clicked.connect(self.accept)
         lay.addWidget(self.done_btn, alignment=Qt.AlignmentFlag.AlignRight)
 
+        self._status: tuple[str | None, bool] | None = None
+        self._polling = False
+        self._install_exit: int | None = None
+
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh)
         self._timer.start(2000)
         self._refresh()
 
-    def _refresh(self):
+    def _poll_worker(self):
         client = self.ctx.client
-        ver = client.version()
-        installed = ver is not None
-        cert = installed and client.cert_exists()
-        self.install_label.setText(
-            f"① cloudflared 설치: {'✅ ' + ver if installed else '❌ 미설치'}")
-        self.install_btn.setVisible(not installed)
+        self._status = (client.version(), client.cert_exists())
+        self._polling = False
+
+    def _refresh(self):
+        if not self._polling:
+            self._polling = True
+            threading.Thread(target=self._poll_worker, daemon=True).start()
+
+        status = self._status
+        ver, cert_exists = status if status is not None else (None, False)
+        installed = status is not None and ver is not None
+        cert = status is not None and installed and cert_exists
+
+        if status is None:
+            install_text = "① cloudflared 설치: 확인 중..."
+        elif installed:
+            install_text = f"① cloudflared 설치: ✅ {ver}"
+        else:
+            install_text = "① cloudflared 설치: ❌ 미설치"
+
+        if self._install_exit not in (None, 0) and not installed:
+            install_text += " ❌ 설치 실패 — 다시 시도하세요"
+            self.install_btn.setEnabled(True)
+            self.install_btn.setVisible(True)
+            self._install_exit = None
+
+        self.install_label.setText(install_text)
+        if status is not None:
+            self.install_btn.setVisible(not installed)
         self.login_label.setText(
-            f"② Cloudflare 로그인 (cert.pem): {'✅ 완료' if cert else '❌ 필요'}")
+            f"② Cloudflare 로그인 (cert.pem): {'✅ 완료' if cert else '❌ 필요'}"
+            if status is not None else "② Cloudflare 로그인 (cert.pem): 확인 중...")
         self.login_btn.setVisible(installed and not cert)
         self.done_btn.setEnabled(installed and cert)
 
     def _install(self):
         self.install_btn.setEnabled(False)
+        self._install_exit = None
         self.ctx.local_runner.spawn(
             ["winget", "install", "--id", "Cloudflare.cloudflared",
              "--accept-source-agreements", "--accept-package-agreements"],
-            on_exit=lambda c: None)
+            on_exit=lambda c: setattr(self, "_install_exit", c))
         QMessageBox.information(
             self, "설치 시작",
             "설치가 진행 중입니다. 완료되면 상태가 자동으로 갱신됩니다.\n"
@@ -82,3 +113,11 @@ class OnboardingDialog(QDialog):
         QMessageBox.information(
             self, "로그인", "브라우저에서 Cloudflare 로그인 후 도메인을 선택하세요.\n"
                           "완료되면 이 창의 상태가 자동으로 갱신됩니다.")
+
+    def accept(self):
+        self._timer.stop()
+        super().accept()
+
+    def reject(self):
+        self._timer.stop()
+        super().reject()
