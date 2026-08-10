@@ -59,9 +59,11 @@ class OnboardingDialog(QDialog):
         self._refresh()
 
     def _poll_worker(self):
-        client = self.ctx.client
-        self._status = (client.version(), client.cert_exists())
-        self._polling = False
+        try:
+            client = self.ctx.client
+            self._status = (client.version(), client.cert_exists())
+        finally:
+            self._polling = False
 
     def _refresh(self):
         if not self._polling:
@@ -98,10 +100,15 @@ class OnboardingDialog(QDialog):
     def _install(self):
         self.install_btn.setEnabled(False)
         self._install_exit = None
-        self.ctx.local_runner.spawn(
-            ["winget", "install", "--id", "Cloudflare.cloudflared",
-             "--accept-source-agreements", "--accept-package-agreements"],
-            on_exit=lambda c: setattr(self, "_install_exit", c))
+        try:
+            self.ctx.local_runner.spawn(
+                ["winget", "install", "--id", "Cloudflare.cloudflared",
+                 "--accept-source-agreements", "--accept-package-agreements"],
+                on_exit=lambda c: setattr(self, "_install_exit", c))
+        except Exception as ex:
+            self.install_btn.setEnabled(True)
+            QMessageBox.critical(self, "실행 실패", str(ex))
+            return
         QMessageBox.information(
             self, "설치 시작",
             "설치가 진행 중입니다. 완료되면 상태가 자동으로 갱신됩니다.\n"
@@ -109,7 +116,11 @@ class OnboardingDialog(QDialog):
 
     def _login(self):
         # 브라우저가 열리고 사용자가 도메인을 선택하면 cert.pem이 생성된다.
-        self.ctx.local_runner.spawn(self.ctx.client.login_args())
+        try:
+            self.ctx.local_runner.spawn(self.ctx.client.login_args())
+        except Exception as ex:
+            QMessageBox.critical(self, "실행 실패", str(ex))
+            return
         QMessageBox.information(
             self, "로그인", "브라우저에서 Cloudflare 로그인 후 도메인을 선택하세요.\n"
                           "완료되면 이 창의 상태가 자동으로 갱신됩니다.")

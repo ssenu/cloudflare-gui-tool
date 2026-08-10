@@ -39,7 +39,8 @@ class CloudflaredClient:
     def version(self) -> str | None:
         try:
             res = self.runner.run([self.binary, "--version"], timeout=15.0)
-        except (FileNotFoundError, OSError):
+        except Exception:
+            # TimeoutExpired 등 예상 못한 예외까지 포함해 미설치/응답없음으로 취급
             return None
         return res.stdout.strip() if res.exit_code == 0 else None
 
