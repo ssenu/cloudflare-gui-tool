@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>구현 계획 — Cloudflare Tunnel GUI</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #181b24; --panel2: #1f2330; --border: #2a2f3f;
+    --text: #e8eaf0; --muted: #9aa1b5; --accent: #f6821f; --accent2: #4c9aff;
+    --green: #3fb950; --yellow: #d29922;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', 'Malgun Gothic', sans-serif; line-height: 1.7; }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 40px 24px 80px; }
+  header { border-bottom: 2px solid var(--accent); padding-bottom: 24px; margin-bottom: 32px; }
+  header h1 { font-size: 2rem; }
+  header p { color: var(--muted); margin-top: 8px; }
+  h2 { font-size: 1.4rem; margin: 40px 0 16px; padding-left: 12px; border-left: 4px solid var(--accent); }
+  code { background: var(--panel2); padding: 2px 8px; border-radius: 4px; font-family: 'Cascadia Code', Consolas, monospace; font-size: .87em; color: #ffd28e; }
+  .task { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px 26px; margin: 16px 0; }
+  .task h3 { font-size: 1.15rem; margin-bottom: 8px; }
+  .task h3 .num { display: inline-block; background: var(--accent); color: #fff; border-radius: 8px; padding: 0 10px; margin-right: 10px; font-size: .95rem; }
+  .task .files { color: var(--muted); font-size: .9rem; margin-bottom: 8px; }
+  .task ul { padding-left: 22px; margin: 6px 0; }
+  .task .steps { color: var(--muted); font-size: .92rem; margin-top: 8px; }
+  .tag { display: inline-block; padding: 1px 10px; border-radius: 10px; font-size: .78rem; font-weight: 600; margin-left: 8px; vertical-align: middle; }
+  .tag.core { background: rgba(76,154,255,.15); color: var(--accent2); border: 1px solid var(--accent2); }
+  .tag.ui { background: rgba(246,130,31,.15); color: var(--accent); border: 1px solid var(--accent); }
+  .tag.docs { background: rgba(63,185,80,.15); color: var(--green); border: 1px solid var(--green); }
+  .flow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 16px 0; }
+  .flow .step { background: var(--panel2); border: 1px solid var(--accent2); border-radius: 8px; padding: 6px 14px; font-size: .9rem; }
+  .flow .arrow { color: var(--accent); font-weight: bold; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; background: var(--panel); border-radius: 8px; overflow: hidden; }
+  th, td { padding: 9px 14px; text-align: left; border-bottom: 1px solid var(--border); font-size: .93rem; }
+  th { background: var(--panel2); color: var(--accent); }
+  .note { border-left: 3px solid var(--yellow); background: rgba(210,153,34,.08); padding: 10px 16px; border-radius: 0 8px 8px 0; margin: 16px 0; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>🛠️ 구현 계획 — Cloudflare Tunnel GUI</h1>
+  <p>2026-08-10 · 총 14개 태스크 · TDD (테스트 먼저 → 구현 → 커밋) · 상세 코드 리스팅은 동명 <code>.md</code> 파일 참조</p>
+</header>
+
+<h2>개요</h2>
+<div class="task">
+  <p><strong>목표:</strong> cloudflared 터널 생성/목록/on-off/웹서버 실행/SSH 원격 제어를 GUI로 수행하는 PyQt6 데스크톱 앱.</p>
+  <p><strong>아키텍처:</strong> core(비-Qt 순수 파이썬)와 ui(PyQt6)를 분리. UI는 QTimer 폴링으로 core의 상태/로그를 읽음 (크로스스레드 시그널 문제 회피). 로컬 = subprocess, 원격 = paramiko SSH, 동일 <code>CommandRunner</code> 인터페이스.</p>
+  <p><strong>기술:</strong> Python 3.11+ · PyQt6 · PyYAML · paramiko · pytest</p>
+</div>
+
+<h2>전역 제약</h2>
+<ul style="padding-left:24px">
+  <li>모든 cloudflared 명령은 <code>CommandRunner</code> 경유 (UI에서 subprocess 직접 호출 금지)</li>
+  <li>core 모듈은 PyQt6를 import하지 않음</li>
+  <li>설정: <code>%APPDATA%/CloudflareTunnelGUI/settings.json</code> / 터널 config: <code>~/.cloudflared/config-&lt;이름&gt;.yml</code></li>
+  <li>SSH 비밀번호 디스크 저장 금지 · UI 한국어 · 커스텀 QSS 다크 테마</li>
+  <li>단순화 2건: 루트 도메인은 최초 수동 입력 후 기억 / 원격 상태는 SSH 채널 생존으로 판정</li>
+</ul>
+
+<h2>태스크 흐름</h2>
+<div class="flow">
+  <span class="step">1-6 core<br>스토어→러너→yml→래퍼→관리자→SSH</span><span class="arrow">→</span>
+  <span class="step">7-9 기반 UI<br>컨텍스트/테마→온보딩→마법사</span><span class="arrow">→</span>
+  <span class="step">10-13 메인 UI<br>카드→로그→설정→단축키/종료</span><span class="arrow">→</span>
+  <span class="step">14 검증<br>체크리스트+README</span>
+</div>
+
+<h2>태스크 목록</h2>
+
+<div class="task">
+  <h3><span class="num">1</span>프로젝트 스캐폴딩 + 설정 스토어<span class="tag core">core</span></h3>
+  <div class="files">📁 <code>app/core/store.py</code> · <code>tests/test_store.py</code> · pyproject/requirements</div>
+  <ul>
+    <li><code>TunnelMeta</code>(서버 명령·작업 폴더·함께 시작), <code>SshProfile</code>, <code>Settings</code> dataclass</li>
+    <li><code>SettingsStore.load()/save()</code> — %APPDATA% JSON, 사람이 읽을 수 있는 형식</li>
+  </ul>
+  <div class="steps">테스트: 기본값 로드, 저장/로드 왕복</div>
+</div>
+
+<div class="task">
+  <h3><span class="num">2</span>CommandRunner 추상화 + LocalRunner<span class="tag core">core</span></h3>
+  <div class="files">📁 <code>app/core/runner.py</code> · <code>tests/test_runner.py</code></div>
+  <ul>
+    <li><code>run()</code> 단발 실행(RunResult) / <code>spawn()</code> 장기 실행(라인 콜백 + stop)</li>
+    <li>파일 API: read/write/exists/remove/home — 원격(SFTP)과 인터페이스 통일</li>
+    <li>Windows 콘솔창 억제 (<code>CREATE_NO_WINDOW</code>), 스레드로 stdout/stderr 펌핑</li>
+  </ul>
+  <div class="steps">테스트: stdout/stderr/exit code 캡처, 스트리밍, stop, 파일 조작</div>
+</div>
+
+<div class="task">
+  <h3><span class="num">3</span>config.yml 생성/파싱<span class="tag core">core</span></h3>
+  <div class="files">📁 <code>app/core/config_yml.py</code> · <code>tests/test_config_yml.py</code></div>
+  <ul>
+    <li><code>build_config()</code> — tunnel id + credentials + ingress(hostname→service) + 404 fallback</li>
+    <li><code>parse_config() / get_main_ingress() / update_service()</code></li>
+  </ul>
+  <div class="steps">테스트: 왕복 파싱, fallback 존재, 서비스만 교체</div>
+</div>
+
+<div class="task">
+  <h3><span class="num">4</span>cloudflared CLI 래퍼<span class="tag core">core</span></h3>
+  <div class="files">📁 <code>app/core/cloudflared.py</code> · <code>tests/test_cloudflared.py</code></div>
+  <ul>
+    <li><code>list_tunnels</code>(JSON 파싱) · <code>create_tunnel</code>(uuid 파싱) · <code>delete/route_dns</code> · <code>run_args</code></li>
+    <li>실패 시 <code>CloudflaredError</code>(stderr 보존) · 미설치 감지(<code>version() → None</code>)</li>
+  </ul>
+  <div class="steps">테스트: FakeRunner로 CLI 출력 주입 — 파싱/명령 조립/오류 전파 7케이스</div>
+</div>
+
+<div class="task">
+  <h3><span class="num">5</span>상태 추적 + 로그 버퍼 + 프로세스 관리자<span class="tag core">core</span></h3>
+  <div class="files">📁 <code>app/core/process_mgr.py</code> · <code>tests/test_process_mgr.py</code></div>
+  <ul>
+    <li><code>StatusTracker</code>: STOPPED→STARTING→(“Registered tunnel connection” 감지)→RUNNING, 사용자 중지 vs 비정상 종료(ERROR) 구분</li>
+    <li><code>LogBuffer</code>: 2000라인 링버퍼 + 증분 폴링(<code>get_since</code>)</li>
+    <li><code>ProcessManager</code>: 터널/서버 시작·중지·상태·로그, <code>stop_all/any_running</code></li>
+  </ul>
+  <div class="steps">테스트: 상태 전이, 증분 로그, 실프로세스 시작/중지</div>
+</div>
+
+<div class="task">
+  <h3><span class="num">6</span>SshRunner (paramiko)<span class="tag core">core</span></h3>
+  <div class="files">📁 <code>app/core/ssh_runner.py</code> · <code>tests/test_ssh_runner.py</code></div>
+  <ul>
+    <li>키 파일 인증 우선, SFTP로 파일 조작, <code>get_pty</code>로 채널 close 시 원격 프로세스 종료 보장</li>
+    <li>순수 로직(<code>quote_cmd</code>)만 단위 테스트, 실제 SSH는 Task 14 수동 검증</li>
+  </ul>
+</div>
+
+<div class="task">
+  <h3><span class="num">7</span>앱 컨텍스트 + 다크 테마 + 진입점<span class="tag ui">ui</span></h3>
+  <div class="files">📁 <code>app/context.py</code> · <code>app/ui/theme.py</code> · <code>app/main.py</code></div>
+  <ul>
+    <li><code>AppContext</code>: 활성 Runner 보유, <code>set_local()/set_remote(profile)</code> 전환</li>
+    <li>커스텀 QSS 다크 테마 + 상태색 팔레트, <code>python -m app.main</code> 진입점</li>
+  </ul>
+</div>
+
+<div class="task">
+  <h3><span class="num">8</span>온보딩 다이얼로그<span class="tag ui">ui</span></h3>
+  <div class="files">📁 <code>app/ui/onboarding.py</code></div>
+  <ul>
+    <li>① 설치 확인(미설치 시 winget 버튼) → ② 로그인(<code>tunnel login</code>, 브라우저) → cert.pem 2초 폴링으로 자동 감지</li>
+    <li>둘 다 완료 상태면 온보딩 건너뛰고 바로 메인</li>
+  </ul>
+</div>
+
+<div class="task">
+  <h3><span class="num">9</span>터널 생성 마법사<span class="tag core">core</span><span class="tag ui">ui</span></h3>
+  <div class="files">📁 <code>app/core/wizard_logic.py</code> · <code>app/ui/wizard.py</code> · <code>tests/test_wizard_logic.py</code></div>
+  <ul>
+    <li>검증 함수(이름/서브도메인/서비스 URL) + 단계별 명령 미리보기(<code>plan_steps</code>)</li>
+    <li>5단계: 이름 → 도메인(루트 도메인 자동완성) → 서비스 → 서버 명령(선택) → 실행(워커 스레드 + 진행 표시, 실패 시 해당 단계 중단)</li>
+  </ul>
+  <div class="steps">테스트: 검증 규칙, 미리보기 명령 문자열</div>
+</div>
+
+<div class="task">
+  <h3><span class="num">10</span>메인 화면 — 터널 카드 리스트<span class="tag ui">ui</span></h3>
+  <div class="files">📁 <code>app/ui/main_window.py</code></div>
+  <ul>
+    <li>상단: 대상 전환(이 PC/SSH 프로필) · 새로고침 · ＋생성 · ⚙설정</li>
+    <li>카드: 상태등(⚪🟡🟢🔴) · on/off 토글 · 서버 ▶/■ · 로그 · ⋮(편집/삭제)</li>
+    <li><code>tunnel list</code> + settings 메타 병합, 미등록 터널은 config yml에서 복원</li>
+    <li>1초 QTimer로 카드 상태 갱신 · 삭제 시 DNS 수동 정리 안내</li>
+  </ul>
+  <div class="steps">검증: 실제 cloudflared로 생성→켜기(🟢)→끄기→삭제 스모크</div>
+</div>
+
+<div class="task">
+  <h3><span class="num">11</span>실시간 로그 뷰어<span class="tag ui">ui</span></h3>
+  <div class="files">📁 <code>app/ui/log_viewer.py</code></div>
+  <ul>
+    <li>터널/웹서버 2개 탭 · 200ms 증분 폴링 · 오류 라인 빨간 하이라이트 · 자동 스크롤 토글 · 지우기</li>
+  </ul>
+</div>
+
+<div class="task">
+  <h3><span class="num">12</span>편집 다이얼로그 + 설정 화면<span class="tag ui">ui</span></h3>
+  <div class="files">📁 <code>app/ui/edit_dialog.py</code> · <code>app/ui/settings.py</code></div>
+  <ul>
+    <li>편집: 서비스 주소(config yml 동기 수정)/서버 명령/함께 시작</li>
+    <li>설정: SSH 프로필 CRUD + 연결 테스트, cloudflared 경로 재정의</li>
+  </ul>
+</div>
+
+<div class="task">
+  <h3><span class="num">13</span>단축키 + 종료 정리<span class="tag ui">ui</span></h3>
+  <div class="files">📁 <code>app/ui/main_window.py</code> (수정)</div>
+  <ul>
+    <li><code>Ctrl+1~9</code> 터널 토글 · <code>Ctrl+Shift+1~9</code> 서버 토글</li>
+    <li>창 닫기: 실행 중이면 확인 다이얼로그 → <code>stop_all()</code> + SSH 정리</li>
+  </ul>
+</div>
+
+<div class="task">
+  <h3><span class="num">14</span>수동 통합 체크리스트 + README<span class="tag docs">docs</span></h3>
+  <div class="files">📁 <code>docs/manual-test-checklist.md</code> · <code>README.md</code></div>
+  <ul>
+    <li>로컬 15항목 + 원격(Rpi) 5항목 체크리스트를 실제 수행</li>
+  </ul>
+</div>
+
+<p class="note">📄 각 태스크의 <strong>전체 코드와 테스트 코드, 단계별 명령·커밋 메시지</strong>는 동명 md 파일(<code>2026-08-10-cloudflare-tunnel-gui.md</code>)에 있습니다. 이 HTML은 열람용 요약 뷰입니다.</p>
+
+</div>
+</body>
+</html>
