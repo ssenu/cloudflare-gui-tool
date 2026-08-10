@@ -295,7 +295,9 @@ class MainWindow(QWidget):
         viewer.show()
 
     def _open_settings(self):
-        pass  # Task 12
+        from app.ui.settings import SettingsDialog
+        SettingsDialog(self.ctx, self).exec()
+        self._reload_targets()
 
     def _tick(self):
         for c in self.cards:
