@@ -196,7 +196,9 @@ class MainWindow(QWidget):
         except Exception as ex:
             self.banner.setText(f"SSH 연결 실패: {ex}")
             self.banner.show()
+            self.target_combo.blockSignals(True)
             self.target_combo.setCurrentIndex(0)
+            self.target_combo.blockSignals(False)
             self.ctx.set_local()
         finally:
             self.unsetCursor()
