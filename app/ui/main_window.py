@@ -128,6 +128,7 @@ class MainWindow(QWidget):
         super().__init__()
         self.ctx = ctx
         self.cards: list[TunnelCard] = []
+        self._log_viewers: dict[str, "LogViewer"] = {}
         self.setWindowTitle("Cloudflare Tunnel GUI")
         self.resize(780, 580)
 
@@ -282,7 +283,15 @@ class MainWindow(QWidget):
     # ---- 이후 태스크에서 연결 ----
     def _open_log(self, name: str):
         from app.ui.log_viewer import LogViewer
+        if name in self._log_viewers:
+            viewer = self._log_viewers[name]
+            if viewer.isVisible():
+                viewer.raise_()
+                viewer.activateWindow()
+                return
         viewer = LogViewer(self.ctx, name, self)
+        self._log_viewers[name] = viewer
+        viewer.destroyed.connect(lambda *_, n=name: self._log_viewers.pop(n, None))
         viewer.show()
 
     def _open_settings(self):

@@ -3,7 +3,8 @@ from __future__ import annotations
 import html
 import re
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QPlainTextEdit,
                              QPushButton, QTabWidget, QVBoxLayout, QWidget)
 
@@ -58,6 +59,7 @@ class LogViewer(QDialog):
         self.setWindowTitle(f"로그 — {tunnel_name}")
         self.resize(720, 480)
         self.setModal(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
 
         tabs = QTabWidget()
         self.t_tab = _LogTab(ctx.manager.tunnel_log(tunnel_name))
@@ -75,3 +77,7 @@ class LogViewer(QDialog):
     def _poll(self):
         self.t_tab.poll()
         self.s_tab.poll()
+
+    def closeEvent(self, event: QCloseEvent):
+        self._timer.stop()
+        super().closeEvent(event)
