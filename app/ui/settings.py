@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
                              QHBoxLayout, QLineEdit, QListWidget, QMessageBox,
                              QPushButton, QSpinBox, QVBoxLayout)
@@ -70,7 +71,7 @@ class SettingsDialog(QDialog):
         body.addLayout(form, 2)
 
         close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        close.rejected.connect(self._close)
+        close.rejected.connect(self.reject)
 
         root = QVBoxLayout(self)
         root.addLayout(body, 1)
@@ -130,6 +131,7 @@ class SettingsDialog(QDialog):
             del self._profiles()[row]
             self.ctx.store.save()
             self._reload_list()
+            self._add()
 
     def _test(self):
         try:
@@ -144,7 +146,14 @@ class SettingsDialog(QDialog):
         except Exception as ex:
             QMessageBox.critical(self, "연결 테스트", f"❌ 실패: {ex}")
 
-    def _close(self):
+    def _persist_cf_path(self):
         self.ctx.store.settings.cloudflared_path = self.cf_path_edit.text().strip()
         self.ctx.store.save()
-        self.reject()
+
+    def closeEvent(self, event: QCloseEvent):
+        self._persist_cf_path()
+        super().closeEvent(event)
+
+    def reject(self):
+        self._persist_cf_path()
+        super().reject()

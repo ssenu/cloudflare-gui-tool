@@ -48,8 +48,12 @@ class EditTunnelDialog(QDialog):
         if service != self.meta.service:
             path = self.ctx.client.config_path(self.meta.name)
             if self.ctx.runner.file_exists(path):
-                text = self.ctx.runner.read_file(path)
-                self.ctx.runner.write_file(path, update_service(text, service))
+                try:
+                    text = self.ctx.runner.read_file(path)
+                    self.ctx.runner.write_file(path, update_service(text, service))
+                except Exception as ex:
+                    QMessageBox.critical(self, "저장 실패", str(ex))
+                    return
         self.meta.service = service
         self.meta.server_cmd = self.cmd_edit.text().strip()
         self.meta.server_cwd = self.cwd_edit.text().strip()
