@@ -57,7 +57,11 @@ class CloudflaredClient:
 
     def list_tunnels(self) -> list[TunnelInfo]:
         res = self._run(["tunnel", "list", "--output", "json"])
-        data = json.loads(res.stdout or "[]")
+        try:
+            data = json.loads(res.stdout or "[]")
+        except json.JSONDecodeError:
+            raise CloudflaredError(RunResult(1, res.stdout,
+                                             "터널 목록 JSON 파싱 실패"))
         return [TunnelInfo(id=t["id"], name=t["name"],
                            created_at=t.get("created_at", ""),
                            connections=len(t.get("connections") or []))

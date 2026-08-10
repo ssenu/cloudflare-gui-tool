@@ -80,3 +80,9 @@ def test_route_dns_builds_command():
     CloudflaredClient(r).route_dns("mysite", "mysite.example.com")
     assert r.calls[-1] == ["cloudflared", "tunnel", "route", "dns",
                           "mysite", "mysite.example.com"]
+
+
+def test_list_tunnels_invalid_json_raises_cloudflared_error():
+    r = FakeRunner({"tunnel list": RunResult(0, "not-json!!", "")})
+    with pytest.raises(CloudflaredError, match="JSON 파싱 실패"):
+        CloudflaredClient(r).list_tunnels()
