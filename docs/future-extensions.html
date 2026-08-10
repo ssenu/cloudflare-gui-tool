@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>확장 방안 — Cloudflare Tunnel GUI</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #181b24; --panel2: #1f2330; --border: #2a2f3f;
+    --text: #e8eaf0; --muted: #9aa1b5; --accent: #f6821f; --accent2: #4c9aff;
+    --green: #3fb950; --yellow: #d29922;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', 'Malgun Gothic', sans-serif; line-height: 1.7; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 40px 24px 80px; }
+  header { border-bottom: 2px solid var(--accent); padding-bottom: 24px; margin-bottom: 32px; }
+  header h1 { font-size: 2rem; }
+  header p { color: var(--muted); margin-top: 8px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 24px 28px; margin: 20px 0; }
+  .card h2 { font-size: 1.25rem; margin-bottom: 4px; }
+  .tags { margin: 8px 0 14px; }
+  .tag { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: .8rem; font-weight: 600; margin-right: 6px; }
+  .tag.easy { background: rgba(63,185,80,.15); color: var(--green); border: 1px solid var(--green); }
+  .tag.mid { background: rgba(210,153,34,.15); color: var(--yellow); border: 1px solid var(--yellow); }
+  .tag.api { background: rgba(76,154,255,.15); color: var(--accent2); border: 1px solid var(--accent2); }
+  .card h3 { font-size: .95rem; color: var(--accent); margin: 14px 0 4px; }
+  code { background: var(--panel2); padding: 2px 8px; border-radius: 4px; font-family: 'Cascadia Code', Consolas, monospace; font-size: .88em; color: #ffd28e; }
+  ul { padding-left: 22px; margin: 8px 0; }
+  .note { border-left: 3px solid var(--yellow); background: rgba(210,153,34,.08); padding: 8px 14px; border-radius: 0 8px 8px 0; margin-top: 12px; color: var(--muted); font-size: .92rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>🧭 확장 방안</h1>
+  <p>1차 버전에서 제외했지만 나중에 추가할 수 있는 Cloudflare 기능들. 각 항목은 필요해지면 별도 스펙으로 발전시킨다.</p>
+</header>
+
+<div class="card">
+  <h2>1. Quick Tunnel (임시 URL)</h2>
+  <div class="tags"><span class="tag easy">난이도 낮음</span></div>
+  <h3>무엇</h3>
+  <p>로그인·설정 없이 <code>cloudflared tunnel --url http://localhost:8000</code> 한 번으로 임시 <code>*.trycloudflare.com</code> URL을 발급받는 기능.</p>
+  <h3>언제 유용한가</h3>
+  <p>개발 중인 서비스를 몇 분만 외부에 보여줄 때. 도메인/DNS 설정이 전혀 필요 없음.</p>
+  <h3>구현 방안</h3>
+  <p>메인 화면에 "빠른 공유" 버튼 → 포트만 입력 → 실행 → stdout에서 발급 URL 파싱해 표시 + 클립보드 복사. 프로세스 관리는 기존 process_mgr 재사용.</p>
+  <p class="note">⚠ URL이 매번 바뀌고, Cloudflare가 안정성을 보장하지 않음 (프로덕션 부적합).</p>
+</div>
+
+<div class="card">
+  <h2>2. Cloudflare Access (Zero Trust 접근 보호)</h2>
+  <div class="tags"><span class="tag mid">난이도 중간</span><span class="tag api">API 토큰 필요</span></div>
+  <h3>무엇</h3>
+  <p>터널로 연 사이트에 이메일 OTP, Google 로그인 등 인증 관문을 걸어 아무나 접근하지 못하게 하는 기능.</p>
+  <h3>언제 유용한가</h3>
+  <p>관리자 페이지, 개인 대시보드, SSH 웹 터미널 등 본인만 쓰는 서비스를 외부에 열 때 사실상 필수적인 보안 계층.</p>
+  <h3>구현 방안</h3>
+  <p>Cloudflare API 토큰(Access: Apps and Policies 권한) 등록 → 터널 카드에 "보호 설정" 버튼 → Access Application + Policy(허용 이메일 목록)를 API로 생성. API 스코프 관리와 UI가 커져서 난이도 중간.</p>
+</div>
+
+<div class="card">
+  <h2>3. DNS 레코드 조회/정리</h2>
+  <div class="tags"><span class="tag easy">난이도 낮음~중간</span><span class="tag api">API 토큰 필요</span></div>
+  <h3>무엇</h3>
+  <p><code>route dns</code>로 생긴 CNAME 레코드를 GUI에서 확인하고, 터널 삭제 시 남은 레코드를 함께 정리하는 기능.</p>
+  <h3>언제 유용한가</h3>
+  <p>터널을 만들고 지우다 보면 대시보드에 죽은 CNAME이 쌓이는데, 현재 cloudflared CLI로는 DNS 레코드 삭제가 불가능해 수동 정리해야 함.</p>
+  <h3>구현 방안</h3>
+  <p>Cloudflare API 토큰(Zone: DNS Edit 권한) 등록 → 존 레코드 조회 → 터널 ID(<code>&lt;uuid&gt;.cfargotunnel.com</code>)를 가리키는 CNAME 필터링 → 터널 삭제 플로우에 "DNS 레코드도 삭제" 체크박스 추가.</p>
+</div>
+
+<div class="card">
+  <h2>4. 기타 아이디어 메모</h2>
+  <ul>
+    <li><strong>Windows 서비스 모드</strong>: GUI 없이 부팅 시 터널 자동 시작 (<code>cloudflared service install</code>). 현재는 GUI 프로세스 관리 방식이라 GUI 종료 시 터널도 꺼짐.</li>
+    <li><strong>트레이 아이콘</strong>: 창을 닫아도 트레이에 상주하며 터널 유지, 우클릭 메뉴로 on/off.</li>
+    <li><strong>메트릭 대시보드</strong>: cloudflared <code>--metrics</code> 엔드포인트로 요청 수/지연시간 그래프 표시.</li>
+    <li><strong>여러 원격 머신 동시 모니터링</strong>: 현재는 한 번에 하나의 대상만 전환. 모든 머신의 터널 상태를 한 화면에 요약하는 뷰.</li>
+  </ul>
+</div>
+
+</div>
+</body>
+</html>
