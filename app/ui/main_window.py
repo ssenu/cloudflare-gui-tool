@@ -281,7 +281,9 @@ class MainWindow(QWidget):
 
     # ---- 이후 태스크에서 연결 ----
     def _open_log(self, name: str):
-        pass  # Task 11
+        from app.ui.log_viewer import LogViewer
+        viewer = LogViewer(self.ctx, name, self)
+        viewer.show()
 
     def _open_settings(self):
         pass  # Task 12
