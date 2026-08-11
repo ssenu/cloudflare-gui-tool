@@ -25,4 +25,11 @@ python -m app.main
 pytest
 ```
 
+## 실행 파일(.exe) 빌드
+```bash
+pip install pyinstaller
+pyinstaller --noconfirm --onefile --windowed --name "Cloudflare Tunnel GUI" --icon assets/cloudflare_logo.ico --add-data "assets;assets" app/main.py
+```
+결과물은 `dist\Cloudflare Tunnel GUI.exe`에 생성된다(단일 실행 파일, 콘솔 창 없음). 저장소에 커밋된 `Cloudflare Tunnel GUI.spec`으로 같은 옵션을 재현할 수 있다(`pyinstaller "Cloudflare Tunnel GUI.spec"`).
+
 문서: `docs/superpowers/specs/`(스펙), `docs/manual-test-checklist.md`(수동 테스트 체크리스트), `docs/future-extensions.md`(확장 방안)

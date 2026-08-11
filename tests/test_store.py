@@ -548,6 +548,50 @@ def test_tunnels_for_missing_target_returns_and_registers_empty_dict(tmp_path):
     assert store.settings.targets["ssh:new"] is result
 
 
+# ---- 라우트 이름(label) ----
+
+def test_route_label_roundtrips(tmp_path):
+    """RouteMeta.label이 저장/로드 왕복 후에도 유지된다."""
+    path = str(tmp_path / "settings.json")
+    store = SettingsStore(path=path)
+    store.load()
+    store.settings.tunnels_for("local")["mysite"] = TunnelMeta(
+        name="mysite",
+        routes=[RouteMeta(id=new_route_id(), hostname="app.example.com",
+                          service="http://localhost:8000", label="My App")],
+    )
+    store.save()
+
+    loaded = SettingsStore(path=path).load()
+    assert loaded.tunnels_for("local")["mysite"].routes[0].label == "My App"
+
+
+def test_route_label_missing_in_old_file_defaults_to_empty(tmp_path):
+    """label 키가 없는(구버전) settings.json도 문제없이 로드되고 빈 문자열로 채워진다."""
+    path = str(tmp_path / "settings.json")
+    v2_json = {
+        "root_domain": "",
+        "cloudflared_path": "",
+        "tunnels": {
+            "t": {
+                "name": "t",
+                "routes": [
+                    {"id": "aaaa1111", "hostname": "h.example.com",
+                     "service": "http://localhost:8000"},
+                ],
+            }
+        },
+        "ssh_profiles": [],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(v2_json, f)
+
+    store = SettingsStore(path=path)
+    s = store.load()
+    route = s.tunnels_for("local")["t"].routes[0]
+    assert route.label == ""
+
+
 def test_nested_targets_format_roundtrips(tmp_path):
     """이미 targets 형식인 파일은 그대로 로드/저장되며 재작성 트리거가 없다."""
     path = str(tmp_path / "settings.json")

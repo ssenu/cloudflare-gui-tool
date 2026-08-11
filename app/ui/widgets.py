@@ -249,6 +249,10 @@ class ModalOverlay(QWidget):
             self._center_content()
         return False
 
+    # 내용 위젯이 부모보다 커지지 않도록 제한하는 비율. GuideDialog(1040x780)
+    # 처럼 큰 다이얼로그가 작은 창 안에서 화면 밖으로 넘치는 것을 막는다.
+    MAX_CONTENT_RATIO = 0.9
+
     def _center_content(self) -> None:
         # 부모 rect를 기준으로 계산한다 - 부모가 아직 표시되기 전이면 self의
         # geometry가 아직 반영되지 않은 경우가 있다.
@@ -257,6 +261,10 @@ class ModalOverlay(QWidget):
         if self.geometry() != area:
             self.setGeometry(area)
         c = self._content
+        max_w = int(area.width() * self.MAX_CONTENT_RATIO)
+        max_h = int(area.height() * self.MAX_CONTENT_RATIO)
+        if max_w > 0 and max_h > 0 and (c.width() > max_w or c.height() > max_h):
+            c.resize(min(c.width(), max_w), min(c.height(), max_h))
         c.move(max(0, (area.width() - c.width()) // 2),
                max(0, (area.height() - c.height()) // 2))
 

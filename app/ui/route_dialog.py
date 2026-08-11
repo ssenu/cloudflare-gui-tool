@@ -50,6 +50,10 @@ class RouteDialog(QDialog):
         palette = current_palette(ctx.store.settings.theme)
         icon_color = palette["text"]
 
+        self.label_edit = QLineEdit(route.label if route else "")
+        self.label_edit.setPlaceholderText(
+            "비우면 hostname의 첫 라벨을 사용합니다 (예: app.example.com → app)")
+
         default_domain = ctx.store.settings.root_domain
         sub, domain = _split_hostname(route.hostname if route else "", default_domain)
         self.sub_edit = QLineEdit(sub)
@@ -85,6 +89,7 @@ class RouteDialog(QDialog):
         self.err_label.setWordWrap(True)
 
         form = QFormLayout()
+        form.addRow("이름", self.label_edit)
         form.addRow("서브도메인", self.sub_edit)
         form.addRow("루트 도메인", self.domain_edit)
         form.addRow("로컬 서비스 주소", self.service_edit)
@@ -145,6 +150,7 @@ class RouteDialog(QDialog):
 
         hostname = f"{self.sub_edit.text().strip()}.{self.domain_edit.text().strip()}"
         service = self.service_edit.text().strip()
+        label = self.label_edit.text().strip()
         kind = self.kind_combo.currentData()
         start_cmd = self.start_cmd_edit.text().strip()
         stop_cmd = self.stop_cmd_edit.text().strip()
@@ -228,7 +234,7 @@ class RouteDialog(QDialog):
 
         if is_new:
             route = RouteMeta(
-                id=new_route_id(), hostname=hostname, service=service,
+                id=new_route_id(), hostname=hostname, service=service, label=label,
                 server=ServiceSpec(kind=kind, start_cmd=start_cmd, stop_cmd=stop_cmd,
                                    cwd=cwd, autostart=autostart))
             self.tunnel.routes.append(route)
@@ -236,6 +242,7 @@ class RouteDialog(QDialog):
         else:
             self.route.hostname = hostname
             self.route.service = service
+            self.route.label = label
             self.route.server.kind = kind
             self.route.server.start_cmd = start_cmd
             self.route.server.stop_cmd = stop_cmd

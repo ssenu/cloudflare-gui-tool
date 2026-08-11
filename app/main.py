@@ -1,12 +1,27 @@
 from __future__ import annotations
 
+import os
 import sys
 import traceback
 
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
 from app.context import AppContext
 from app.ui.theme import build_qss, ensure_qss_icons
+
+
+def resource_path(relative_path: str) -> str:
+    """개발 실행과 PyInstaller 번들 양쪽에서 동작하는 리소스 경로 헬퍼.
+
+    PyInstaller --onefile로 빌드하면 실행 시 임시 폴더에 압축을 풀고 그
+    경로를 sys._MEIPASS에 넣어준다. 그 속성이 없으면(개발 중 직접 실행)
+    저장소 루트를 기준으로 찾는다.
+    """
+    base_path = getattr(sys, "_MEIPASS", None)
+    if base_path is None:
+        base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
 
 
 def _install_excepthook() -> None:
@@ -27,6 +42,9 @@ def main() -> int:
     _install_excepthook()
     app = QApplication(sys.argv)
     app.setApplicationName("Cloudflare Tunnel GUI")
+    icon_path = resource_path("assets/cloudflare_logo.ico")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
     ctx = AppContext()
     app.setStyleSheet(build_qss(ctx.store.settings.theme, ensure_qss_icons(ctx.store.settings.theme)))
     from app.ui.onboarding import OnboardingDialog, needs_onboarding

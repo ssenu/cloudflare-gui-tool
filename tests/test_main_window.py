@@ -145,10 +145,10 @@ def test_delete_route_rolls_back_when_config_write_fails(qapp, tmp_path, monkeyp
     def boom_write(path, text):
         raise OSError("디스크 가득 참")
     monkeypatch.setattr(runner, "write_file", boom_write)
-    monkeypatch.setattr(MainWindow, "_confirm_delete", lambda self, *a, **k: True)
     monkeypatch.setattr("app.ui.main_window.QMessageBox.warning", staticmethod(lambda *a, **k: None))
 
-    win._delete_route(card, route)
+    # 확인 다이얼로그는 이미 수락된 것으로 보고, 실제 삭제 로직만 검증한다.
+    win._do_delete_route(card, route)
 
     # config 쓰기가 실패했으므로 라우트가 여전히 남아있어야 한다 (고아 방지)
     assert len(ctx.store.settings.tunnels_for(ctx.runner.name)["t1"].routes) == 1
@@ -157,49 +157,37 @@ def test_delete_route_rolls_back_when_config_write_fails(qapp, tmp_path, monkeyp
 
 # ---- 2-d: 삭제 확인 다이얼로그의 대시보드 버튼 ----
 
-def test_confirm_delete_dashboard_button_opens_browser_and_reasks(qapp, tmp_path, monkeypatch):
+def test_confirm_delete_dashboard_button_opens_browser_without_closing(qapp, tmp_path, monkeypatch):
+    from app.ui.confirm_dialogs import ConfirmDeleteDialog
+
     win = make_window(qapp, tmp_path)
     opened = []
-    monkeypatch.setattr("app.ui.main_window.webbrowser.open", lambda url: opened.append(url))
+    monkeypatch.setattr("app.ui.confirm_dialogs.webbrowser.open", lambda url: opened.append(url))
 
-    from PyQt6.QtWidgets import QMessageBox as RealQMessageBox
-
-    class FakeMsg:
-        call_count = 0
-
-        def __init__(self, parent=None):
-            FakeMsg.call_count += 1
-            self._instance_call = FakeMsg.call_count
-            self.buttons = {}
-
-        def setWindowTitle(self, t):
-            pass
-
-        def setText(self, t):
-            self.text = t
-
-        def addButton(self, label, role):
-            btn = object()
-            self.buttons[label] = btn
-            return btn
-
-        def exec(self):
-            pass
-
-        def clickedButton(self):
-            # 1번째 호출: 대시보드 버튼, 2번째(재귀 재질문): 삭제 버튼
-            if self._instance_call == 1:
-                return self.buttons["Cloudflare 대시보드 열기"]
-            return self.buttons["삭제"]
-
-    FakeMsg.ButtonRole = RealQMessageBox.ButtonRole
-    monkeypatch.setattr("app.ui.main_window.QMessageBox", FakeMsg)
-
-    result = win._confirm_delete("제목", "본문", ["a.example.com"])
+    dlg = ConfirmDeleteDialog(win.ctx, "제목", "본문", ["a.example.com"], win)
+    finished_calls = []
+    dlg.finished.connect(lambda r: finished_calls.append(r))
+    dlg._open_dashboard()
 
     assert opened == ["https://dash.cloudflare.com"]
-    assert result is True
-    assert FakeMsg.call_count == 2  # 대시보드 클릭 후 다시 물어봄
+    assert finished_calls == []  # 대시보드 클릭만으로는 accept/reject가 일어나지 않는다
+
+
+def test_tunnel_delete_dialog_requires_exact_name_match(qapp, tmp_path):
+    from app.ui.confirm_dialogs import TunnelDeleteDialog
+
+    win = make_window(qapp, tmp_path)
+    dlg = TunnelDeleteDialog(win.ctx, "mysite", ["a.example.com"], win)
+
+    assert not dlg.confirm_btn.isEnabled()
+    dlg.name_edit.setText("wrong")
+    assert not dlg.confirm_btn.isEnabled()
+    dlg.name_edit.setText("mysite")
+    assert dlg.confirm_btn.isEnabled()
+    dlg.name_edit.setText("  mysite  ")
+    assert dlg.confirm_btn.isEnabled()
+    dlg.name_edit.setText("MySite")
+    assert not dlg.confirm_btn.isEnabled()  # 대소문자 구분
 
 
 # ---- B1: 대상별로 분리된 설정을 카드가 사용하는지 ----

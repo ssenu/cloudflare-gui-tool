@@ -21,6 +21,7 @@ class RouteMeta:
     hostname: str = ""           # mysite.example.com
     service: str = ""            # http://localhost:8000
     server: ServiceSpec = field(default_factory=ServiceSpec)
+    label: str = ""              # 사용자가 붙인 이름(선택). 비우면 hostname 첫 라벨을 대신 표시
 
 
 @dataclass

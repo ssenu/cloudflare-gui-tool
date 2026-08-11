@@ -131,6 +131,9 @@ class TunnelWizard(QDialog):
         self.domain_edit = QLineEdit(s.root_domain)
         self.domain_edit.setPlaceholderText("예: example.com")
         self.service_edit = QLineEdit("http://localhost:8000")
+        self.label_edit = QLineEdit()
+        self.label_edit.setPlaceholderText(
+            "비우면 hostname의 첫 라벨을 사용합니다 (예: app.example.com → app)")
 
         self.kind_combo = QComboBox()
         for value, label in KIND_LABELS:
@@ -174,7 +177,8 @@ class TunnelWizard(QDialog):
             self._hint("웹서버가 실제로 듣고 있는 주소입니다. 로컬 구간은 http로 "
                        "충분하고, 외부 HTTPS는 Cloudflare가 처리합니다."),
             self._hint("예: http://localhost:8000 (uvicorn), :5173 (Vite), :3000 (Next.js)"),
-            self.service_edit))
+            self.service_edit,
+            QLabel("이름 (선택)"), self.label_edit))
         self.pages.append(self._page(
             "4. 웹서버 실행 명령 (선택)",
             self._hint("등록해 두면 카드에서 터널과 함께 켤 수 있습니다. 비워 두면 "
@@ -454,6 +458,7 @@ class TunnelWizard(QDialog):
                 _, name, hostname, service = ev
                 route = RouteMeta(
                     id=new_route_id(), hostname=hostname, service=service,
+                    label=self.label_edit.text().strip(),
                     server=ServiceSpec(
                         kind=self.kind_combo.currentData(),
                         start_cmd=self.cmd_edit.text().strip(),

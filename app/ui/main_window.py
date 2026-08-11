@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-import webbrowser
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction
@@ -13,6 +12,7 @@ from app.context import AppContext
 from app.core.cloudflared import CloudflaredError
 from app.core.config_yml import get_routes, parse_config, set_routes
 from app.core.process_mgr import TunnelState
+from app.core.confirm import route_display_label
 from app.core.store import RouteMeta, SshProfile, TunnelMeta, new_route_id
 from app.ui.icons import make_icon
 from app.ui.theme import STATE_COLORS, build_qss, current_palette, ensure_qss_icons
@@ -54,9 +54,25 @@ def _toggle_label(text: str, palette: dict) -> QLabel:
 ROUTE_DOT_SIZE = 8  # 터널 동그라미(12px)보다 작게: 라우트가 하위임을 크기로 표현
 ROUTE_DOT_MUTED = "muted"  # 서비스 미등록 라우트의 "해당 없음" 색은 팔레트 muted 사용
 
+# I5: 이름/도메인/서비스 열을 고정 폭으로 잡아 여러 행에서 세로 정렬이
+# 유지되게 한다. 서비스 열은 나머지 공간을 채운다(Expanding).
+ROUTE_NAME_COL_WIDTH = 120
+ROUTE_DOMAIN_COL_WIDTH = 220
+ROUTE_SERVICE_COL_WIDTH = 220  # 텍스트 elide 계산용 목표 폭(실제 폭은 Expanding)
+
+
+def _route_vline(palette: dict) -> QFrame:
+    """열 사이의 옅은 세로 구분선. border 색이지만 행 높이보다 짧게 잡아 은은하게 보이게 한다."""
+    line = QFrame()
+    line.setFrameShape(QFrame.Shape.VLine)
+    line.setFixedWidth(1)
+    line.setFixedHeight(14)
+    line.setStyleSheet(f"background: {palette['border']}; border: none;")
+    return line
+
 
 class RouteRow(QWidget):
-    """라우트 한 줄: 상태 동그라미, hostname → 서비스 주소, 서버 토글(또는 등록 버튼), 메뉴."""
+    """라우트 한 줄: 상태 동그라미, 이름/도메인/서비스 3열, 서버 토글(또는 등록 버튼), 메뉴."""
 
     def __init__(self, card: "TunnelCard", route: RouteMeta):
         super().__init__(card)
@@ -69,15 +85,33 @@ class RouteRow(QWidget):
         self.dot = QLabel()
         self.dot.setFixedSize(ROUTE_DOT_SIZE, ROUTE_DOT_SIZE)
 
+        # I4/I5: 이름 열 - 비어 있으면 hostname의 첫 라벨을 muted 색으로 대신 보여준다.
+        label_text, is_placeholder = route_display_label(route.label, route.hostname)
+        self.name_label = QLabel()
+        self.name_label.setFixedWidth(ROUTE_NAME_COL_WIDTH)
+        name_metrics = self.name_label.fontMetrics()
+        self.name_label.setText(_elide(label_text or "-", name_metrics,
+                                       ROUTE_NAME_COL_WIDTH - 8))
+        self.name_label.setToolTip(label_text or "(이름 없음)")
+        if is_placeholder:
+            self.name_label.setStyleSheet(f"color: {palette['muted']};")
+
         hostname = route.hostname or "(hostname 미설정)"
+        self.domain_label = QLabel()
+        self.domain_label.setFixedWidth(ROUTE_DOMAIN_COL_WIDTH)
+        domain_metrics = self.domain_label.fontMetrics()
+        self.domain_label.setText(_elide(hostname, domain_metrics,
+                                         ROUTE_DOMAIN_COL_WIDTH - 8))
+        self.domain_label.setToolTip(hostname)
+
         service = route.service or "(서비스 미설정)"
-        full_text = f"{hostname}  →  {service}"
-        self.text_label = QLabel()
-        metrics = self.text_label.fontMetrics()
-        self.text_label.setText(_elide(full_text, metrics, 320))
-        self.text_label.setToolTip(full_text)
-        self.text_label.setSizePolicy(QSizePolicy.Policy.Expanding,
-                                      QSizePolicy.Policy.Preferred)
+        self.service_label = QLabel()
+        service_metrics = self.service_label.fontMetrics()
+        self.service_label.setText(_elide(service, service_metrics,
+                                          ROUTE_SERVICE_COL_WIDTH))
+        self.service_label.setToolTip(service)
+        self.service_label.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                         QSizePolicy.Policy.Preferred)
 
         # I12: 도커는 start_cmd가 비어 있어도(기본값 폴백) 서버로 취급해야
         # 토글이 사라지지 않는다.
@@ -104,7 +138,11 @@ class RouteRow(QWidget):
         lay.setContentsMargins(0, 1, 0, 1)
         lay.setSpacing(6)
         lay.addWidget(self.dot)
-        lay.addWidget(self.text_label, 1)
+        lay.addWidget(self.name_label)
+        lay.addWidget(_route_vline(palette))
+        lay.addWidget(self.domain_label)
+        lay.addWidget(_route_vline(palette))
+        lay.addWidget(self.service_label, 1)
         lay.addWidget(toggle_label)
         lay.addWidget(self.spinner)
         lay.addWidget(self.server_switch if self.server_switch else self.register_btn)
@@ -214,13 +252,13 @@ class TunnelCard(QFrame):
         self.spinner = Spinner(palette)
         self.spinner.hide()
         log_btn = QPushButton("로그")
-        log_btn.setIcon(make_icon("log", icon_color))
+        # I1: 로그 버튼은 아이콘 없이 텍스트만 (사용자가 "이모지"라 부르는 그림 아이콘 제거)
         log_btn.setToolTip("터널과 모든 라우트의 로그를 탭으로 봅니다")
         log_btn.clicked.connect(lambda: win._open_log_tunnel(self))
-        menu_btn = QPushButton()
-        menu_btn.setIcon(make_icon("dots", icon_color))
-        menu_btn.setFixedWidth(34)
-        menu_btn.clicked.connect(lambda: self._tunnel_menu(menu_btn))
+        delete_btn = QPushButton("삭제")
+        delete_btn.setObjectName("danger")
+        delete_btn.setToolTip("터널 삭제")
+        delete_btn.clicked.connect(lambda: win._delete_tunnel(self))
 
         header = QHBoxLayout()
         header.addWidget(self.dot)
@@ -231,7 +269,7 @@ class TunnelCard(QFrame):
         header.addWidget(self.spinner)
         header.addWidget(self.tunnel_switch)
         header.addWidget(log_btn)
-        header.addWidget(menu_btn)
+        header.addWidget(delete_btn)
 
         # I3: 터널(상위)과 라우트(하위) 목록을 시각적으로 구분하는 얇은 구분선.
         separator = QFrame()
@@ -288,16 +326,6 @@ class TunnelCard(QFrame):
             QMessageBox.critical(self, "오류", str(ex))
         self.win.info_banner.hide()
         self.update_state()
-
-    def _tunnel_menu(self, anchor: QPushButton):
-        palette = current_palette(self.win.ctx.store.settings.theme)
-        m = QMenu(self)
-        add_route_action = QAction("라우트 추가", m)
-        add_route_action.triggered.connect(lambda: self.win._add_route(self))
-        m.addAction(add_route_action)
-        m.addSeparator()
-        danger_menu_action(m, "터널 삭제", palette, lambda: self.win._delete_tunnel(self))
-        m.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
     # ---- 표시 갱신 ----
     def update_state(self):
@@ -359,7 +387,7 @@ class MainWindow(QWidget):
         self.add_btn.setIcon(make_icon("plus", palette["on_accent"]))
         self.add_btn.setObjectName("primary")
         self.settings_btn = QPushButton("설정")
-        self.settings_btn.setIcon(make_icon("gear", icon_color))
+        # I1: 설정 버튼은 아이콘 없이 텍스트만
         self.help_btn = QPushButton("?")
         self.help_btn.setFixedSize(34, 34)
         self.help_btn.setToolTip("사용 흐름 안내")
@@ -394,11 +422,17 @@ class MainWindow(QWidget):
         self._style_info_banner()
         self.info_banner.hide()
 
+        # I7: 좌측 하단 서명. 스크롤 영역 밖(카드 목록과 별개)에 두어 스크롤과
+        # 무관하게 항상 보이게 하고, 세로 공간을 거의 차지하지 않게 작게 둔다.
+        self.signature_label = QLabel("by_ ssenu")
+        self._style_signature()
+
         root = QVBoxLayout(self)
         root.addLayout(top)
         root.addWidget(self.banner)
         root.addWidget(self.info_banner)
         root.addWidget(scroll, 1)
+        root.addWidget(self.signature_label)
 
         # C1: 폴링 실패 연속 횟수와 백오프 활성 여부. _tick()에서 관리한다.
         # refresh()가 배너를 함부로 덮어쓰지 않으려면(연결 오류 배너 보호)
@@ -433,6 +467,10 @@ class MainWindow(QWidget):
         self.info_banner.setStyleSheet(
             f"background:{p['panel2']};color:{p['accent2']};"
             f"padding:6px;border-radius:6px;border:1px solid {p['border']};")
+
+    def _style_signature(self):
+        p = current_palette(self.ctx.store.settings.theme)
+        self.signature_label.setStyleSheet(f"color: {p['muted']}; font-size: 11px;")
 
     # ---- 실행 여부 확인 ----
     def _any_running(self) -> bool:
@@ -487,12 +525,18 @@ class MainWindow(QWidget):
             self.target_combo.setCurrentIndex(self._index_for_current_target() or 0)
             self.target_combo.blockSignals(False)
             from app.ui.ssh_manager import SshManagerDialog
-            SshManagerDialog(self.ctx, self).exec()
-            self._reload_targets()
-            # B3/I: 프로필 삭제로 _reload_targets()가 로컬로 폴백했을 수 있다.
-            # 러너만 로컬로 바뀌고 카드 목록은 이전 대상 것이 남는 것을
-            # 막기 위해 항상 refresh()한다(대상이 안 바뀌어도 비용은 미미함).
-            self.refresh()
+            dlg = SshManagerDialog(self.ctx, self)
+
+            def _on_finished(_result):
+                self._reload_targets()
+                # B3/I: 프로필 삭제로 _reload_targets()가 로컬로 폴백했을 수
+                # 있다. 러너만 로컬로 바뀌고 카드 목록은 이전 대상 것이 남는
+                # 것을 막기 위해 항상 refresh()한다(대상이 안 바뀌어도 비용은
+                # 미미함).
+                self.refresh()
+
+            dlg.finished.connect(_on_finished)
+            self._open_modal(dlg)
             return
 
         if self._any_running():
@@ -602,36 +646,6 @@ class MainWindow(QWidget):
             pass
         return meta
 
-    # ---- 삭제 확인(공용) ----
-    def _confirm_delete(self, title: str, body_prefix: str,
-                        hostnames: list[str]) -> bool:
-        """삭제될 hostname 목록과 DNS 잔존 안내를 보여주는 확인 다이얼로그.
-
-        "Cloudflare 대시보드 열기" 버튼은 브라우저만 열고(다른 동작 없음)
-        같은 확인 다이얼로그를 다시 띄운다 - 사용자가 대시보드를 확인한 뒤
-        삭제 여부를 마저 결정할 수 있게 하기 위함이다.
-        """
-        names = "\n".join(f"- {h}" for h in hostnames) if hostnames \
-            else "- (hostname 미설정)"
-        while True:
-            msg = QMessageBox(self)
-            msg.setWindowTitle(title)
-            msg.setText(
-                f"{body_prefix}\n\n"
-                f"다음 주소의 DNS 레코드는 Cloudflare에 그대로 남습니다:\n{names}\n\n"
-                "나중에 같은 주소를 다시 쓰려면 대시보드에서 지우거나, 다시 "
-                "연결할 때 덮어쓰기를 선택하세요.")
-            yes_btn = msg.addButton("삭제", QMessageBox.ButtonRole.YesRole)
-            msg.addButton("취소", QMessageBox.ButtonRole.NoRole)
-            dash_btn = msg.addButton("Cloudflare 대시보드 열기",
-                                     QMessageBox.ButtonRole.ActionRole)
-            msg.exec()
-            clicked = msg.clickedButton()
-            if clicked is not dash_btn:
-                return clicked is yes_btn
-            # 대시보드는 브라우저만 열고, 확인 다이얼로그를 다시 띄운다.
-            webbrowser.open("https://dash.cloudflare.com")
-
     # ---- 모달 오버레이(별도 창 대신 메인 창 안에 겹쳐 띄우기) ----
     def _open_modal(self, dialog):
         """QDialog를 별도 OS 창 대신 메인 창 위 오버레이로 임베드한다.
@@ -664,15 +678,18 @@ class MainWindow(QWidget):
     def _delete_tunnel(self, card: TunnelCard):
         name = card.tunnel_name
         hostnames = [r.hostname for r in card.meta.routes if r.hostname]
-        ok = self._confirm_delete(
-            "터널 삭제",
-            f"'{name}' 터널을 삭제할까요?\n"
-            "- 실행 중인 터널과 모든 라우트의 서버가 중지됩니다\n"
-            "- config 파일이 삭제됩니다",
-            hostnames)
-        if not ok:
-            return
+        from app.ui.confirm_dialogs import TunnelDeleteDialog
+        dlg = TunnelDeleteDialog(self.ctx, name, hostnames, self)
 
+        def _on_finished(result):
+            if result == dlg.DialogCode.Accepted:
+                self._do_delete_tunnel(card)
+
+        dlg.finished.connect(_on_finished)
+        self._open_modal(dlg)
+
+    def _do_delete_tunnel(self, card: TunnelCard):
+        name = card.tunnel_name
         for route in card.meta.routes:
             try:
                 self.ctx.manager.stop_service(name, route)
@@ -749,14 +766,21 @@ class MainWindow(QWidget):
         self._open_modal(dlg)
 
     def _delete_route(self, card: TunnelCard, route: RouteMeta):
-        ok = self._confirm_delete(
-            "라우트 삭제",
+        from app.ui.confirm_dialogs import ConfirmDeleteDialog
+        dlg = ConfirmDeleteDialog(
+            self.ctx, "라우트 삭제",
             f"'{route.hostname or route.id}' 라우트를 삭제할까요?\n"
             "- 서비스가 실행 중이면 중지됩니다",
-            [route.hostname] if route.hostname else [])
-        if not ok:
-            return
+            [route.hostname] if route.hostname else [], self)
 
+        def _on_finished(result):
+            if result == dlg.DialogCode.Accepted:
+                self._do_delete_route(card, route)
+
+        dlg.finished.connect(_on_finished)
+        self._open_modal(dlg)
+
+    def _do_delete_route(self, card: TunnelCard, route: RouteMeta):
         # I7: config.yml을 먼저 쓰고, 그것이 성공했을 때만 meta.routes와
         # settings를 갱신한다. 순서가 반대면 config 쓰기 실패 시 settings에는
         # 없는데 config/DNS에는 남는 고아 라우트가 생긴다.
@@ -828,17 +852,23 @@ class MainWindow(QWidget):
     def _open_settings(self):
         from app.ui.settings import SettingsDialog
         prev_theme = self.ctx.store.settings.theme
-        SettingsDialog(self.ctx, self).exec()
-        self._reload_targets()
-        if self.ctx.store.settings.theme != prev_theme:
-            self._apply_theme()  # 내부에서 refresh()까지 호출한다
-        else:
-            # B3/I: 프로필 삭제로 로컬 폴백이 일어났을 수 있으니 항상 갱신한다.
-            self.refresh()
+        dlg = SettingsDialog(self.ctx, self)
+
+        def _on_finished(_result):
+            self._reload_targets()
+            if self.ctx.store.settings.theme != prev_theme:
+                self._apply_theme()  # 내부에서 refresh()까지 호출한다
+            else:
+                # B3/I: 프로필 삭제로 로컬 폴백이 일어났을 수 있으니 항상 갱신한다.
+                self.refresh()
+
+        dlg.finished.connect(_on_finished)
+        self._open_modal(dlg)
 
     def _open_guide(self):
         from app.ui.guide import GuideDialog
-        GuideDialog(self.ctx, self).exec()
+        dlg = GuideDialog(self.ctx, self)
+        self._open_modal(dlg)
 
     def _apply_theme(self):
         from PyQt6.QtWidgets import QApplication
@@ -851,9 +881,9 @@ class MainWindow(QWidget):
             apply_titlebar_theme(viewer, mode == "dark")
         self._style_banner()
         self._style_info_banner()
+        self._style_signature()
         icon_color = current_palette(mode)["text"]
         self.refresh_btn.setIcon(make_icon("refresh", icon_color))
-        self.settings_btn.setIcon(make_icon("gear", icon_color))
         new_palette = current_palette(mode)
         for c in self.cards:
             c.spinner.set_palette(new_palette)
