@@ -33,6 +33,7 @@ class SettingsDialog(QDialog):
         form.addRow("테마", self.theme_combo)
 
         close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close.button(QDialogButtonBox.StandardButton.Close).setText("닫기")
         close.rejected.connect(self.reject)
 
         root = QVBoxLayout(self)
