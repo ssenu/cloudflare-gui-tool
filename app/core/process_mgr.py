@@ -115,15 +115,21 @@ class ProcessManager:
 
     # ---- 웹서버 ----
     def start_server(self, meta: TunnelMeta, runner: CommandRunner) -> None:
+        # TODO(v2 후속 태스크): 지금은 첫 번째 라우트의 서비스만 기동하는
+        # 임시 조치. 라우트별 개별 프로세스 관리로 교체될 예정.
         name = meta.name
         if name in self._servers and self._servers[name].proc.is_running():
             return
+        route = meta.routes[0] if meta.routes else None
+        server = route.server if route else None
+        start_cmd = server.start_cmd if server else ""
+        cwd = server.cwd if server else ""
         log = self.server_log(name)
         tracker = StatusTracker()
-        cmd = shlex.split(meta.server_cmd, posix=False)
+        cmd = shlex.split(start_cmd, posix=False)
         # posix=False: Windows 경로 역슬래시 보존. 따옴표는 벗겨준다.
         cmd = [c.strip('"') for c in cmd]
-        proc = runner.spawn(cmd, cwd=meta.server_cwd or None,
+        proc = runner.spawn(cmd, cwd=cwd or None,
                             on_line=lambda s, l: log.append(s, l),
                             on_exit=tracker.on_exit)
         self._servers[name] = _Handle(proc, tracker, log, runner.name)

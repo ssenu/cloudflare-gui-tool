@@ -2,17 +2,36 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 from dataclasses import asdict, dataclass, fields, field
+
+
+@dataclass
+class ServiceSpec:
+    kind: str = "command"        # "command" | "docker"
+    start_cmd: str = ""
+    stop_cmd: str = ""           # 비우면 PID 종료로 처리 (command 전용)
+    cwd: str = ""
+    autostart: bool = False      # 터널을 켤 때 함께 시작
+
+
+@dataclass
+class RouteMeta:
+    id: str                      # 8자리 난수 hex, 생성 후 불변
+    hostname: str = ""           # mysite.example.com
+    service: str = ""            # http://localhost:8000
+    server: ServiceSpec = field(default_factory=ServiceSpec)
 
 
 @dataclass
 class TunnelMeta:
     name: str
-    hostname: str = ""
-    service: str = ""
-    server_cmd: str = ""
-    server_cwd: str = ""
-    start_together: bool = False
+    routes: list[RouteMeta] = field(default_factory=list)
+
+
+def new_route_id() -> str:
+    """라우트의 안정적인 식별자를 생성한다 (hostname이 바뀌어도 PID/로그와의 연결 유지)"""
+    return secrets.token_hex(4)
 
 
 @dataclass
@@ -41,6 +60,77 @@ def _filter_dataclass_kwargs(dataclass_type, data: dict) -> dict:
     return {k: v for k, v in data.items() if k in field_names}
 
 
+def _parse_service_spec(data) -> ServiceSpec:
+    """dict를 ServiceSpec으로 변환. kind가 유효하지 않으면 'command'로 보정"""
+    kwargs = _filter_dataclass_kwargs(ServiceSpec, data)
+    spec = ServiceSpec(**kwargs)
+    if spec.kind not in ("command", "docker"):
+        spec.kind = "command"
+    return spec
+
+
+def _parse_route_meta(data) -> RouteMeta:
+    """dict를 RouteMeta로 변환. id가 없으면 TypeError (유효하지 않은 항목)"""
+    kwargs = _filter_dataclass_kwargs(RouteMeta, data)
+    server_raw = kwargs.get("server")
+    if server_raw is not None:
+        kwargs["server"] = _parse_service_spec(server_raw)
+    return RouteMeta(**kwargs)
+
+
+def _parse_routes_list(routes_data) -> list[RouteMeta]:
+    """라우트 배열을 파싱. 잘못된 항목은 개별 스킵"""
+    routes: list[RouteMeta] = []
+    if isinstance(routes_data, list):
+        for r in routes_data:
+            try:
+                routes.append(_parse_route_meta(r))
+            except (TypeError, ValueError):
+                continue
+    return routes
+
+
+def _parse_tunnel_meta(v) -> tuple[TunnelMeta, bool]:
+    """v1/v2 터널 dict를 TunnelMeta로 변환.
+
+    반환값은 (meta, migrated) - migrated는 v1 형식에서 실제로
+    라우트가 생성된 경우에만 True.
+    """
+    if not isinstance(v, dict):
+        raise TypeError(f"Expected dict, got {type(v).__name__}")
+
+    name = v["name"]  # 없으면 KeyError -> 호출자가 무효 항목으로 스킵
+    if not isinstance(name, str):
+        raise TypeError("name must be str")
+
+    if "routes" in v:
+        routes = _parse_routes_list(v.get("routes"))
+        return TunnelMeta(name=name, routes=routes), False
+
+    # v1 형식 마이그레이션
+    hostname = v.get("hostname", "") or ""
+    service = v.get("service", "") or ""
+    server_cmd = v.get("server_cmd", "") or ""
+    server_cwd = v.get("server_cwd", "") or ""
+    start_together = bool(v.get("start_together", False))
+
+    if hostname or service or server_cmd:
+        route = RouteMeta(
+            id=new_route_id(),
+            hostname=hostname,
+            service=service,
+            server=ServiceSpec(
+                kind="command",
+                start_cmd=server_cmd,
+                cwd=server_cwd,
+                autostart=start_together,
+            ),
+        )
+        return TunnelMeta(name=name, routes=[route]), True
+
+    return TunnelMeta(name=name, routes=[]), False
+
+
 def default_settings_path() -> str:
     base = os.environ.get("APPDATA") or os.path.expanduser("~")
     return os.path.join(base, "CloudflareTunnelGUI", "settings.json")
@@ -66,15 +156,17 @@ class SettingsStore:
                     self.settings = Settings()
                     return self.settings
 
-                # 유효한 터널만 로드
+                # 유효한 터널만 로드 (v1 -> v2 마이그레이션 포함)
                 tunnels = {}
+                migrated_any = False
                 tunnels_data = raw.get("tunnels", {})
                 if isinstance(tunnels_data, dict):
                     for k, v in tunnels_data.items():
                         try:
-                            tunnel_data = _filter_dataclass_kwargs(TunnelMeta, v)
-                            tunnels[k] = TunnelMeta(**tunnel_data)
-                        except (TypeError, ValueError):
+                            meta, migrated = _parse_tunnel_meta(v)
+                            tunnels[k] = meta
+                            migrated_any = migrated_any or migrated
+                        except (TypeError, ValueError, KeyError):
                             # 유효하지 않은 항목은 스킵
                             continue
 
@@ -101,6 +193,11 @@ class SettingsStore:
                     ssh_profiles=ssh_profiles,
                     theme=theme,
                 )
+
+                # v1 형식에서 실제로 마이그레이션이 일어난 경우에만 재저장.
+                # v2 형식만 있는 파일은 매번 다시 쓰지 않는다.
+                if migrated_any:
+                    self.save()
             except (TypeError, KeyError, ValueError, AttributeError):
                 # 예상치 못한 형식 에러 시 기본값으로 폴백
                 self.settings = Settings()

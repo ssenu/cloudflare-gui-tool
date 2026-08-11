@@ -1,5 +1,9 @@
 import json
-from app.core.store import SettingsStore, TunnelMeta, SshProfile
+import os
+import time
+
+from app.core.store import (RouteMeta, ServiceSpec, SettingsStore, SshProfile,
+                            TunnelMeta, new_route_id)
 
 
 def test_load_missing_file_returns_defaults(tmp_path):
@@ -16,10 +20,21 @@ def test_save_and_load_roundtrip(tmp_path):
     store.load()
     store.settings.root_domain = "example.com"
     store.settings.tunnels["mysite"] = TunnelMeta(
-        name="mysite", hostname="mysite.example.com",
-        service="http://localhost:8000",
-        server_cmd="uvicorn main:app --port 8000",
-        server_cwd="C:/proj", start_together=True)
+        name="mysite",
+        routes=[
+            RouteMeta(
+                id="abcd1234",
+                hostname="mysite.example.com",
+                service="http://localhost:8000",
+                server=ServiceSpec(
+                    kind="command",
+                    start_cmd="uvicorn main:app --port 8000",
+                    cwd="C:/proj",
+                    autostart=True,
+                ),
+            )
+        ],
+    )
     store.settings.ssh_profiles.append(
         SshProfile(name="rpi", host="192.168.0.10", port=22,
                    username="pi", key_path="C:/keys/id_ed25519"))
@@ -27,7 +42,7 @@ def test_save_and_load_roundtrip(tmp_path):
 
     loaded = SettingsStore(path=path).load()
     assert loaded.root_domain == "example.com"
-    assert loaded.tunnels["mysite"].start_together is True
+    assert loaded.tunnels["mysite"].routes[0].server.autostart is True
     assert loaded.ssh_profiles[0].host == "192.168.0.10"
     # 파일이 사람이 읽을 수 있는 JSON인지
     raw = json.loads(open(path, encoding="utf-8").read())
@@ -70,19 +85,22 @@ def test_load_ignores_bad_entries(tmp_path):
         "tunnels": {
             "good": {
                 "name": "good",
-                "hostname": "good.example.com",
-                "service": "http://localhost:8000",
-                "server_cmd": "",
-                "server_cwd": "",
-                "start_together": False
+                "routes": [
+                    {
+                        "id": "aaaa1111",
+                        "hostname": "good.example.com",
+                        "service": "http://localhost:8000",
+                        "server": {"kind": "command"},
+                    }
+                ],
             },
             "missing_name": {
                 # name이 없음 - 유효하지 않음
-                "hostname": "bad.example.com"
+                "routes": []
             },
             "extra_field": {
                 "name": "extra",
-                "hostname": "extra.example.com",
+                "routes": [],
                 "unknown_field": "should_be_filtered"
                 # dataclass에 없는 필드는 필터링되어야 함
             }
@@ -150,3 +168,194 @@ def test_load_tunnels_wrong_type_skipped(tmp_path):
     assert s.root_domain == "example.com"
     assert s.tunnels == {}  # 형식이 잘못되었으므로 빈 dict
     assert s.ssh_profiles == []
+
+
+# ---- v2 데이터 모델 / 마이그레이션 ----
+
+def test_new_route_id_format():
+    rid = new_route_id()
+    assert isinstance(rid, str)
+    assert len(rid) == 8  # secrets.token_hex(4) -> 8 hex chars
+    int(rid, 16)  # 유효한 hex 문자열이어야 함
+
+
+def test_v1_format_migrates_to_single_route_and_resaves(tmp_path):
+    """v1 형식(hostname/service/server_cmd 최상위)을 로드하면 라우트 1개로 변환되고,
+    autostart가 보존되며, 파일이 새 형식으로 다시 저장된다."""
+    path = str(tmp_path / "settings.json")
+    v1_json = {
+        "root_domain": "example.com",
+        "cloudflared_path": "",
+        "tunnels": {
+            "mysite": {
+                "name": "mysite",
+                "hostname": "mysite.example.com",
+                "service": "http://localhost:8000",
+                "server_cmd": "uvicorn main:app --port 8000",
+                "server_cwd": "C:/proj",
+                "start_together": True,
+            }
+        },
+        "ssh_profiles": [],
+        "theme": "dark",
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(v1_json, f)
+
+    store = SettingsStore(path=path)
+    s = store.load()
+
+    meta = s.tunnels["mysite"]
+    assert len(meta.routes) == 1
+    route = meta.routes[0]
+    assert route.hostname == "mysite.example.com"
+    assert route.service == "http://localhost:8000"
+    assert route.server.kind == "command"
+    assert route.server.start_cmd == "uvicorn main:app --port 8000"
+    assert route.server.cwd == "C:/proj"
+    assert route.server.autostart is True
+    assert isinstance(route.id, str) and route.id
+
+    # 파일이 v2 형식(routes 키)으로 다시 저장되었는지 확인
+    raw = json.loads(open(path, encoding="utf-8").read())
+    assert "routes" in raw["tunnels"]["mysite"]
+    assert "hostname" not in raw["tunnels"]["mysite"]
+
+
+def test_v1_all_fields_empty_yields_empty_routes(tmp_path):
+    """v1 필드가 전부 비어있으면 빈 routes로 변환된다."""
+    path = str(tmp_path / "settings.json")
+    v1_json = {
+        "root_domain": "",
+        "cloudflared_path": "",
+        "tunnels": {
+            "empty": {
+                "name": "empty",
+                "hostname": "",
+                "service": "",
+                "server_cmd": "",
+                "server_cwd": "",
+                "start_together": False,
+            }
+        },
+        "ssh_profiles": [],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(v1_json, f)
+
+    store = SettingsStore(path=path)
+    s = store.load()
+    assert s.tunnels["empty"].routes == []
+
+
+def test_v2_roundtrip_multiple_routes_with_docker_service(tmp_path):
+    """v2 형식 왕복: 라우트 2개, 그중 1개는 도커 서비스."""
+    path = str(tmp_path / "settings.json")
+    store = SettingsStore(path=path)
+    store.load()
+    store.settings.tunnels["multi"] = TunnelMeta(
+        name="multi",
+        routes=[
+            RouteMeta(
+                id=new_route_id(),
+                hostname="a.example.com",
+                service="http://localhost:8000",
+                server=ServiceSpec(kind="command", start_cmd="run.exe", autostart=False),
+            ),
+            RouteMeta(
+                id=new_route_id(),
+                hostname="b.example.com",
+                service="http://localhost:9000",
+                server=ServiceSpec(kind="docker", start_cmd="docker compose up -d",
+                                   stop_cmd="docker compose down", autostart=True),
+            ),
+        ],
+    )
+    store.save()
+
+    loaded = SettingsStore(path=path).load()
+    meta = loaded.tunnels["multi"]
+    assert len(meta.routes) == 2
+    assert meta.routes[0].server.kind == "command"
+    assert meta.routes[1].server.kind == "docker"
+    assert meta.routes[1].server.stop_cmd == "docker compose down"
+    assert meta.routes[1].server.autostart is True
+
+
+def test_route_array_with_bad_entries_loads_the_rest(tmp_path):
+    """라우트 배열에 잘못된 항목이 섞여 있어도 나머지는 로드된다."""
+    path = str(tmp_path / "settings.json")
+    v2_json = {
+        "root_domain": "",
+        "cloudflared_path": "",
+        "tunnels": {
+            "mixed": {
+                "name": "mixed",
+                "routes": [
+                    {"id": "aaaa1111", "hostname": "good.example.com",
+                     "service": "http://localhost:8000"},
+                    {"hostname": "no-id.example.com"},  # id 없음 -> 유효하지 않음
+                    "not_a_dict",  # 잘못된 타입
+                    {"id": "bbbb2222", "hostname": "good2.example.com"},
+                ],
+            }
+        },
+        "ssh_profiles": [],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(v2_json, f)
+
+    store = SettingsStore(path=path)
+    s = store.load()
+    routes = s.tunnels["mixed"].routes
+    assert len(routes) == 2
+    assert {r.id for r in routes} == {"aaaa1111", "bbbb2222"}
+
+
+def test_service_spec_bad_kind_coerced_to_command(tmp_path):
+    """server.kind 값이 이상하면 'command'로 보정된다."""
+    path = str(tmp_path / "settings.json")
+    v2_json = {
+        "root_domain": "",
+        "cloudflared_path": "",
+        "tunnels": {
+            "t": {
+                "name": "t",
+                "routes": [
+                    {"id": "aaaa1111", "hostname": "h.example.com",
+                     "server": {"kind": "not_a_real_kind"}},
+                ],
+            }
+        },
+        "ssh_profiles": [],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(v2_json, f)
+
+    store = SettingsStore(path=path)
+    s = store.load()
+    assert s.tunnels["t"].routes[0].server.kind == "command"
+
+
+def test_v2_only_file_load_does_not_rewrite_file(tmp_path):
+    """v2 형식만 있는 파일은 load()가 파일을 다시 저장하지 않는다."""
+    path = str(tmp_path / "settings.json")
+    store = SettingsStore(path=path)
+    store.load()
+    store.settings.tunnels["t"] = TunnelMeta(
+        name="t",
+        routes=[RouteMeta(id=new_route_id(), hostname="h.example.com",
+                          service="http://localhost:8000")],
+    )
+    store.save()
+
+    mtime_before = os.path.getmtime(path)
+    time.sleep(0.05)
+
+    store2 = SettingsStore(path=path)
+    save_calls = []
+    store2.save = lambda: save_calls.append(True)
+    store2.load()
+
+    assert save_calls == []
+    assert os.path.getmtime(path) == mtime_before

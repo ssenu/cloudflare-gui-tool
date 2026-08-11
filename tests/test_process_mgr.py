@@ -3,7 +3,14 @@ import time
 from app.core.process_mgr import (LogBuffer, ProcessManager, StatusTracker,
                                   TunnelState)
 from app.core.runner import LocalRunner
-from app.core.store import TunnelMeta
+from app.core.store import RouteMeta, ServiceSpec, TunnelMeta
+
+
+def _server_meta(name: str, cmd: str) -> TunnelMeta:
+    return TunnelMeta(
+        name=name,
+        routes=[RouteMeta(id="00000000", server=ServiceSpec(start_cmd=cmd))],
+    )
 
 
 def test_tracker_transitions_to_running():
@@ -41,8 +48,7 @@ def test_log_buffer_incremental():
 def test_server_start_stop():
     mgr = ProcessManager()
     runner = LocalRunner()
-    meta = TunnelMeta(name="t1",
-                      server_cmd=f'"{sys.executable}" -c "import time; time.sleep(60)"')
+    meta = _server_meta("t1", f'"{sys.executable}" -c "import time; time.sleep(60)"')
     mgr.start_server(meta, runner)
     assert mgr.server_running("t1")
     mgr.stop_server("t1")
@@ -54,8 +60,7 @@ def test_server_start_stop():
 def test_handles_scoped_by_runner():
     mgr = ProcessManager()
     runner = LocalRunner()
-    meta = TunnelMeta(name="t2",
-                      server_cmd=f'"{sys.executable}" -c "import time; time.sleep(60)"')
+    meta = _server_meta("t2", f'"{sys.executable}" -c "import time; time.sleep(60)"')
     mgr.start_server(meta, runner)
     try:
         assert mgr.server_running("t2", "local") is True
