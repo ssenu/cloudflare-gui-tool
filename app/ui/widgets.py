@@ -4,13 +4,14 @@ core 모듈에 Qt 의존성이 유입되지 않도록 이 모듈은 app/ui 안�
 """
 from __future__ import annotations
 
-from PyQt6.QtCore import QEvent, QRectF, Qt, QTimer
+from PyQt6.QtCore import QEvent, QRectF, QSize, Qt, QTimer
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import (
     QAbstractButton,
     QHBoxLayout,
     QLabel,
     QMenu,
+    QPushButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -216,6 +217,10 @@ class ModalOverlay(QWidget):
 
     def __init__(self, parent: QWidget, content: QWidget, palette: dict | None = None):
         super().__init__(parent)
+        # 자식 생성 과정에서 resizeEvent가 먼저 올 수 있어 미리 선언해 둔다.
+        self.close_btn: QPushButton | None = None
+        self._content_pref = content.size()
+        self._clamping = False  # 우리가 건 resize를 선호 크기로 오인하지 않기 위한 가드
         self._content = content
         self._bg_color = QColor(0, 0, 0, 140)  # 검정 55% 알파
         content.setParent(self)
@@ -226,6 +231,24 @@ class ModalOverlay(QWidget):
             content.setStyleSheet(
                 f"QDialog#modalContent {{ background: {palette['panel']}; "
                 f"border: 1px solid {palette['border']}; border-radius: 12px; }}")
+
+        # 모달마다 공통으로 오른쪽 위 닫기 버튼을 얹는다. 내용 위젯이 아니라
+        # 오버레이의 자식이라 어떤 다이얼로그를 넣어도 자동으로 붙는다.
+        from app.ui.icons import make_icon  # 순환 import 방지를 위한 지연 로드
+
+        self.close_btn = QPushButton(self)
+        self.close_btn.setFixedSize(26, 26)
+        self.close_btn.setToolTip("닫기")
+        self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        if palette:
+            self.close_btn.setIcon(make_icon("close", palette["muted"], 20))
+            self.close_btn.setStyleSheet(
+                "QPushButton { background: transparent; border: none; }"
+                f"QPushButton:hover {{ background: {palette['panel2']};"
+                " border-radius: 6px; }")
+        self.close_btn.clicked.connect(self._request_close)
+
+        self._recompute_pref()
 
         # 레이아웃 대신 직접 배치한다 - 자식이 네이티브 윈도우 핸들을 갖는
         # 경우(타이틀바 테마 적용 등) 레이아웃 정렬이 어긋나는 일이 있어서
@@ -246,6 +269,12 @@ class ModalOverlay(QWidget):
                 QEvent.Type.Resize, QEvent.Type.LayoutRequest):
             self.setGeometry(self.parent().rect())
         elif obj is self._content and event.type() == QEvent.Type.Resize:
+            # 내용이 스스로 크기를 바꾼 경우(마법사 페이지 전환 등)만 선호 크기 갱신.
+            # 오버레이가 건 클램프 resize는 제외해야 한 번 줄어든 크기가
+            # 선호 크기로 굳어 영구히 쪼그라드는 것을 막는다.
+            size = self._content.size()
+            if not self._clamping and size.width() > 0 and size.height() > 0:
+                self._content_pref = size
             self._center_content()
         return False
 
@@ -261,12 +290,28 @@ class ModalOverlay(QWidget):
         if self.geometry() != area:
             self.setGeometry(area)
         c = self._content
-        max_w = int(area.width() * self.MAX_CONTENT_RATIO)
-        max_h = int(area.height() * self.MAX_CONTENT_RATIO)
-        if max_w > 0 and max_h > 0 and (c.width() > max_w or c.height() > max_h):
-            c.resize(min(c.width(), max_w), min(c.height(), max_h))
+        # 부모가 아직 레이아웃 전이라 작을 때 클램프하면 내용이 영구히 쪼그라든다.
+        # 선호 크기를 따로 들고 있다가, 공간이 생기면 다시 키운다.
+        pref = self._content_pref
+        if area.width() > 200 and area.height() > 200:
+            max_w = int(area.width() * self.MAX_CONTENT_RATIO)
+            max_h = int(area.height() * self.MAX_CONTENT_RATIO)
+            target_w = min(pref.width(), max_w)
+            target_h = min(pref.height(), max_h)
+            if (c.width(), c.height()) != (target_w, target_h):
+                self._clamping = True
+                try:
+                    c.resize(target_w, target_h)
+                finally:
+                    self._clamping = False
         c.move(max(0, (area.width() - c.width()) // 2),
                max(0, (area.height() - c.height()) // 2))
+        # 닫기 버튼을 내용 카드의 오른쪽 위 모서리 안쪽에 붙인다.
+        if self.close_btn is None:
+            return
+        self.close_btn.move(c.x() + c.width() - self.close_btn.width() - 8,
+                            c.y() + 8)
+        self.close_btn.raise_()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -288,12 +333,58 @@ class ModalOverlay(QWidget):
         # 오버레이 배경(내용 위젯 바깥) 클릭은 뒤 화면으로 넘어가지 않게 흡수한다.
         event.accept()
 
+    def _recompute_pref(self) -> None:
+        """내용의 자연스러운 크기를 다시 계산해 적용한다.
+
+        최상위 창이 아닌 자식 위젯이 되면 adjustSize()가 줄바꿈 라벨의
+        heightForWidth를 제대로 반영하지 못해 높이가 0에 가깝게 잡힌다.
+        폭을 먼저 정하고 그 폭 기준 높이를 직접 계산한다.
+        """
+        content = self._content
+        pref_w = max(content.sizeHint().width(), content.minimumWidth())
+        pref_h = -1
+        if content.layout() is not None:
+            pref_h = content.layout().heightForWidth(pref_w)
+        if pref_h <= 0:
+            pref_h = max(content.sizeHint().height(), content.minimumHeight())
+        self._content_pref = QSize(pref_w, pref_h)
+        self._clamping = True
+        try:
+            # QDialog가 자식 위젯 상태에서 show() 시 최소 크기로 붕괴하는 것을
+            # 막기 위해 최소 크기로 못박는다. 스스로 크기를 관리하는 다이얼로그
+            # (마법사의 setFixedHeight)는 이후 호출에서 이 값을 덮어쓴다.
+            content.setMinimumSize(pref_w, pref_h)
+            content.resize(pref_w, pref_h)
+        finally:
+            self._clamping = False
+
+    def refit(self) -> None:
+        """내용 위젯을 표시한 뒤 호출한다.
+
+        QDialog는 show() 시점에 스스로 크기를 다시 잡는데, 자식 위젯 상태에서는
+        그 값이 잘못 나온다(높이가 최소값으로 붕괴). 표시 후 한 번 더 맞춘다.
+        """
+        self._recompute_pref()
+        # 스스로 크기를 계산하는 내용 위젯(마법사)은 그 결과를 우선한다.
+        fit = getattr(self._content, "fit_to_content", None)
+        if callable(fit):
+            fit()
+            size = self._content.size()
+            if size.width() > 0 and size.height() > 0:
+                self._content_pref = size
+        self._center_content()
+
+    def _request_close(self) -> None:
+        reject = getattr(self._content, "reject", None)
+        if callable(reject):
+            reject()
+        else:
+            self.cleanup()
+
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:
-            reject = getattr(self._content, "reject", None)
-            if callable(reject):
-                reject()
-                return
+            self._request_close()
+            return
         super().keyPressEvent(event)
 
     def cleanup(self) -> None:

@@ -125,6 +125,11 @@ def make_icon(name: str, color: str, size: int = 32) -> QIcon:
             cy = size / 2 + i * size * 0.24
             painter.drawEllipse(QPointF(cx, cy), r, r)
 
+    elif name == "close":
+        # 대각선 두 개로 이루어진 X (모달 닫기 버튼용)
+        painter.drawLine(QPointF(m, m), QPointF(size - m, size - m))
+        painter.drawLine(QPointF(size - m, m), QPointF(m, size - m))
+
     elif name == "monitor":
         rect = QRectF(m, m, inner, inner * 0.7)
         painter.setBrush(Qt.BrushStyle.NoBrush)

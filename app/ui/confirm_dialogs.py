@@ -20,11 +20,20 @@ from app.ui.winutil import apply_titlebar_theme
 class ConfirmDeleteDialog(QDialog):
     """라우트 삭제 등 일반 삭제 확인에 쓰는 공용 다이얼로그."""
 
-    def __init__(self, ctx, title: str, body: str, hostnames: list[str], parent=None):
+    def __init__(self, ctx, title: str, body: str, hostnames: list[str],
+                 parent=None, heading: str = ""):
         super().__init__(parent)
         self.ctx = ctx
         self.setWindowTitle(title)
         self.setMinimumWidth(420)
+        palette = current_palette(ctx.store.settings.theme)
+
+        heading_label = None
+        if heading:
+            heading_label = QLabel(heading)
+            heading_label.setWordWrap(True)
+            heading_label.setStyleSheet(
+                f"font-size: 16px; font-weight: 700; color: {palette['text']};")
 
         names = "\n".join(f"- {h}" for h in hostnames) if hostnames \
             else "- (hostname 미설정)"
@@ -50,6 +59,8 @@ class ConfirmDeleteDialog(QDialog):
         btn_row.addWidget(self.confirm_btn)
 
         root = QVBoxLayout(self)
+        if heading_label is not None:
+            root.addWidget(heading_label)
         root.addWidget(text)
         # 하위 클래스(TunnelDeleteDialog)가 이름 입력칸을 끼워 넣는 자리.
         self._extra_layout = QVBoxLayout()
@@ -66,12 +77,11 @@ class TunnelDeleteDialog(ConfirmDeleteDialog):
     """터널 삭제 확인: 터널 이름을 정확히 입력해야 삭제 버튼이 활성화된다."""
 
     def __init__(self, ctx, tunnel_name: str, hostnames: list[str], parent=None):
-        body = (
-            f"'{tunnel_name}' 터널을 삭제할까요?\n"
-            "- 실행 중인 터널과 모든 라우트의 서버가 중지됩니다\n"
-            "- 등록된 서버 정보(라우트·실행 명령 등)가 모두 삭제됩니다\n"
-            "- config 파일이 삭제됩니다")
-        super().__init__(ctx, "터널 삭제", body, hostnames, parent)
+        body = ("- 실행 중인 터널과 모든 라우트의 서버가 중지됩니다\n"
+                "- 등록된 서버 정보(라우트·실행 명령 등)가 모두 삭제됩니다\n"
+                "- config 파일이 삭제됩니다")
+        super().__init__(ctx, "터널 삭제", body, hostnames, parent,
+                         heading=f"'{tunnel_name}' 터널을 삭제할까요?")
         self.tunnel_name = tunnel_name
 
         hint = QLabel(f"삭제하려면 터널 이름 {tunnel_name} 을 입력하세요")

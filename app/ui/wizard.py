@@ -263,6 +263,10 @@ class TunnelWizard(QDialog):
         self.pages[i].show()
         self._fit_height()
 
+    def fit_to_content(self) -> None:
+        """오버레이가 표시 직후 호출한다(ModalOverlay.refit)."""
+        self._fit_height()
+
     def _fit_height(self) -> None:
         """현재 페이지 높이에 맞춰 창 높이만 조절한다(폭은 고정).
 

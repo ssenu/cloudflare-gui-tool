@@ -659,6 +659,7 @@ class MainWindow(QWidget):
                                current_palette(self.ctx.store.settings.theme))
         dialog.finished.connect(overlay.cleanup)
         dialog.show()
+        overlay.refit()  # QDialog가 show()에서 스스로 잡은 크기를 바로잡는다
 
     # ---- 생성/삭제 ----
     def _create_tunnel(self):
