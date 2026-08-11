@@ -95,7 +95,9 @@ class CloudflaredClient:
             self._run(args)
         except CloudflaredError as ex:
             text = (ex.result.stderr + ex.result.stdout).lower()
-            if "1003" in text or "already exists" in text:
+            # "1003"만 보면 포트 번호 등 무관한 숫자에 오탐할 수 있어
+            # cloudflared가 실제로 찍는 형태(code: 1003)로 좁힌다.
+            if "code: 1003" in text or "already exists" in text:
                 raise DnsRecordExistsError(ex.result) from ex
             raise
 

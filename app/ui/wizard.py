@@ -321,6 +321,9 @@ class TunnelWizard(QDialog):
         self.overwrite_btn.setEnabled(False)
         self.rollback_btn.setEnabled(False)
         self.next_btn.setEnabled(False)
+        # 재개 중에 페이지를 이동하면 워커가 뒤늦게 올린 결과가 엉뚱한 페이지에
+        # 적용된다(_start_creation과 동일한 이유로 이동 자체를 막는다).
+        self.back_btn.hide()
         name = self.name_edit.text().strip()
         hostname = self._hostname()
         service = self.service_edit.text().strip()
@@ -386,12 +389,17 @@ class TunnelWizard(QDialog):
         super().closeEvent(event)
 
     def reject(self):
-        self._close_timer.stop()
+        self._stop_timers()
         super().reject()
 
     def accept(self):
-        self._close_timer.stop()
+        self._stop_timers()
         super().accept()
+
+    def _stop_timers(self):
+        # accept()/reject()는 closeEvent를 타지 않으므로 여기서도 멈춰야 한다.
+        self._close_timer.stop()
+        self._timer.stop()
 
     def _drain_events(self):
         while self._events:

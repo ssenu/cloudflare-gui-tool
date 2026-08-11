@@ -579,23 +579,24 @@ class MainWindow(QWidget):
         """
         names = "\n".join(f"- {h}" for h in hostnames) if hostnames \
             else "- (hostname 미설정)"
-        msg = QMessageBox(self)
-        msg.setWindowTitle(title)
-        msg.setText(
-            f"{body_prefix}\n\n"
-            f"다음 주소의 DNS 레코드는 Cloudflare에 그대로 남습니다:\n{names}\n\n"
-            "나중에 같은 주소를 다시 쓰려면 대시보드에서 지우거나, 다시 "
-            "연결할 때 덮어쓰기를 선택하세요.")
-        yes_btn = msg.addButton("삭제", QMessageBox.ButtonRole.YesRole)
-        msg.addButton("취소", QMessageBox.ButtonRole.NoRole)
-        dash_btn = msg.addButton("Cloudflare 대시보드 열기",
-                                 QMessageBox.ButtonRole.ActionRole)
-        msg.exec()
-        clicked = msg.clickedButton()
-        if clicked is dash_btn:
+        while True:
+            msg = QMessageBox(self)
+            msg.setWindowTitle(title)
+            msg.setText(
+                f"{body_prefix}\n\n"
+                f"다음 주소의 DNS 레코드는 Cloudflare에 그대로 남습니다:\n{names}\n\n"
+                "나중에 같은 주소를 다시 쓰려면 대시보드에서 지우거나, 다시 "
+                "연결할 때 덮어쓰기를 선택하세요.")
+            yes_btn = msg.addButton("삭제", QMessageBox.ButtonRole.YesRole)
+            msg.addButton("취소", QMessageBox.ButtonRole.NoRole)
+            dash_btn = msg.addButton("Cloudflare 대시보드 열기",
+                                     QMessageBox.ButtonRole.ActionRole)
+            msg.exec()
+            clicked = msg.clickedButton()
+            if clicked is not dash_btn:
+                return clicked is yes_btn
+            # 대시보드는 브라우저만 열고, 확인 다이얼로그를 다시 띄운다.
             webbrowser.open("https://dash.cloudflare.com")
-            return self._confirm_delete(title, body_prefix, hostnames)
-        return clicked is yes_btn
 
     # ---- 생성/삭제 ----
     def _create_tunnel(self):
@@ -609,7 +610,7 @@ class MainWindow(QWidget):
 
     def _delete_tunnel(self, card: TunnelCard):
         name = card.tunnel_name
-        hostnames = [r.hostname for r in card.meta.routes]
+        hostnames = [r.hostname for r in card.meta.routes if r.hostname]
         ok = self._confirm_delete(
             "터널 삭제",
             f"'{name}' 터널을 삭제할까요?\n"

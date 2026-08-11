@@ -139,3 +139,11 @@ def test_route_dns_other_failure_raises_plain_cloudflared_error():
     with pytest.raises(CloudflaredError) as exc_info:
         CloudflaredClient(r).route_dns("mysite", "test.ssenu.cloud")
     assert not isinstance(exc_info.value, DnsRecordExistsError)
+
+
+def test_route_dns_unrelated_1003_is_not_dns_exists_error():
+    # 포트 번호 등 무관한 숫자에 1003이 들어 있어도 덮어쓰기 제안을 하면 안 된다
+    r = FakeRunner({"route dns": RunResult(1, "", "dial tcp 127.0.0.1:10030: refused")})
+    with pytest.raises(CloudflaredError) as ei:
+        CloudflaredClient(r).route_dns("t", "a.example.com")
+    assert not isinstance(ei.value, DnsRecordExistsError)
