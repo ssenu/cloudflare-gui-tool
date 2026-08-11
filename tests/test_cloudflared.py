@@ -28,6 +28,12 @@ class FakeRunner(CommandRunner):
     def file_exists(self, path): return False
     def remove_file(self, path): pass
     def home_dir(self): return "C:/Users/me"
+    def spawn_detached(self, cmd, cwd, log_path): raise NotImplementedError
+    def pids_alive(self, pids): return set()
+    def kill_pid(self, pid): pass
+    def tail_file(self, path, offset): return (0, "")
+    def ensure_dir(self, path): pass
+    def list_dir(self, path): return []
 
 
 LIST_JSON = ('[{"id":"aaa-111","name":"mysite","created_at":"2026-08-01T00:00:00Z",'

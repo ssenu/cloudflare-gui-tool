@@ -14,6 +14,46 @@ def quote_cmd(cmd: list[str]) -> str:
     return " ".join(shlex.quote(c) for c in cmd)
 
 
+def build_spawn_detached_command(cmd: list[str], cwd: str | None, log_path: str) -> str:
+    """원격에서 프로세스를 분리 실행하는 셸 명령 문자열을 조립한다.
+
+    setsid로 새 세션(프로세스 그룹)을 만들고 nohup으로 SIGHUP을 무시한다.
+    stdout/stderr은 로그 파일에 append하고, 실행 직후 PID를 echo한다.
+    """
+    full = quote_cmd(cmd)
+    log_quoted = shlex.quote(log_path)
+    line = f"setsid nohup {full} >> {log_quoted} 2>&1 < /dev/null & echo $!"
+    if cwd:
+        line = f"cd {shlex.quote(cwd)} && {line}"
+    return line
+
+
+def build_pids_alive_command(pids: list[int]) -> str | None:
+    """여러 PID의 생존 여부를 한 번의 명령으로 조회하는 셸 명령을 조립한다.
+
+    살아있는 PID만 한 줄씩 출력된다. pids가 비어있으면 None을 반환한다.
+    """
+    if not pids:
+        return None
+    pid_list = " ".join(str(p) for p in pids)
+    return f"for p in {pid_list}; do kill -0 $p 2>/dev/null && echo $p; done"
+
+
+def build_kill_pid_command(pid: int) -> str:
+    """PID(프로세스 그룹)를 종료하는 셸 명령을 조립한다.
+
+    먼저 프로세스 그룹에 TERM을 보내고, 실패하면 단일 PID에 TERM을 보낸다.
+    1초 유예 후 같은 방식으로 KILL을 보낸다. 이미 죽은 프로세스에도
+    에러 없이 항상 성공(true)으로 끝난다.
+    """
+    return (
+        f"kill -TERM -{pid} 2>/dev/null || kill -TERM {pid} 2>/dev/null; "
+        f"sleep 1; "
+        f"kill -KILL -{pid} 2>/dev/null || kill -KILL {pid} 2>/dev/null; "
+        f"true"
+    )
+
+
 class SshProcess(ManagedProcess):
     def __init__(self, channel: paramiko.Channel,
                  on_line: OnLine | None, on_exit: OnExit | None):
@@ -149,3 +189,51 @@ class SshRunner(CommandRunner):
         if path.startswith("~"):
             return self.home_dir() + path[1:]
         return path
+
+    def spawn_detached(self, cmd: list[str], cwd: str | None, log_path: str) -> int:
+        line = build_spawn_detached_command(cmd, cwd, log_path)
+        res = self.run(["sh", "-c", line])
+        lines = [ln for ln in res.stdout.splitlines() if ln.strip()]
+        if not lines:
+            raise RuntimeError(f"원격 프로세스 시작 실패: PID를 읽을 수 없습니다 ({res.stderr!r})")
+        try:
+            return int(lines[-1].strip())
+        except ValueError:
+            raise RuntimeError(f"원격 프로세스 시작 실패: PID 파싱 불가 ({lines[-1]!r})")
+
+    def pids_alive(self, pids: list[int]) -> set[int]:
+        cmd = build_pids_alive_command(pids)
+        if cmd is None:
+            return set()
+        res = self.run(["sh", "-c", cmd])
+        return {int(ln) for ln in res.stdout.splitlines() if ln.strip()}
+
+    def kill_pid(self, pid: int) -> None:
+        cmd = build_kill_pid_command(pid)
+        self.run(["sh", "-c", cmd], timeout=5.0)
+
+    def tail_file(self, path: str, offset: int) -> tuple[int, str]:
+        assert self._sftp
+        remote_path = self._expand(path)
+        try:
+            attrs = self._sftp.stat(remote_path)
+        except FileNotFoundError:
+            return 0, ""
+        size = attrs.st_size or 0
+        if offset > size:
+            offset = 0
+        with self._sftp.open(remote_path, "rb") as f:
+            f.seek(offset)
+            data = f.read()
+        new_offset = offset + len(data)
+        return new_offset, data.decode("utf-8", errors="replace")
+
+    def ensure_dir(self, path: str) -> None:
+        self.run(["mkdir", "-p", self._expand(path)])
+
+    def list_dir(self, path: str) -> list[str]:
+        assert self._sftp
+        try:
+            return self._sftp.listdir(self._expand(path))
+        except FileNotFoundError:
+            return []
