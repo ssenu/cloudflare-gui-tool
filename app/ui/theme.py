@@ -55,6 +55,7 @@ def build_qss(mode: str) -> str:
 QWidget {{ background: {p['bg']}; color: {p['text']};
           font-family: 'Segoe UI', 'Malgun Gothic'; font-size: 13px; }}
 QMainWindow, QDialog {{ background: {p['bg']}; }}
+QLabel {{ background: transparent; }}
 QFrame#card {{ background: {p['panel']}; border: 1px solid {p['border']}; border-radius: 10px; }}
 QLabel#cardTitle {{ font-size: 15px; font-weight: 600; }}
 QLabel#cardSub {{ color: {p['muted']}; }}

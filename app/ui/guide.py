@@ -16,7 +16,7 @@ class GuideDialog(QDialog):
         self.ctx = ctx
         self.p = current_palette(ctx.store.settings.theme)
         self.setWindowTitle("사용 흐름 안내")
-        self.resize(940, 720)
+        self.resize(1040, 780)
 
         content = QWidget()
         content_lay = QVBoxLayout(content)
@@ -162,12 +162,14 @@ class GuideDialog(QDialog):
         desc_lbl.setStyleSheet(f"color: {self.p['muted']};")
 
         top = QHBoxLayout()
-        top.addWidget(badge)
+        top.addWidget(badge, 0, Qt.AlignmentFlag.AlignTop)
         top.addWidget(title_lbl, 1)
 
         lay = QVBoxLayout(frame)
         lay.addLayout(top)
         lay.addWidget(desc_lbl)
+        # 박스마다 내용 길이가 달라도 위쪽 정렬을 유지
+        lay.addStretch(1)
         return frame
 
     def _arrow(self, direction: str) -> QLabel:
