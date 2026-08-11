@@ -91,7 +91,7 @@ class TunnelMeta:
 
 ### 기존 설정 마이그레이션
 
-v1의 `TunnelMeta`는 `hostname`/`service`/`server_cmd`/`server_cwd`/`start_together`를 최상위에 두었다. 로드 시 `routes` 키가 없고 `hostname`이나 `service`가 있으면 라우트 하나로 변환한다. `start_together`는 `server.autostart`로, `server_cmd`/`server_cwd`는 `kind="command"` 서비스로 옮긴다. 변환 후 곧바로 저장해 다음 실행부터는 새 형식만 남는다.
+v1의 `TunnelMeta`는 `hostname`/`service`/`server_cmd`/`server_cwd`/`start_together`를 최상위에 두었다. 로드 시 `routes` 키가 없고 `hostname`·`service`·`server_cmd` 중 하나라도 값이 있으면 라우트 하나로 변환한다(서버 명령만 등록해 둔 터널의 설정도 잃지 않기 위해서다). `start_together`는 `server.autostart`로, `server_cmd`/`server_cwd`는 `kind="command"` 서비스로 옮긴다. 변환 후 곧바로 저장해 다음 실행부터는 새 형식만 남는다.
 
 ## config.yml 다중 ingress
 
