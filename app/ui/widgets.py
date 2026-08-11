@@ -221,6 +221,7 @@ class ModalOverlay(QWidget):
         self.close_btn: QPushButton | None = None
         self._content_pref = content.size()
         self._clamping = False  # 우리가 건 resize를 선호 크기로 오인하지 않기 위한 가드
+        self._close_space_reserved = False
         self._content = content
         self._bg_color = QColor(0, 0, 0, 140)  # 검정 55% 알파
         content.setParent(self)
@@ -248,6 +249,7 @@ class ModalOverlay(QWidget):
                 " border-radius: 6px; }")
         self.close_btn.clicked.connect(self._request_close)
 
+        self._reserve_close_space()
         self._recompute_pref()
 
         # 레이아웃 대신 직접 배치한다 - 자식이 네이티브 윈도우 핸들을 갖는
@@ -332,6 +334,18 @@ class ModalOverlay(QWidget):
     def mousePressEvent(self, event) -> None:
         # 오버레이 배경(내용 위젯 바깥) 클릭은 뒤 화면으로 넘어가지 않게 흡수한다.
         event.accept()
+
+    def _reserve_close_space(self) -> None:
+        """닫기 버튼이 내용 위젯의 상단 요소와 겹치지 않도록 위 여백을 준다."""
+        if self._close_space_reserved:
+            return
+        layout = self._content.layout()
+        if layout is None:
+            return
+        margins = layout.contentsMargins()
+        layout.setContentsMargins(margins.left(), margins.top() + 20,
+                                  margins.right(), margins.bottom())
+        self._close_space_reserved = True
 
     def _recompute_pref(self) -> None:
         """내용의 자연스러운 크기를 다시 계산해 적용한다.
