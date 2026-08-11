@@ -7,6 +7,7 @@ STATE_COLORS = {
     TunnelState.ERROR: "#f85149",
 }
 
+# 하위 호환용 별칭 (dark 모드 기준, 임시 스크립트/테스트 등에서 사용)
 ACCENT = "#f6821f"
 ACCENT2 = "#4c9aff"
 
@@ -18,8 +19,9 @@ PALETTES = {
         "border": "#2a2f3f",
         "text": "#e8eaf0",
         "muted": "#9aa1b5",
-        "accent": ACCENT,
-        "accent2": ACCENT2,
+        "accent": "#f6821f",
+        "accent_hover": "#ff9a3d",
+        "accent2": "#4c9aff",
         "log_bg": "#0b0d12",
         "danger_bg": "#3a1d1d",
         "danger": "#f85149",
@@ -32,12 +34,13 @@ PALETTES = {
         "border": "#d5d9e0",
         "text": "#1c1e26",
         "muted": "#5a6072",
-        "accent": ACCENT,
-        "accent2": ACCENT2,
+        "accent": "#3182F6",
+        "accent_hover": "#1B64DA",
+        "accent2": "#1B64DA",
         "log_bg": "#ffffff",
         "danger_bg": "#fdecea",
         "danger": "#c62828",
-        "preview_text": "#7a4a00",
+        "preview_text": "#1B4F9C",
     },
 }
 
@@ -60,7 +63,7 @@ QPushButton {{ background: {p['panel2']}; border: 1px solid {p['border']};
 QPushButton:hover {{ border-color: {p['accent']}; }}
 QPushButton#primary {{ background: {p['accent']}; color: #ffffff; font-weight: 600;
                       border: none; }}
-QPushButton#primary:hover {{ background: #ff9a3d; }}
+QPushButton#primary:hover {{ background: {p['accent_hover']}; }}
 QPushButton#danger {{ color: {p['danger']}; }}
 QLineEdit, QComboBox, QSpinBox {{ background: {p['panel2']}; border: 1px solid {p['border']};
     border-radius: 6px; padding: 6px 10px; selection-background-color: {p['accent']}; }}
