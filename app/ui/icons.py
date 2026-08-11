@@ -122,6 +122,20 @@ def make_icon(name: str, color: str, size: int = 32) -> QIcon:
         painter.drawLine(QPointF(size / 2 - lid_w / 2, top - size * 0.08),
                           QPointF(size / 2 + lid_w / 2, top - size * 0.08))
 
+    elif name == "arrow_right":
+        cy = size / 2
+        painter.drawLine(QPointF(m, cy), QPointF(size - m, cy))
+        head = inner * 0.35
+        painter.drawLine(QPointF(size - m, cy), QPointF(size - m - head, cy - head))
+        painter.drawLine(QPointF(size - m, cy), QPointF(size - m - head, cy + head))
+
+    elif name == "arrow_down":
+        cx = size / 2
+        painter.drawLine(QPointF(cx, m), QPointF(cx, size - m))
+        head = inner * 0.35
+        painter.drawLine(QPointF(cx, size - m), QPointF(cx - head, size - m - head))
+        painter.drawLine(QPointF(cx, size - m), QPointF(cx + head, size - m - head))
+
     elif name == "folder":
         path = QPainterPath()
         left, top = m, m + inner * 0.12

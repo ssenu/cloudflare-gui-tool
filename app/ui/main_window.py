@@ -159,9 +159,13 @@ class MainWindow(QWidget):
         self.add_btn.setObjectName("primary")
         self.settings_btn = QPushButton("설정")
         self.settings_btn.setIcon(make_icon("gear", icon_color))
+        self.help_btn = QPushButton("?")
+        self.help_btn.setFixedSize(34, 34)
+        self.help_btn.setToolTip("사용 흐름 안내")
         self.refresh_btn.clicked.connect(self.refresh)
         self.add_btn.clicked.connect(self._create_tunnel)
         self.settings_btn.clicked.connect(self._open_settings)
+        self.help_btn.clicked.connect(self._open_guide)
         self.target_combo.currentIndexChanged.connect(self._switch_target)
 
         top = QHBoxLayout()
@@ -170,6 +174,7 @@ class MainWindow(QWidget):
         top.addWidget(self.refresh_btn)
         top.addWidget(self.add_btn)
         top.addWidget(self.settings_btn)
+        top.addWidget(self.help_btn)
 
         # 카드 목록
         self.list_lay = QVBoxLayout()
@@ -392,6 +397,10 @@ class MainWindow(QWidget):
         self._reload_targets()
         if self.ctx.store.settings.theme != prev_theme:
             self._apply_theme()
+
+    def _open_guide(self):
+        from app.ui.guide import GuideDialog
+        GuideDialog(self.ctx, self).exec()
 
     def _apply_theme(self):
         from PyQt6.QtWidgets import QApplication
