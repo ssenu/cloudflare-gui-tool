@@ -683,7 +683,10 @@ class MainWindow(QWidget):
 
         def _on_finished(result):
             if result == dlg.DialogCode.Accepted:
-                self._do_delete_tunnel(card)
+                # 오버레이 정리(같은 finished에 연결됨)가 먼저 끝나도록 한 틱
+                # 미룬다. 삭제 중 대기 루프가 먼저 돌면 반투명 배경만 남은
+                # 화면이 잠깐 보인다.
+                QTimer.singleShot(0, lambda: self._do_delete_tunnel(card))
 
         dlg.finished.connect(_on_finished)
         self._open_modal(dlg)
