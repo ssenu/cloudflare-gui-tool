@@ -59,7 +59,8 @@ class CloudflaredClient:
     def list_tunnels(self) -> list[TunnelInfo]:
         res = self._run(["tunnel", "list", "--output", "json"])
         try:
-            data = json.loads(res.stdout or "[]")
+            # 터널이 0개면 cloudflared가 "null"을 출력함 → 빈 목록으로 처리
+            data = json.loads(res.stdout or "[]") or []
         except json.JSONDecodeError:
             raise CloudflaredError(RunResult(1, res.stdout,
                                              "터널 목록 JSON 파싱 실패"))

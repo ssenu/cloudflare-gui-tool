@@ -96,3 +96,9 @@ def test_list_tunnels_invalid_json_raises_cloudflared_error():
     r = FakeRunner({"tunnel list": RunResult(0, "not-json!!", "")})
     with pytest.raises(CloudflaredError, match="JSON 파싱 실패"):
         CloudflaredClient(r).list_tunnels()
+
+
+def test_list_tunnels_null_output_returns_empty():
+    # 터널이 0개일 때 cloudflared는 "null"을 출력한다
+    r = FakeRunner({"tunnel list": RunResult(0, "null\n", "")})
+    assert CloudflaredClient(r).list_tunnels() == []
