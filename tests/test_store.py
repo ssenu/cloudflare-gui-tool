@@ -34,6 +34,18 @@ def test_save_and_load_roundtrip(tmp_path):
     assert "tunnels" in raw
 
 
+def test_theme_roundtrip(tmp_path):
+    path = str(tmp_path / "settings.json")
+    store = SettingsStore(path=path)
+    store.load()
+    assert store.settings.theme == "dark"
+    store.settings.theme = "light"
+    store.save()
+
+    loaded = SettingsStore(path=path).load()
+    assert loaded.theme == "light"
+
+
 def test_load_corrupt_json_falls_back_to_defaults(tmp_path):
     """손상된 JSON은 기본값으로 폴백되어야 함"""
     path = str(tmp_path / "settings.json")

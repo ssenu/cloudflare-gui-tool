@@ -30,6 +30,7 @@ class Settings:
     cloudflared_path: str = ""
     tunnels: dict[str, TunnelMeta] = field(default_factory=dict)
     ssh_profiles: list[SshProfile] = field(default_factory=list)
+    theme: str = "dark"
 
 
 def _filter_dataclass_kwargs(dataclass_type, data: dict) -> dict:
@@ -89,11 +90,16 @@ class SettingsStore:
                             # 유효하지 않은 항목은 스킵
                             continue
 
+                theme = raw.get("theme", "dark")
+                if theme not in ("dark", "light"):
+                    theme = "dark"
+
                 self.settings = Settings(
                     root_domain=raw.get("root_domain", ""),
                     cloudflared_path=raw.get("cloudflared_path", ""),
                     tunnels=tunnels,
                     ssh_profiles=ssh_profiles,
+                    theme=theme,
                 )
             except (TypeError, KeyError, ValueError, AttributeError):
                 # 예상치 못한 형식 에러 시 기본값으로 폴백
@@ -108,6 +114,7 @@ class SettingsStore:
             "cloudflared_path": self.settings.cloudflared_path,
             "tunnels": {k: asdict(v) for k, v in self.settings.tunnels.items()},
             "ssh_profiles": [asdict(p) for p in self.settings.ssh_profiles],
+            "theme": self.settings.theme,
         }
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump(raw, f, ensure_ascii=False, indent=2)

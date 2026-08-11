@@ -5,14 +5,14 @@ import sys
 from PyQt6.QtWidgets import QApplication
 
 from app.context import AppContext
-from app.ui.theme import APP_QSS
+from app.ui.theme import build_qss
 
 
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Cloudflare Tunnel GUI")
-    app.setStyleSheet(APP_QSS)
     ctx = AppContext()
+    app.setStyleSheet(build_qss(ctx.store.settings.theme))
     from app.ui.onboarding import OnboardingDialog, needs_onboarding
     if needs_onboarding(ctx):
         dlg = OnboardingDialog(ctx)
