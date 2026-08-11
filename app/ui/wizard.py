@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import threading
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog,
                              QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                             QStackedWidget, QVBoxLayout, QWidget)
+                             QScrollArea, QVBoxLayout, QWidget)
 
 from app.context import AppContext
 from app.core.cloudflared import DnsRecordExistsError
@@ -33,10 +33,15 @@ class TunnelWizard(QDialog):
         self._last_error_is_dns_conflict = False
         self._close_countdown = 5  # 성공 시 자동 닫기 카운트다운(초)
         self.setWindowTitle("터널 생성")
-        self.setMinimumSize(600, 580)
+        # 창을 작게 고정하고, 내용이 넘치는 페이지(4단계)는 스크롤로 처리한다.
+        # 페이지마다 창 크기가 들썩이면 산만하고, 가장 높은 페이지에 맞추면
+        # 짧은 페이지에서 아래가 텅 빈다 - 작은 고정 크기 + 스크롤이 절충안이다.
+        self.setFixedWidth(540)
+        self.setFixedHeight(400)
 
         palette = current_palette(ctx.store.settings.theme)
-        self.stack = QStackedWidget()
+        self.pages: list[QWidget] = []
+        self._page_index = 0
         self.err = QLabel()
         self.err.setStyleSheet(f"color: {palette['danger']};")
         self.preview = QLabel()
@@ -63,7 +68,15 @@ class TunnelWizard(QDialog):
         self.overwrite_btn.clicked.connect(self._start_overwrite)
 
         lay = QVBoxLayout(self)
-        lay.addWidget(self.stack, 1)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(8)
+        page_area = QScrollArea()
+        page_area.setWidgetResizable(True)
+        page_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        page_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._page_area = page_area
+        lay.addWidget(page_area, 1)
         lay.addWidget(self.preview)
         lay.addWidget(self.err)
         lay.addWidget(self.overwrite_hint)
@@ -91,8 +104,10 @@ class TunnelWizard(QDialog):
     def _page(self, title: str, *widgets) -> QWidget:
         w = QWidget()
         v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(4)
         t = QLabel(title)
-        t.setStyleSheet("font-size: 16px; font-weight: 700;")
+        t.setStyleSheet("font-size: 15px; font-weight: 700;")
         v.addWidget(t)
         for x in widgets:
             v.addWidget(x)
@@ -140,15 +155,13 @@ class TunnelWizard(QDialog):
         self.status_label = QLabel()
         self.status_label.setWordWrap(True)
 
-        self.stack.addWidget(self._page(
+        self.pages.append(self._page(
             "1. 터널 이름",
-            self._hint("이 터널을 구분하기 위한 이름입니다. Cloudflare 계정 안에서만 "
-                       "사용되며 실제 접속 주소와는 관계가 없습니다."),
-            self._hint("영문, 숫자, 하이픈(-), 밑줄(_)만 사용할 수 있습니다. 설정 파일 "
-                       "이름(config-<이름>.yml)에도 그대로 쓰입니다."),
-            self._hint("예: mysite, blog, home-api"),
+            self._hint("목록에서 구분하기 위한 이름입니다. 실제 접속 주소와는 "
+                       "관계가 없고, 설정 파일 이름에 쓰입니다."),
+            self._hint("영문, 숫자, 하이픈, 밑줄만 사용 가능. 예: mysite, blog, home-api"),
             self.name_edit))
-        self.stack.addWidget(self._page(
+        self.pages.append(self._page(
             "2. 연결할 도메인",
             self._hint("방문자가 브라우저에 입력하게 될 주소입니다. 두 칸을 합친 "
                        "주소로 Cloudflare에 CNAME 레코드가 자동 생성됩니다."),
@@ -156,30 +169,24 @@ class TunnelWizard(QDialog):
             QLabel("서브도메인"), self.sub_edit,
             QLabel("루트 도메인"), self.domain_edit,
             self.hostname_result))
-        self.stack.addWidget(self._page(
+        self.pages.append(self._page(
             "3. 로컬 서비스 주소",
-            self._hint("터널이 트래픽을 전달할 내 컴퓨터의 주소입니다. 웹서버가 실제로 "
-                       "듣고 있는 포트를 적어야 합니다."),
-            self._hint("로컬 구간은 http로 충분합니다. 외부 접속의 HTTPS는 Cloudflare가 "
-                       "자동으로 처리합니다."),
-            self._hint("예: http://localhost:8000 (uvicorn), "
-                       "http://localhost:5173 (Vite), http://localhost:3000 (Next.js)"),
+            self._hint("웹서버가 실제로 듣고 있는 주소입니다. 로컬 구간은 http로 "
+                       "충분하고, 외부 HTTPS는 Cloudflare가 처리합니다."),
+            self._hint("예: http://localhost:8000 (uvicorn), :5173 (Vite), :3000 (Next.js)"),
             self.service_edit))
-        self.stack.addWidget(self._page(
+        self.pages.append(self._page(
             "4. 웹서버 실행 명령 (선택)",
-            self._hint("터널과 함께 켤 웹서버 명령을 등록해 두면 카드에서 한 번에 실행할 "
-                       "수 있습니다. 비워 두면 서버는 직접 실행해야 합니다."),
-            self._hint("작업 폴더는 명령을 실행할 위치입니다. 보통 프로젝트 폴더를 "
-                       "지정합니다."),
-            self._hint("명령 예: uvicorn main:app --port 8000, npm run dev"),
-            self._hint("도커 컴포즈를 고르면 시작/정지 명령 기본값이 채워지고, "
-                       "작업 폴더(compose 파일 위치)가 필수가 됩니다."),
+            self._hint("등록해 두면 카드에서 터널과 함께 켤 수 있습니다. 비워 두면 "
+                       "서버는 직접 실행해야 합니다. 예: uvicorn main:app --port 8000"),
+            self._hint("도커 컴포즈를 고르면 명령 기본값이 채워지고 작업 폴더"
+                       "(compose 파일 위치)가 필수가 됩니다."),
             QLabel("서비스 종류"), self.kind_combo,
             QLabel("시작 명령"), self.cmd_edit,
             QLabel("정지 명령"), self.stop_cmd_edit,
             QLabel("작업 폴더"), self.cwd_edit, browse,
             self.together_chk))
-        self.stack.addWidget(self._page(
+        self.pages.append(self._page(
             "5. 실행",
             self._hint("터널 생성 → DNS 연결 → 설정 파일 작성 순서로 자동 진행됩니다. "
                        "중간에 실패하면 그 단계에서 멈추며, 이미 만들어진 터널은 롤백 "
@@ -203,7 +210,7 @@ class TunnelWizard(QDialog):
         return f"{self.sub_edit.text().strip()}.{self.domain_edit.text().strip()}"
 
     def _validate_current(self) -> str:
-        i = self.stack.currentIndex()
+        i = self._page_index
         if i == 0:
             return validate_name(self.name_edit.text().strip(), self.existing)
         if i == 1:
@@ -220,7 +227,7 @@ class TunnelWizard(QDialog):
         return ""
 
     def _update_preview(self):
-        i = self.stack.currentIndex()
+        i = self._page_index
         steps = plan_steps(self.name_edit.text().strip() or "<이름>",
                            self._hostname(), self.service_edit.text().strip())
         if i in (0, 1, 2):
@@ -236,8 +243,43 @@ class TunnelWizard(QDialog):
         else:
             self.hostname_result.setText("접속 주소: (서브도메인과 루트 도메인을 입력하세요)")
 
+    def _show_page(self, i: int) -> None:
+        """스크롤 영역에 현재 페이지만 얹는다.
+
+        QStackedWidget을 쓰면 스택의 sizeHint가 항상 가장 높은 페이지 기준이라
+        짧은 페이지에서도 불필요한 스크롤바가 생긴다. 한 번에 한 페이지만
+        넣어 크기 계산이 실제 내용과 일치하게 한다.
+        """
+        if self._page_area.widget() is not None:
+            taken = self._page_area.takeWidget()
+            if taken is not None:
+                taken.setParent(None)  # pages 리스트가 참조를 유지한다
+        self._page_index = i
+        self._page_area.setWidget(self.pages[i])
+        self.pages[i].show()
+        self._fit_height()
+
+    def _fit_height(self) -> None:
+        """현재 페이지 높이에 맞춰 창 높이만 조절한다(폭은 고정).
+
+        스크롤 영역에 한 페이지만 들어 있으므로 heightForWidth로 실제 필요한
+        높이를 정확히 얻을 수 있다. 너무 낮거나 높지 않게 범위를 제한한다.
+        """
+        page = self.pages[self._page_index]
+        if page.layout() is None:
+            return
+        need = page.layout().heightForWidth(self.width() - 28)
+        chrome = self.height() - self._page_area.height()
+        if need <= 0 or chrome <= 0:
+            return
+        self.setFixedHeight(max(260, min(need + chrome + 8, 560)))
+        parent = self.parentWidget()
+        center = getattr(parent, "_center_content", None)
+        if callable(center):
+            center()
+
     def _go(self, i: int):
-        self.stack.setCurrentIndex(i)
+        self._show_page(i)
         self.back_btn.setVisible(0 < i < 4)
         self.next_btn.setText("생성 시작" if i == 3 else "다음 →")
         self.err.clear()
@@ -254,8 +296,9 @@ class TunnelWizard(QDialog):
             self._tunnel_created = False
             self._close_timer.stop()
 
+
     def _back(self):
-        i = self.stack.currentIndex()
+        i = self._page_index
         # 실행 페이지(4)에서 뒤로가면 페이지 3으로 돌아가고, 생성 시작 버튼 준비
         if i == 4:
             self._go(3)
@@ -276,7 +319,7 @@ class TunnelWizard(QDialog):
         if e:
             self.err.setText(e)
             return
-        i = self.stack.currentIndex()
+        i = self._page_index
         if i < 3:
             self._go(i + 1)
         elif i == 3:

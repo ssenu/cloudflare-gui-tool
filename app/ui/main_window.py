@@ -16,7 +16,7 @@ from app.core.process_mgr import TunnelState
 from app.core.store import RouteMeta, SshProfile, TunnelMeta, new_route_id
 from app.ui.icons import make_icon
 from app.ui.theme import STATE_COLORS, build_qss, current_palette, ensure_qss_icons
-from app.ui.widgets import Spinner, ToggleSwitch, danger_menu_action
+from app.ui.widgets import ModalOverlay, Spinner, ToggleSwitch, danger_menu_action
 from app.ui.winutil import apply_titlebar_theme
 from app.ui.wizard import TunnelWizard
 
@@ -51,8 +51,12 @@ def _toggle_label(text: str, palette: dict) -> QLabel:
     return lbl
 
 
+ROUTE_DOT_SIZE = 8  # 터널 동그라미(12px)보다 작게: 라우트가 하위임을 크기로 표현
+ROUTE_DOT_MUTED = "muted"  # 서비스 미등록 라우트의 "해당 없음" 색은 팔레트 muted 사용
+
+
 class RouteRow(QWidget):
-    """라우트 한 줄: hostname → 서비스 주소, 서버 토글(또는 등록 버튼), 로그, 메뉴."""
+    """라우트 한 줄: 상태 동그라미, hostname → 서비스 주소, 서버 토글(또는 등록 버튼), 메뉴."""
 
     def __init__(self, card: "TunnelCard", route: RouteMeta):
         super().__init__(card)
@@ -62,12 +66,15 @@ class RouteRow(QWidget):
         palette = current_palette(win.ctx.store.settings.theme)
         icon_color = palette["text"]
 
+        self.dot = QLabel()
+        self.dot.setFixedSize(ROUTE_DOT_SIZE, ROUTE_DOT_SIZE)
+
         hostname = route.hostname or "(hostname 미설정)"
         service = route.service or "(서비스 미설정)"
         full_text = f"{hostname}  →  {service}"
         self.text_label = QLabel()
         metrics = self.text_label.fontMetrics()
-        self.text_label.setText(_elide(full_text, metrics, 340))
+        self.text_label.setText(_elide(full_text, metrics, 320))
         self.text_label.setToolTip(full_text)
         self.text_label.setSizePolicy(QSizePolicy.Policy.Expanding,
                                       QSizePolicy.Policy.Preferred)
@@ -88,24 +95,19 @@ class RouteRow(QWidget):
             self.register_btn = QPushButton("서버 등록")
             self.register_btn.clicked.connect(self._edit_route)
 
-        self.log_btn = QPushButton("로그")
-        self.log_btn.setIcon(make_icon("log", icon_color))
-        self.log_btn.setVisible(self.has_service)
-        self.log_btn.clicked.connect(
-            lambda: win._open_log_service(card.tunnel_name, self.route))
-
         menu_btn = QPushButton()
         menu_btn.setIcon(make_icon("dots", icon_color))
-        menu_btn.setFixedWidth(34)
+        menu_btn.setFixedWidth(28)  # 터널 메뉴(34px)보다 작게: 하위 위계 표현
         menu_btn.clicked.connect(lambda: self._menu(menu_btn))
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(0, 2, 0, 2)
+        lay.setContentsMargins(0, 1, 0, 1)
+        lay.setSpacing(6)
+        lay.addWidget(self.dot)
         lay.addWidget(self.text_label, 1)
         lay.addWidget(toggle_label)
         lay.addWidget(self.spinner)
         lay.addWidget(self.server_switch if self.server_switch else self.register_btn)
-        lay.addWidget(self.log_btn)
         lay.addWidget(menu_btn)
 
         self.update_state()
@@ -129,6 +131,7 @@ class RouteRow(QWidget):
         edit_action = QAction("편집", m)
         edit_action.triggered.connect(self._edit_route)
         m.addAction(edit_action)
+        m.addSeparator()
         danger_menu_action(m, "삭제", palette, self._delete_route)
         m.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
@@ -140,6 +143,9 @@ class RouteRow(QWidget):
 
     def update_state(self):
         ctx = self.card.win.ctx
+        palette = current_palette(ctx.store.settings.theme)
+        pending = False
+        running = False
         if self.server_switch is not None:
             pending = ctx.manager.service_pending(self.card.tunnel_name, self.route)
             self.spinner.setVisible(pending)
@@ -168,6 +174,21 @@ class RouteRow(QWidget):
                 if reason:
                     self.server_switch.setToolTip(reason)
 
+        # 라우트 동그라미: 실행 중이면 RUNNING, 전이 중이면 STARTING, 그 외/
+        # 서비스 미등록이면 STOPPED(=회색). 미등록 라우트는 팔레트 muted로
+        # "해당 없음"을 표현한다(STATE_COLORS[STOPPED]는 회색이지만 muted가
+        # 테마별 무채색 뉘앙스를 더 잘 맞춘다).
+        if not self.has_service:
+            dot_color = palette["muted"]
+        elif pending:
+            dot_color = STATE_COLORS[TunnelState.STARTING]
+        elif running:
+            dot_color = STATE_COLORS[TunnelState.RUNNING]
+        else:
+            dot_color = STATE_COLORS[TunnelState.STOPPED]
+        self.dot.setStyleSheet(
+            f"background: {dot_color}; border-radius: {ROUTE_DOT_SIZE // 2}px;")
+
 
 class TunnelCard(QFrame):
     def __init__(self, win: "MainWindow", info, meta: TunnelMeta):
@@ -194,7 +215,8 @@ class TunnelCard(QFrame):
         self.spinner.hide()
         log_btn = QPushButton("로그")
         log_btn.setIcon(make_icon("log", icon_color))
-        log_btn.clicked.connect(lambda: win._open_log_tunnel(self.tunnel_name))
+        log_btn.setToolTip("터널과 모든 라우트의 로그를 탭으로 봅니다")
+        log_btn.clicked.connect(lambda: win._open_log_tunnel(self))
         menu_btn = QPushButton()
         menu_btn.setIcon(make_icon("dots", icon_color))
         menu_btn.setFixedWidth(34)
@@ -211,9 +233,16 @@ class TunnelCard(QFrame):
         header.addWidget(log_btn)
         header.addWidget(menu_btn)
 
+        # I3: 터널(상위)과 라우트(하위) 목록을 시각적으로 구분하는 얇은 구분선.
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setStyleSheet(f"background: {palette['border']}; max-height: 1px;")
+        separator.setFixedHeight(1)
+
         self.route_rows: list[RouteRow] = []
         routes_lay = QVBoxLayout()
-        routes_lay.setContentsMargins(24, 4, 0, 0)
+        routes_lay.setContentsMargins(24, 2, 0, 0)
+        routes_lay.setSpacing(0)
         for route in meta.routes:
             row = RouteRow(self, route)
             self.route_rows.append(row)
@@ -223,12 +252,13 @@ class TunnelCard(QFrame):
         add_route_btn.setIcon(make_icon("plus", icon_color))
         add_route_btn.clicked.connect(lambda: win._add_route(self))
         add_row = QHBoxLayout()
-        add_row.setContentsMargins(24, 4, 0, 0)
+        add_row.setContentsMargins(24, 2, 0, 0)
         add_row.addWidget(add_route_btn)
         add_row.addStretch(1)
 
         lay = QVBoxLayout(self)
         lay.addLayout(header)
+        lay.addWidget(separator)
         lay.addLayout(routes_lay)
         lay.addLayout(add_row)
 
@@ -262,7 +292,11 @@ class TunnelCard(QFrame):
     def _tunnel_menu(self, anchor: QPushButton):
         palette = current_palette(self.win.ctx.store.settings.theme)
         m = QMenu(self)
-        danger_menu_action(m, "삭제", palette, lambda: self.win._delete_tunnel(self))
+        add_route_action = QAction("라우트 추가", m)
+        add_route_action.triggered.connect(lambda: self.win._add_route(self))
+        m.addAction(add_route_action)
+        m.addSeparator()
+        danger_menu_action(m, "터널 삭제", palette, lambda: self.win._delete_tunnel(self))
         m.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
     # ---- 표시 갱신 ----
@@ -598,15 +632,34 @@ class MainWindow(QWidget):
             # 대시보드는 브라우저만 열고, 확인 다이얼로그를 다시 띄운다.
             webbrowser.open("https://dash.cloudflare.com")
 
+    # ---- 모달 오버레이(별도 창 대신 메인 창 안에 겹쳐 띄우기) ----
+    def _open_modal(self, dialog):
+        """QDialog를 별도 OS 창 대신 메인 창 위 오버레이로 임베드한다.
+
+        exec()는 쓰지 않는다 - ModalOverlay가 뒤쪽 클릭을 흡수해 이미
+        모달 역할을 한다. 호출자는 dialog.finished에 연결해 결과(accept/
+        reject)를 받는다.
+        """
+        dialog.setWindowFlags(Qt.WindowType.Widget)
+        overlay = ModalOverlay(self, dialog,
+                               current_palette(self.ctx.store.settings.theme))
+        dialog.finished.connect(overlay.cleanup)
+        dialog.show()
+
     # ---- 생성/삭제 ----
     def _create_tunnel(self):
         wiz = TunnelWizard(self.ctx, [c.tunnel_name for c in self.cards], self)
-        if wiz.exec() == wiz.DialogCode.Accepted and wiz.created_meta:
-            meta = wiz.created_meta
-            if isinstance(meta, TunnelMeta):
-                self.ctx.store.settings.tunnels_for(self.ctx.runner.name)[meta.name] = meta
-                self.ctx.store.save()
-            self.refresh()
+
+        def _on_finished(result):
+            if result == wiz.DialogCode.Accepted and wiz.created_meta:
+                meta = wiz.created_meta
+                if isinstance(meta, TunnelMeta):
+                    self.ctx.store.settings.tunnels_for(self.ctx.runner.name)[meta.name] = meta
+                    self.ctx.store.save()
+                self.refresh()
+
+        wiz.finished.connect(_on_finished)
+        self._open_modal(wiz)
 
     def _delete_tunnel(self, card: TunnelCard):
         name = card.tunnel_name
@@ -674,16 +727,26 @@ class MainWindow(QWidget):
     def _add_route(self, card: TunnelCard):
         from app.ui.route_dialog import RouteDialog
         dlg = RouteDialog(self.ctx, card.meta, None, self)
-        if dlg.exec() == dlg.DialogCode.Accepted:
-            self._notify_restart_needed(card.tunnel_name)
-            self.refresh()
+
+        def _on_finished(result):
+            if result == dlg.DialogCode.Accepted:
+                self._notify_restart_needed(card.tunnel_name)
+                self.refresh()
+
+        dlg.finished.connect(_on_finished)
+        self._open_modal(dlg)
 
     def _edit_route(self, card: TunnelCard, route: RouteMeta):
         from app.ui.route_dialog import RouteDialog
         dlg = RouteDialog(self.ctx, card.meta, route, self)
-        if dlg.exec() == dlg.DialogCode.Accepted:
-            self._notify_restart_needed(card.tunnel_name)
-            self.refresh()
+
+        def _on_finished(result):
+            if result == dlg.DialogCode.Accepted:
+                self._notify_restart_needed(card.tunnel_name)
+                self.refresh()
+
+        dlg.finished.connect(_on_finished)
+        self._open_modal(dlg)
 
     def _delete_route(self, card: TunnelCard, route: RouteMeta):
         ok = self._confirm_delete(
@@ -726,21 +789,20 @@ class MainWindow(QWidget):
             self.info_banner.show()
 
     # ---- 로그 ----
-    def _open_log_tunnel(self, name: str):
+    def _open_log_tunnel(self, card: TunnelCard):
+        # I4: 터널당 로그 버튼 하나로 통합 - 첫 탭 "터널", 그 뒤로 라우트마다
+        # 한 탭(탭 이름은 hostname, 없으면 "서버 N"). 라우트가 없으면 "터널"
+        # 탭만 열어 탭이 불필요하게 많아지지 않게 한다.
+        name = card.tunnel_name
         # B2: 캐시 키에 대상(runner.name)을 포함시켜 대상 전환 후 다른 대상의
         # 뷰어가 잘못 재사용되지 않게 한다.
         target = self.ctx.runner.name
         title = f"{name} ({self._target_display_name()})"
-        self._open_log_viewer(
-            f"tunnel:{target}:{name}", title,
-            {"터널": self.ctx.manager.log_path_for_tunnel(name)})
-
-    def _open_log_service(self, tunnel_name: str, route: RouteMeta):
-        target = self.ctx.runner.name
-        title = f"{tunnel_name} · {route.hostname or route.id} ({self._target_display_name()})"
-        self._open_log_viewer(
-            f"svc:{target}:{tunnel_name}:{route.id}", title,
-            {"서버": self.ctx.manager.log_path_for_service(tunnel_name, route)})
+        log_paths = {"터널": self.ctx.manager.log_path_for_tunnel(name)}
+        for i, route in enumerate(card.meta.routes, start=1):
+            tab_name = route.hostname or f"서버 {i}"
+            log_paths[tab_name] = self.ctx.manager.log_path_for_service(name, route)
+        self._open_log_viewer(f"tunnel:{target}:{name}", title, log_paths)
 
     def _open_log_viewer(self, key: str, title: str, log_paths: dict[str, str]):
         from app.ui.log_viewer import LogViewer

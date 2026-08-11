@@ -4,7 +4,7 @@ core 모듈에 Qt 의존성이 유입되지 않도록 이 모듈은 app/ui 안�
 """
 from __future__ import annotations
 
-from PyQt6.QtCore import QRectF, Qt, QTimer
+from PyQt6.QtCore import QEvent, QRectF, Qt, QTimer
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import (
     QAbstractButton,
@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMenu,
     QSizePolicy,
+    QVBoxLayout,
     QWidget,
     QWidgetAction,
 )
@@ -196,3 +197,100 @@ def danger_menu_action(menu: QMenu, text: str, palette: dict, on_trigger) -> QWi
 
     menu.addAction(action)
     return action
+
+
+class ModalOverlay(QWidget):
+    """부모 위젯 전체를 덮는 반투명 모달 오버레이.
+
+    별도 OS 창(작업표시줄에 따로 뜨는 것)을 새로 여는 대신, 부모(주로
+    MainWindow) 안에 그려지는 자식 위젯이다. 내용 위젯(주로
+    `setWindowFlags(Qt.WindowType.Widget)`로 일반 위젯이 된 QDialog)을
+    가운데 정렬해 얹고, 그 뒤쪽 영역은 반투명 배경으로 어둡게 칠하며
+    클릭을 흡수해 뒤 화면을 조작하지 못하게 막는다.
+
+    부모가 리사이즈되면 이벤트 필터로 크기를 맞추고, Esc 키는 내용
+    위젯의 reject()를 호출해 닫는다. 사용이 끝나면 cleanup()을 호출해
+    이벤트 필터를 해제하고 스스로를 정리해야 한다(보통 내용 위젯의
+    finished 시그널에 연결).
+    """
+
+    def __init__(self, parent: QWidget, content: QWidget, palette: dict | None = None):
+        super().__init__(parent)
+        self._content = content
+        self._bg_color = QColor(0, 0, 0, 140)  # 검정 55% 알파
+        content.setParent(self)
+        if palette:
+            # 내용 위젯이 앱 배경과 같은 색이면 모달 경계가 보이지 않는다.
+            # 카드처럼 패널 배경 + 테두리를 줘서 떠 있는 시트로 읽히게 한다.
+            content.setObjectName("modalContent")
+            content.setStyleSheet(
+                f"QDialog#modalContent {{ background: {palette['panel']}; "
+                f"border: 1px solid {palette['border']}; border-radius: 12px; }}")
+
+        # 레이아웃 대신 직접 배치한다 - 자식이 네이티브 윈도우 핸들을 갖는
+        # 경우(타이틀바 테마 적용 등) 레이아웃 정렬이 어긋나는 일이 있어서
+        # 중앙 정렬을 계산으로 못박는다.
+        self.setGeometry(parent.rect())
+        parent.installEventFilter(self)
+        content.installEventFilter(self)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.show()
+        self.raise_()
+        content.show()
+        # 부모가 아직 화면에 없으면 showEvent가 오지 않으므로 여기서도 맞춘다.
+        self._center_content()
+        self.setFocus()
+
+    def eventFilter(self, obj, event):
+        if obj is self.parent() and event.type() in (
+                QEvent.Type.Resize, QEvent.Type.LayoutRequest):
+            self.setGeometry(self.parent().rect())
+        elif obj is self._content and event.type() == QEvent.Type.Resize:
+            self._center_content()
+        return False
+
+    def _center_content(self) -> None:
+        # 부모 rect를 기준으로 계산한다 - 부모가 아직 표시되기 전이면 self의
+        # geometry가 아직 반영되지 않은 경우가 있다.
+        parent = self.parent()
+        area = parent.rect() if parent is not None else self.rect()
+        if self.geometry() != area:
+            self.setGeometry(area)
+        c = self._content
+        c.move(max(0, (area.width() - c.width()) // 2),
+               max(0, (area.height() - c.height()) // 2))
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._center_content()
+
+    def showEvent(self, event) -> None:
+        # 부모가 생성 직후 레이아웃으로 커지는 경우가 있어 표시 시점에 한 번 더 맞춘다.
+        parent = self.parent()
+        if parent is not None:
+            self.setGeometry(parent.rect())
+        self._center_content()
+        super().showEvent(event)
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), self._bg_color)
+
+    def mousePressEvent(self, event) -> None:
+        # 오버레이 배경(내용 위젯 바깥) 클릭은 뒤 화면으로 넘어가지 않게 흡수한다.
+        event.accept()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            reject = getattr(self._content, "reject", None)
+            if callable(reject):
+                reject()
+                return
+        super().keyPressEvent(event)
+
+    def cleanup(self) -> None:
+        parent = self.parent()
+        if parent is not None:
+            parent.removeEventFilter(self)
+        self.hide()
+        self.deleteLater()
