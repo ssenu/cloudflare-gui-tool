@@ -71,7 +71,7 @@ class ToggleSwitch(QAbstractButton):
         knob_d = h - 6
         knob_y = 3
         knob_x = w - knob_d - 3 if checked else 3
-        knob_color = QColor("#ffffff") if checked else QColor(p["panel"])
+        knob_color = QColor(p["on_accent"]) if checked else QColor(p["panel"])
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(knob_color)
         painter.drawEllipse(QRectF(knob_x, knob_y, knob_d, knob_d))
@@ -108,7 +108,7 @@ def danger_menu_action(menu: QMenu, text: str, palette: dict, on_trigger) -> QWi
     label.setStyleSheet(
         f"""
         QLabel {{ color: {palette['danger']}; background: transparent; }}
-        QLabel:hover {{ color: #ffffff; background: {palette['danger']}; }}
+        QLabel:hover {{ color: {palette['on_accent']}; background: {palette['danger']}; }}
         """
     )
     layout.addWidget(label)

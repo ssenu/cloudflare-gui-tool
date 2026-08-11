@@ -28,6 +28,7 @@ PALETTES = {
         "danger_bg": "#3a1d1d",
         "danger": "#f85149",
         "preview_text": "#ffd28e",
+        "on_accent": "#ffffff",
     },
     "light": {
         "bg": "#f5f6f8",
@@ -43,6 +44,7 @@ PALETTES = {
         "danger_bg": "#fdecea",
         "danger": "#c62828",
         "preview_text": "#1B4F9C",
+        "on_accent": "#ffffff",
     },
 }
 
@@ -73,7 +75,7 @@ def ensure_qss_icons(mode: str) -> dict[str, str]:
             return {}
 
         return {"chevron": path.replace("\\", "/")}
-    except Exception:
+    except OSError:
         return {}
 
 
@@ -97,7 +99,7 @@ QLabel#cardSub {{ color: {p['muted']}; }}
 QPushButton {{ background: {p['panel2']}; border: 1px solid {p['border']};
               border-radius: 6px; padding: 6px 14px; color: {p['text']}; }}
 QPushButton:hover {{ border-color: {p['accent']}; }}
-QPushButton#primary {{ background: {p['accent']}; color: #ffffff; font-weight: 600;
+QPushButton#primary {{ background: {p['accent']}; color: {p['on_accent']}; font-weight: 600;
                       border: none; }}
 QPushButton#primary:hover {{ background: {p['accent_hover']}; }}
 QPushButton#danger {{ color: {p['danger']}; }}
@@ -106,14 +108,14 @@ QLineEdit, QComboBox, QSpinBox {{ background: {p['panel2']}; border: 1px solid {
 QLineEdit:focus, QComboBox:focus {{ border-color: {p['accent2']}; }}
 QComboBox QAbstractItemView {{ background: {p['panel']}; color: {p['text']};
     border: 1px solid {p['border']}; selection-background-color: {p['accent']};
-    selection-color: #ffffff; }}
+    selection-color: {p['on_accent']}; }}
 QPlainTextEdit {{ background: {p['log_bg']}; border: 1px solid {p['border']};
     border-radius: 6px; font-family: 'Cascadia Code', Consolas; font-size: 12px;
     color: {p['text']}; }}
 QScrollArea {{ border: none; }}
 QToolTip {{ background: {p['panel2']}; color: {p['text']}; border: 1px solid {p['border']}; }}
 QMenu {{ background: {p['panel']}; color: {p['text']}; border: 1px solid {p['border']}; }}
-QMenu::item:selected {{ background: {p['accent']}; color: white; }}
+QMenu::item:selected {{ background: {p['accent']}; color: {p['on_accent']}; }}
 QCheckBox::indicator {{ width: 16px; height: 16px; }}
 QTabWidget::pane {{ border: 1px solid {p['border']}; background: {p['panel']}; }}
 QTabBar::tab {{ background: {p['panel2']}; color: {p['text']}; padding: 6px 14px;
@@ -121,7 +123,7 @@ QTabBar::tab {{ background: {p['panel2']}; color: {p['text']}; padding: 6px 14px
 QTabBar::tab:selected {{ background: {p['panel']}; border-bottom: 2px solid {p['accent']}; }}
 QListWidget {{ background: {p['panel2']}; border: 1px solid {p['border']};
     border-radius: 6px; color: {p['text']}; }}
-QListWidget::item:selected {{ background: {p['accent']}; color: #ffffff; }}
+QListWidget::item:selected {{ background: {p['accent']}; color: {p['on_accent']}; }}
 QSpinBox::up-button, QSpinBox::down-button {{ width: 16px; }}
 QScrollBar:vertical {{ background: {p['panel']}; width: 10px; }}
 QScrollBar::handle:vertical {{ background: {p['border']}; border-radius: 5px; }}
