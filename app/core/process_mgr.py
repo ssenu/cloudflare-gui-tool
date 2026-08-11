@@ -55,9 +55,36 @@ class ProcessManager:
         self._log_offset: dict[str, int] = {}
         # unit -> 도커 서비스 실행 여부 (refresh()의 ps -q 결과)
         self._docker_running: dict[str, bool] = {}
+        # 직전 refresh()가 어느 대상(run 디렉터리)을 봤는지. 로컬/원격에
+        # 동명 터널이 있을 수 있으므로 unit 이름만으로는 대상을 구분할 수
+        # 없다 - run_dir()이 바뀌면 대상이 전환된 것이므로 캐시를 전부
+        # 비우고 다시 채운다. runner.name이 아니라 run_dir()을 쓰는 이유는
+        # 같은 러너 종류라도 대상 머신(홈 디렉터리)이 다르면 다른 run
+        # 디렉터리를 갖기 때문이다.
+        self._last_run_dir: str | None = None
 
     def _registry(self) -> RunRegistry:
-        return self._registry_provider()
+        reg = self._registry_provider()
+        self._ensure_target(reg)
+        return reg
+
+    def _ensure_target(self, reg: RunRegistry) -> None:
+        """캐시가 reg가 가리키는 대상 것인지 확인하고, 아니면 비운다.
+
+        로컬/원격에 동명 터널·서비스가 있으면 unit 이름이 겹치므로, 대상이
+        바뀔 때마다(run_dir()이 달라지면) 옛 대상의 캐시가 새 대상에
+        새어 들어가지 않도록 전부 지운다. start_tunnel처럼 refresh() 없이
+        캐시를 직접 쓰는 메서드도 있으므로 _registry()를 거치는 모든
+        경로(즉 이 클래스의 모든 공개 메서드)에서 공통으로 호출된다.
+        """
+        run_dir = reg.run_dir()
+        if run_dir == self._last_run_dir:
+            return
+        self._alive.clear()
+        self._marker_seen.clear()
+        self._log_offset.clear()
+        self._docker_running.clear()
+        self._last_run_dir = run_dir
 
     # ---- 터널 ----
     def start_tunnel(self, name: str, client: CloudflaredClient) -> None:
@@ -164,7 +191,7 @@ class ProcessManager:
     # ---- 폴링 ----
     def refresh(self, tunnels: list[TunnelMeta]) -> None:
         """단위 수와 무관하게 PID 생존 확인은 pids_alive() 한 번으로 끝낸다."""
-        reg = self._registry()
+        reg = self._registry()  # 대상 전환 시 _ensure_target()이 캐시를 비운다
 
         tunnel_units = [reg.unit_tunnel(t.name) for t in tunnels]
         command_units: list[str] = []
