@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from app.core.runner import CommandRunner, RunResult
 
 
@@ -18,11 +20,14 @@ class FakeRunner(CommandRunner):
         self.live_pids: set[int] = set()
         self._next_pid = 1000
         self.pids_alive_calls = 0
+        self.pid_cmdlines_calls = 0
         self.run_calls: list[tuple[tuple[str, ...], str | None]] = []
         # cmd 튜플 -> RunResult. 없으면 기본값(성공, 빈 출력)
         self.run_results: dict[tuple[str, ...], RunResult] = {}
         self.run_raises: dict[tuple[str, ...], Exception] = {}
         self.spawn_detached_calls: list[tuple] = []
+        # pid -> 명령 이름(comm/이미지 이름). PID 재사용 검증 테스트용
+        self.pid_cmdlines_map: dict[int, str] = {}
 
     # ---- 명령 실행 ----
     def run(self, cmd, timeout: float = 60.0, cwd: str | None = None) -> RunResult:
@@ -44,6 +49,9 @@ class FakeRunner(CommandRunner):
     def write_file(self, path: str, text: str) -> None:
         self.files[path] = text
 
+    def append_file(self, path: str, text: str) -> None:
+        self.files[path] = self.files.get(path, "") + text
+
     def file_exists(self, path: str) -> bool:
         return path in self.files
 
@@ -60,11 +68,20 @@ class FakeRunner(CommandRunner):
         self.live_pids.add(pid)
         self.files.setdefault(log_path, "")
         self.spawn_detached_calls.append((cmd, cwd, log_path))
+        # 실제 러너라면 spawn된 프로세스의 명령이 곧 cmd[0]이다. 테스트가
+        # PID 재사용을 흉내내려면 spawn_detached 이후 이 맵을 직접
+        # 덮어써서 "다른 명령이 실행 중"인 상태를 만들면 된다.
+        if cmd:
+            self.pid_cmdlines_map[pid] = os.path.basename(str(cmd[0]).strip('"'))
         return pid
 
-    def pids_alive(self, pids):
+    def pids_alive(self, pids, timeout: float = 60.0):
         self.pids_alive_calls += 1
         return {p for p in pids if p in self.live_pids}
+
+    def pid_cmdlines(self, pids):
+        self.pid_cmdlines_calls += 1
+        return {p: self.pid_cmdlines_map[p] for p in pids if p in self.pid_cmdlines_map}
 
     def kill_pid(self, pid: int) -> None:
         self.live_pids.discard(pid)

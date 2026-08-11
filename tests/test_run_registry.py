@@ -90,3 +90,82 @@ def test_alive_map_single_batched_call():
 
     assert result == {u1: True, u2: False, u3: False}
     assert reg.runner.pids_alive_calls == 1
+
+
+# ---- C2: read_pid 왕복 수 감소 ----
+
+class _CountingRunner(FakeRunner):
+    """read_file/file_exists 호출 횟수를 세는 FakeRunner. C2 왕복 감소 검증용."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.read_file_calls = 0
+        self.file_exists_calls = 0
+
+    def read_file(self, path: str) -> str:
+        self.read_file_calls += 1
+        return super().read_file(path)
+
+    def file_exists(self, path: str) -> bool:
+        self.file_exists_calls += 1
+        return super().file_exists(path)
+
+
+def test_read_pid_is_single_round_trip():
+    runner = _CountingRunner()
+    reg = RunRegistry(runner)
+    unit = reg.unit_tunnel("t1")
+    reg.write_pid(unit, 4242)
+    runner.read_file_calls = 0
+    runner.file_exists_calls = 0
+
+    pid = reg.read_pid(unit)
+
+    assert pid == 4242
+    assert runner.read_file_calls == 1
+    assert runner.file_exists_calls == 0  # file_exists()를 더 이상 쓰지 않는다
+
+
+def test_read_pid_missing_file_is_single_round_trip():
+    runner = _CountingRunner()
+    reg = RunRegistry(runner)
+
+    pid = reg.read_pid(reg.unit_tunnel("nope"))
+
+    assert pid is None
+    assert runner.read_file_calls == 1
+    assert runner.file_exists_calls == 0
+
+
+# ---- C3: PID 파일에 cmd 토큰/시작 시각 함께 기록 ----
+
+def test_write_pid_with_cmd_records_token_and_started():
+    reg = make_registry()
+    unit = reg.unit_tunnel("t1")
+
+    reg.write_pid(unit, 123, cmd="cloudflared")
+
+    content = reg.runner.read_file(reg.pid_path(unit))
+    lines = content.splitlines()
+    assert lines[0] == "123"
+    assert lines[1] == "cmd=cloudflared"
+    assert lines[2].startswith("started=")
+    assert reg.read_pid(unit) == 123
+
+
+def test_read_record_returns_pid_and_cmd_token():
+    reg = make_registry()
+    unit = reg.unit_tunnel("t1")
+    reg.write_pid(unit, 123, cmd="cloudflared")
+
+    record = reg.read_record(unit)
+
+    assert record == (123, "cloudflared")
+
+
+def test_read_record_legacy_plain_pid_has_no_cmd_token():
+    reg = make_registry()
+    unit = reg.unit_tunnel("t1")
+    reg.write_pid(unit, 123)  # cmd 없음: 옛 형식과 동일
+
+    assert reg.read_record(unit) == (123, None)

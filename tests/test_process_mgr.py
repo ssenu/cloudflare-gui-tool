@@ -168,7 +168,10 @@ def test_docker_service_stopped_when_ps_output_empty():
     assert mgr.service_running("t1", route) is False
 
 
-def test_docker_service_command_failure_treated_as_stopped_and_logged():
+def test_docker_service_command_failure_treated_as_stopped_and_kept_in_memory_only():
+    # C4: 폴링 경로(refresh)의 도커 조회 실패는 로그 파일에 쓰지 않는다 -
+    # 실패가 지속되면 매초 파일을 무한 성장시키기 때문이다. 대신 메모리
+    # (docker_error())에만 남기고, main_window가 이를 툴팁으로 보여준다.
     mgr, runner, reg = make_mgr()
     route = docker_route(cwd="/srv/app")
     runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(
@@ -177,8 +180,9 @@ def test_docker_service_command_failure_treated_as_stopped_and_logged():
     mgr.refresh([meta("t1", [route])])
 
     assert mgr.service_running("t1", route) is False
+    assert "docker: command not found" in mgr.docker_error("t1", route)
     unit = reg.unit_service("t1", route.id)
-    assert "docker: command not found" in runner.read_file(reg.log_path(unit))
+    assert reg.log_path(unit) not in runner.files
 
 
 def test_docker_service_start_stop_invokes_compose_and_survives_failure():
@@ -302,3 +306,147 @@ def test_log_path_helpers():
     assert mgr.log_path_for_tunnel("t1") == reg.log_path(reg.unit_tunnel("t1"))
     assert (mgr.log_path_for_service("t1", route)
             == reg.log_path(reg.unit_service("t1", route.id)))
+
+
+# ---- C3: PID 재사용 검증 ----
+
+def test_reused_pid_with_mismatched_cmd_is_treated_as_stopped_and_cleared():
+    mgr, runner, reg = make_mgr()
+    client = CloudflaredClient(runner)
+    mgr.start_tunnel("t1", client)
+    unit = reg.unit_tunnel("t1")
+    pid = reg.read_pid(unit)
+    assert pid in runner.live_pids
+
+    # 재부팅 후 같은 PID가 완전히 무관한 프로세스에게 재배정된 상황을 흉내낸다:
+    # PID는 살아있지만(운영체제가 재사용) 실제로 실행 중인 명령이 다르다.
+    runner.pid_cmdlines_map[pid] = "unrelated-process"
+
+    mgr.refresh([meta("t1")])
+
+    assert mgr.tunnel_state("t1") == TunnelState.STOPPED  # ERROR가 아니라 STOPPED
+    assert reg.read_pid(unit) is None  # PID 파일이 정리되어야 함
+
+
+def test_alive_pid_with_matching_cmd_stays_running():
+    mgr, runner, reg = make_mgr()
+    client = CloudflaredClient(runner)
+    mgr.start_tunnel("t1", client)
+    unit = reg.unit_tunnel("t1")
+    pid = reg.read_pid(unit)
+    runner.write_file(reg.log_path(unit), f"{RUNNING_MARKER}\n")
+
+    mgr.refresh([meta("t1")])  # spawn_detached가 자동으로 채운 cmd와 일치
+
+    assert mgr.tunnel_state("t1") == TunnelState.RUNNING
+    assert reg.read_pid(unit) == pid  # 정리되지 않아야 함
+
+
+def test_legacy_pid_file_without_cmd_token_only_checks_liveness():
+    # 하위 호환: cmd 토큰 없이 PID만 적힌 옛 형식 파일은 생존 여부만 본다.
+    mgr, runner, reg = make_mgr()
+    unit = reg.unit_tunnel("t1")
+    reg.write_pid(unit, 111)  # cmd 없음
+    runner.live_pids.add(111)
+    runner.write_file(reg.log_path(unit), f"{RUNNING_MARKER}\n")
+
+    mgr.refresh([meta("t1")])
+
+    assert mgr.tunnel_state("t1") == TunnelState.RUNNING
+    assert reg.read_pid(unit) == 111
+    assert runner.pid_cmdlines_calls == 0  # cmd 토큰이 없으니 조회할 필요 없음
+
+
+def test_dead_pid_file_is_auto_cleared_after_error_tick():
+    mgr, runner, reg = make_mgr()
+    unit = reg.unit_tunnel("t1")
+    reg.write_pid(unit, 111)  # live_pids에 없음 -> 죽어있음
+
+    mgr.refresh([meta("t1")])
+    assert mgr.tunnel_state("t1") == TunnelState.ERROR  # 이번 tick은 ERROR로 보여줌
+    assert reg.read_pid(unit) is None  # 하지만 PID 파일은 이미 정리됨
+    assert "PID" in runner.read_file(reg.log_path(unit))  # 원인 추적용 로그
+
+    mgr.refresh([meta("t1")])
+    assert mgr.tunnel_state("t1") == TunnelState.STOPPED  # 다음 tick부터 STOPPED
+
+
+# ---- I5: 도커 낙관적 갱신 ----
+
+def test_docker_start_service_optimistically_running_before_refresh():
+    mgr, runner, reg = make_mgr()
+    route = docker_route(cwd="/srv/app")
+    runner.run_results[("docker", "compose", "up", "-d")] = RunResult(0, "", "")
+
+    mgr.start_service("t1", route)
+
+    # refresh() 없이도 곧바로 실행 중으로 보여야 한다 (다음 refresh까지
+    # 꺼진 채 보이는 I5 버그의 재발 방지)
+    assert mgr.service_running("t1", route) is True
+
+
+def test_docker_stop_service_optimistically_stopped_before_refresh():
+    mgr, runner, reg = make_mgr()
+    route = docker_route(cwd="/srv/app")
+    runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(0, "abc\n", "")
+    mgr.refresh([meta("t1", [route])])
+    assert mgr.service_running("t1", route) is True
+
+    runner.run_results[("docker", "compose", "down")] = RunResult(0, "", "")
+    mgr.stop_service("t1", route)
+
+    assert mgr.service_running("t1", route) is False
+
+
+# ---- I6: 도커 시작/정지 명령이 저장된 값을 실제로 쓰는지 ----
+
+def test_docker_start_service_uses_custom_start_cmd():
+    mgr, runner, reg = make_mgr()
+    route = docker_route(cwd="/srv/app")
+    route.server.start_cmd = "docker compose -f prod.yml up -d"
+    runner.run_results[("docker", "compose", "-f", "prod.yml", "up", "-d")] = RunResult(0, "", "")
+
+    mgr.start_service("t1", route)
+
+    assert (("docker", "compose", "-f", "prod.yml", "up", "-d"), "/srv/app") in runner.run_calls
+
+
+def test_docker_start_service_falls_back_to_default_when_start_cmd_empty():
+    mgr, runner, reg = make_mgr()
+    route = docker_route(cwd="/srv/app")
+    route.server.start_cmd = ""
+
+    mgr.start_service("t1", route)
+
+    assert (("docker", "compose", "up", "-d"), "/srv/app") in runner.run_calls
+
+
+# ---- C4: 도커 폴링 실패는 로그 파일에 안 남고 메모리(docker_error)에만 ----
+
+def test_docker_ps_failure_does_not_grow_log_file_across_ticks():
+    mgr, runner, reg = make_mgr()
+    route = docker_route(cwd="/srv/app")
+    runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(1, "", "boom")
+
+    for _ in range(3):
+        mgr._docker_checked_at.clear()  # 캐시를 매번 무효화해 실제로 재조회되게 함
+        mgr.refresh([meta("t1", [route])])
+
+    unit = reg.unit_service("t1", route.id)
+    assert reg.log_path(unit) not in runner.files
+    assert mgr.docker_error("t1", route) == "boom"
+
+
+# ---- C2: 도커 조회 주기 분리(캐시) ----
+
+def test_docker_ps_not_requeried_within_cache_window():
+    mgr, runner, reg = make_mgr()
+    route = docker_route(cwd="/srv/app")
+    runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(0, "abc\n", "")
+
+    mgr.refresh([meta("t1", [route])])
+    calls_after_first = len(runner.run_calls)
+    mgr.refresh([meta("t1", [route])])  # 캐시 유효 기간 내 재호출
+
+    assert len(runner.run_calls) == calls_after_first  # 추가 호출 없음
+    assert mgr.service_running("t1", route) is True

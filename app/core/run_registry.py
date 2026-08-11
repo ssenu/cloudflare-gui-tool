@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from app.core.runner import CommandRunner
 
 
@@ -35,19 +37,51 @@ class RunRegistry:
         return f"{self.run_dir()}/{unit}.log"
 
     # ---- PID 파일 ----
-    def write_pid(self, unit: str, pid: int) -> None:
+    def write_pid(self, unit: str, pid: int, cmd: str | None = None) -> None:
+        """PID 파일을 쓴다.
+
+        cmd가 주어지면 검증용 토큰(실행 명령의 첫 토큰, 예: ``cloudflared``)과
+        시작 시각을 함께 기록해 재부팅 후 PID 재사용을 걸러낼 수 있게 한다.
+        형식: 1행 PID, 2행 ``cmd=<토큰>``, 3행 ``started=<epoch 초>``.
+        cmd가 없으면(예: stop_cmd 실행형 서비스 등) 기존처럼 PID 한 줄만 쓴다 -
+        이 경우 생존 판정은 PID 존재 여부만으로 이루어진다.
+        """
         self.runner.ensure_dir(self.run_dir())
-        self.runner.write_file(self.pid_path(unit), str(pid))
+        lines = [str(pid)]
+        if cmd:
+            lines.append(f"cmd={cmd}")
+            lines.append(f"started={int(time.time())}")
+        self.runner.write_file(self.pid_path(unit), "\n".join(lines))
 
     def read_pid(self, unit: str) -> int | None:
+        record = self.read_record(unit)
+        return record[0] if record else None
+
+    def read_record(self, unit: str) -> tuple[int, str | None] | None:
+        """PID 파일을 (pid, cmd 토큰) 형태로 읽는다. cmd가 없으면 None.
+
+        file_exists() + read_file() 왕복 두 번 대신, 읽기를 먼저 시도하고
+        없으면 예외를 잡는 방식으로 원격(SFTP) 왕복을 한 번으로 줄인다.
+        """
         path = self.pid_path(unit)
-        if not self.runner.file_exists(path):
+        try:
+            content = self.runner.read_file(path)
+        except (OSError, IOError):
+            return None
+        lines = content.splitlines()
+        if not lines:
             return None
         try:
-            return int(self.runner.read_file(path).strip())
-        except (ValueError, OSError):
+            pid = int(lines[0].strip())
+        except ValueError:
             # 내용이 없거나 정수가 아니면 무효한 PID 파일로 취급
             return None
+        cmd: str | None = None
+        for line in lines[1:]:
+            if line.startswith("cmd="):
+                cmd = line[len("cmd="):].strip()
+                break
+        return pid, cmd or None
 
     def clear_pid(self, unit: str) -> None:
         path = self.pid_path(unit)

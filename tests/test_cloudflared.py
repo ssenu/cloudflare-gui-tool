@@ -25,11 +25,13 @@ class FakeRunner(CommandRunner):
 
     def read_file(self, path): return ""
     def write_file(self, path, text): pass
+    def append_file(self, path, text): pass
     def file_exists(self, path): return False
     def remove_file(self, path): pass
     def home_dir(self): return "C:/Users/me"
     def spawn_detached(self, cmd, cwd, log_path): raise NotImplementedError
-    def pids_alive(self, pids): return set()
+    def pids_alive(self, pids, timeout=60.0): return set()
+    def pid_cmdlines(self, pids): return {}
     def kill_pid(self, pid): pass
     def tail_file(self, path, offset): return (0, "")
     def file_size(self, path): return 0

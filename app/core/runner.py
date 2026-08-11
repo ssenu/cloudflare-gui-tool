@@ -52,6 +52,15 @@ class CommandRunner(ABC):
     def write_file(self, path: str, text: str) -> None: ...
 
     @abstractmethod
+    def append_file(self, path: str, text: str) -> None:
+        """path 끝에 text를 이어 붙인다 (없으면 새로 만든다).
+
+        기존 내용을 읽지 않으므로 반복 호출(폴링 등)에서 read-all + write-all
+        방식보다 원격 왕복과 전송량이 훨씬 작다.
+        """
+        ...
+
+    @abstractmethod
     def file_exists(self, path: str) -> bool: ...
 
     @abstractmethod
@@ -70,8 +79,17 @@ class CommandRunner(ABC):
         ...
 
     @abstractmethod
-    def pids_alive(self, pids: list[int]) -> set[int]:
+    def pids_alive(self, pids: list[int], timeout: float = 60.0) -> set[int]:
         """주어진 PID 중 실제로 살아있는 것들을 일괄 조회한다."""
+        ...
+
+    @abstractmethod
+    def pid_cmdlines(self, pids: list[int]) -> dict[int, str]:
+        """주어진 PID들의 명령/이미지 이름을 일괄 조회한다 (PID 재사용 검증용).
+
+        조회에 실패한 PID는 결과 dict에 없다. 로컬은 이미지 이름(taskkill의
+        Image Name 등), 원격은 ``comm``(짧은 명령 이름)을 값으로 담는다.
+        """
         ...
 
     @abstractmethod
@@ -187,6 +205,12 @@ class LocalRunner(CommandRunner):
         with open(p, "w", encoding="utf-8") as f:
             f.write(text)
 
+    def append_file(self, path: str, text: str) -> None:
+        p = os.path.expanduser(path)
+        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(text)
+
     def file_exists(self, path: str) -> bool:
         return os.path.exists(os.path.expanduser(path))
 
@@ -216,7 +240,9 @@ class LocalRunner(CommandRunner):
             logfile.close()
         return popen.pid
 
-    def pids_alive(self, pids: list[int]) -> set[int]:
+    def pids_alive(self, pids: list[int], timeout: float = 60.0) -> set[int]:
+        # 로컬 생존 확인은 시스템 콜 하나라 timeout이 의미 없다 - 인터페이스
+        # 통일을 위해 매개변수만 받고 무시한다.
         if not pids:
             return set()
         if sys.platform == "win32":
@@ -231,6 +257,51 @@ class LocalRunner(CommandRunner):
                 # 우리가 띄운 프로세스라면 발생하지 않으므로 죽은 것으로 간주
                 pass
         return alive
+
+    def pid_cmdlines(self, pids: list[int]) -> dict[int, str]:
+        if not pids:
+            return {}
+        result: dict[int, str] = {}
+        wanted = set(pids)
+        if sys.platform == "win32":
+            try:
+                res = subprocess.run(
+                    ["tasklist", "/FO", "CSV", "/NH"],
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=5.0, creationflags=CREATE_NO_WINDOW)
+            except (subprocess.SubprocessError, OSError):
+                return {}
+            for line in res.stdout.splitlines():
+                parts = [p.strip('"') for p in line.split('","')]
+                if len(parts) < 2:
+                    continue
+                image, pid_str = parts[0], parts[1]
+                try:
+                    pid = int(pid_str)
+                except ValueError:
+                    continue
+                if pid in wanted:
+                    result[pid] = image
+        else:
+            pid_arg = ",".join(str(p) for p in pids)
+            try:
+                res = subprocess.run(
+                    ["ps", "-p", pid_arg, "-o", "pid=,comm="],
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=5.0)
+            except (subprocess.SubprocessError, OSError):
+                return {}
+            for line in res.stdout.splitlines():
+                bits = line.strip().split(None, 1)
+                if len(bits) != 2:
+                    continue
+                try:
+                    pid = int(bits[0])
+                except ValueError:
+                    continue
+                if pid in wanted:
+                    result[pid] = bits[1]
+        return result
 
     @staticmethod
     def _win_pid_alive(pid: int) -> bool:

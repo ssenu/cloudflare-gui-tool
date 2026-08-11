@@ -171,6 +171,11 @@ class SshRunner(CommandRunner):
         with self._sftp.open(self._expand(path), "w") as f:
             f.write(text)
 
+    def append_file(self, path: str, text: str) -> None:
+        assert self._sftp
+        with self._sftp.open(self._expand(path), "a") as f:
+            f.write(text)
+
     def file_exists(self, path: str) -> bool:
         assert self._sftp
         try:
@@ -203,12 +208,32 @@ class SshRunner(CommandRunner):
             raise RuntimeError(f"원격 프로세스 시작 실패: PID를 읽을 수 없습니다 ({res.stdout!r}, {res.stderr!r})")
         return int(digit_lines[-1])
 
-    def pids_alive(self, pids: list[int]) -> set[int]:
+    def pids_alive(self, pids: list[int], timeout: float = 60.0) -> set[int]:
         cmd = build_pids_alive_command(pids)
         if cmd is None:
             return set()
-        res = self.run(["sh", "-c", cmd])
+        res = self.run(["sh", "-c", cmd], timeout=timeout)
         return {int(ln) for ln in res.stdout.splitlines() if ln.strip()}
+
+    def pid_cmdlines(self, pids: list[int]) -> dict[int, str]:
+        if not pids:
+            return {}
+        pid_arg = ",".join(str(p) for p in pids)
+        try:
+            res = self.run(["ps", "-p", pid_arg, "-o", "pid=,comm="], timeout=5.0)
+        except (TimeoutError, ConnectionError, OSError):
+            return {}
+        result: dict[int, str] = {}
+        for line in res.stdout.splitlines():
+            bits = line.strip().split(None, 1)
+            if len(bits) != 2:
+                continue
+            try:
+                pid = int(bits[0])
+            except ValueError:
+                continue
+            result[pid] = bits[1]
+        return result
 
     def kill_pid(self, pid: int) -> None:
         cmd = build_kill_pid_command(pid)
