@@ -41,7 +41,6 @@ class GuideDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.button(QDialogButtonBox.StandardButton.Close).setText("확인")
         buttons.rejected.connect(self.reject)
-        buttons.accepted.connect(self.accept)
 
         root = QVBoxLayout(self)
         root.addWidget(scroll, 1)
