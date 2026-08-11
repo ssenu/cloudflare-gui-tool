@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>v2 구현 계획 — 상시 실행 · 다중 라우트 · 컨테이너</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #181b24; --panel2: #1f2330; --border: #2a2f3f;
+    --text: #e8eaf0; --muted: #9aa1b5; --accent: #f6821f; --accent2: #4c9aff;
+    --green: #3fb950; --yellow: #d29922;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', 'Malgun Gothic', sans-serif; line-height: 1.7; }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 40px 24px 80px; }
+  header { border-bottom: 2px solid var(--accent); padding-bottom: 24px; margin-bottom: 32px; }
+  header h1 { font-size: 2rem; }
+  header p { color: var(--muted); margin-top: 8px; font-size: .95rem; }
+  h2 { font-size: 1.4rem; margin: 40px 0 16px; padding-left: 12px; border-left: 4px solid var(--accent); }
+  h3 { font-size: 1rem; margin: 12px 0 8px; }
+  p { color: var(--text); margin: 8px 0; }
+  ul { padding-left: 24px; margin: 8px 0; }
+  li { margin: 4px 0; }
+  code { background: var(--panel2); padding: 2px 8px; border-radius: 4px; font-family: 'Cascadia Code', Consolas, monospace; font-size: .87em; color: #ffd28e; }
+  pre { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; overflow-x: auto; margin: 8px 0 12px; }
+  pre code { background: none; padding: 0; color: #c9d1d9; font-size: .85em; }
+  .task { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px; margin: 16px 0; }
+  .task h3 { margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+  .task h3 .num { display: inline-flex; align-items: center; justify-content: center; background: var(--accent); color: #fff; border-radius: 6px; width: 28px; height: 28px; font-size: .95rem; font-weight: 600; flex-shrink: 0; }
+  .task .files { color: var(--muted); font-size: .9rem; margin-bottom: 8px; }
+  .task ul { margin: 6px 0; }
+  .task li { font-size: .95rem; }
+  .tag { display: inline-block; padding: 2px 9px; border-radius: 8px; font-size: .75rem; font-weight: 600; margin-left: 6px; vertical-align: middle; }
+  .tag.core { background: rgba(76,154,255,.15); color: var(--accent2); border: 1px solid var(--accent2); }
+  .tag.ui { background: rgba(246,130,31,.15); color: var(--accent); border: 1px solid var(--accent); }
+  .tag.docs { background: rgba(63,185,80,.15); color: var(--green); border: 1px solid var(--green); }
+  .flow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 16px 0; }
+  .flow .step { background: var(--panel2); border: 1px solid var(--accent2); border-radius: 8px; padding: 6px 12px; font-size: .9rem; }
+  .flow .arrow { color: var(--accent); font-weight: bold; margin: 0 2px; }
+  .note { border-left: 3px solid var(--yellow); background: rgba(210,153,34,.08); padding: 10px 16px; border-radius: 0 8px 8px 0; margin: 16px 0; color: var(--muted); font-size: .95rem; }
+  .constraint-box { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; margin: 16px 0; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; background: var(--panel); border-radius: 8px; overflow: hidden; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: .93rem; }
+  th { background: var(--panel2); color: var(--accent); font-weight: 600; }
+  strong { color: var(--accent2); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>🛠️ v2 구현 계획 — 상시 실행 · 다중 라우트 · 컨테이너</h1>
+  <p>전략: 태스크 단위 실행(subagent-driven-development) · 각 태스크는 독립 테스트 가능 · 커밋으로 마감<br>
+  <strong>스펙 참조:</strong> <code>docs/superpowers/specs/2026-08-11-v2-persistent-multiroute-design.md</code></p>
+</header>
+
+<h2>목표</h2>
+<div class="constraint-box">
+  <p><strong>GUI를 껐다 켜도 터널·서버가 유지되고, 터널 하나에 여러 사이트를 붙일 수 있으며, 컨테이너를 서비스로 등록할 수 있게 한다.</strong></p>
+</div>
+
+<h2>전역 제약</h2>
+<ul>
+  <li><code>app/core/*</code>는 PyQt6를 import하지 않는다</li>
+  <li>모든 명령·파일 조작은 <code>CommandRunner</code>를 경유한다 (UI에서 subprocess 직접 호출 금지)</li>
+  <li>UI 텍스트는 한국어, 이모지 금지 (아이콘은 <code>app/ui/icons.py</code>의 <code>make_icon</code>)</li>
+  <li>색상은 <code>app/ui/theme.py: current_palette(mode)</code>에서만 가져온다 (하드코딩 금지)</li>
+  <li>실행 상태 디렉터리: 대상 머신의 <code>~/.cloudflare-gui/run/</code></li>
+  <li>터널 config: <code>~/.cloudflared/config-&lt;터널명&gt;.yml</code> (유지)</li>
+  <li>앱 설정: <code>%APPDATA%/CloudflareTunnelGUI/settings.json</code> (유지)</li>
+  <li>기존 테스트는 계속 통과해야 한다 (마이그레이션 태스크에서 갱신되는 것 제외)</li>
+</ul>
+
+<hr style="border: none; border-top: 1px solid var(--border); margin: 32px 0;">
+
+<div class="task">
+  <h3><span class="num">1</span>Runner 분리 실행 · PID · 로그 tail<span class="tag core">core</span></h3>
+  <div class="files">📁 <code>app/core/runner.py</code>, <code>app/core/ssh_runner.py</code>, <code>tests/test_runner_detached.py</code></div>
+
+  <p><code>CommandRunner</code>에 추가할 추상 메서드:</p>
+  <pre><code>def spawn_detached(self, cmd: list[str], cwd: str | None, log_path: str) -&gt; int
+def pids_alive(self, pids: list[int]) -&gt; set[int]
+def kill_pid(self, pid: int) -&gt; None
+def tail_file(self, path: str, offset: int) -&gt; tuple[int, str]
+def ensure_dir(self, path: str) -&gt; None
+def list_dir(self, path: str) -&gt; list[str]</code></pre>
+
+  <ul>
+    <li><code>spawn_detached</code>: 로그 파일에 append 모드로 stdout/stderr 리다이렉트, PID 반환. 로컬은 <code>DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP</code> + <code>close_fds</code>. 원격은 <code>sh -c 'cd &lt;cwd&gt; &amp;&amp; setsid nohup &lt;cmd&gt; &gt;&gt; &lt;log&gt; 2&gt;&amp;1 &lt; /dev/null &amp; echo $!'</code> 후 stdout에서 PID 파싱.</li>
+    <li><code>pids_alive</code>: 로컬은 ctypes <code>OpenProcess</code>(PROCESS_QUERY_LIMITED_INFORMATION) + <code>GetExitCodeProcess</code>로 STILL_ACTIVE 확인, 실패 시 죽은 것으로 간주. 원격은 한 번의 명령 <code>for p in ...; do kill -0 $p 2&gt;/dev/null &amp;&amp; echo $p; done</code>.</li>
+    <li><code>kill_pid</code>: 로컬 <code>taskkill /PID &lt;pid&gt; /T /F</code>. 원격 <code>kill -TERM -&lt;pid&gt; || kill -TERM &lt;pid&gt;</code>, 1초 후에도 살아있으면 <code>-KILL</code>.</li>
+    <li><code>tail_file</code>: offset부터 읽어 <code>(새 offset, 텍스트)</code>. 파일이 없으면 <code>(0, "")</code>. offset이 파일 크기보다 크면(로테이트됨) 0부터 다시 읽는다. 원격은 SFTP seek/read.</li>
+    <li><code>ensure_dir</code>: 로컬 <code>os.makedirs(exist_ok=True)</code>, 원격 <code>mkdir -p</code>.</li>
+    <li><code>list_dir</code>: 파일명 목록. 없으면 빈 리스트.</li>
+  </ul>
+
+  <p style="margin-top: 12px; color: var(--yellow);">⚠️ 기존 <code>spawn</code>(파이프)은 온보딩의 winget/login 실행에 계속 쓰이므로 남겨둔다.</p>
+
+  <p><strong>테스트 (LocalRunner, 실제 프로세스):</strong></p>
+  <ul>
+    <li><code>spawn_detached</code>로 60초 sleep 파이썬 프로세스를 띄우고 → <code>pids_alive</code>에 포함 → <code>kill_pid</code> 후 미포함</li>
+    <li>출력이 로그 파일에 쌓이고 <code>tail_file</code>이 증분만 반환 (두 번 호출해 두 번째는 새 내용만)</li>
+    <li>로그 파일 offset이 크기보다 클 때 0부터 재시작</li>
+    <li><code>ensure_dir</code>/<code>list_dir</code> 동작</li>
+    <li>SSH는 순수 로직(명령 문자열 조립)만 테스트, 실제 연결은 수동 검증</li>
+  </ul>
+
+  <p><strong>커밋:</strong> <code>feat: Runner 분리 실행/PID 관리/로그 tail 지원</code></p>
+</div>
+
+<div class="task">
+  <h3><span class="num">2</span>데이터 모델 v2 + 마이그레이션<span class="tag core">core</span></h3>
+  <div class="files">📁 <code>app/core/store.py</code>, <code>tests/test_store.py</code></div>
+
+  <p>스펙의 <code>ServiceSpec</code>/<code>RouteMeta</code>/<code>TunnelMeta</code> 정의를 적용. <code>RouteMeta.id</code>는 <code>secrets.token_hex(4)</code>로 생성하는 헬퍼 <code>new_route_id()</code> 제공.</p>
+
+  <p><code>SettingsStore.load()</code> 마이그레이션:</p>
+  <ul>
+    <li>터널 dict에 <code>routes</code>가 있으면 그대로 파싱 (각 라우트의 <code>server</code>도 dict → <code>ServiceSpec</code>)</li>
+    <li><code>routes</code>가 없고 <code>hostname</code>/<code>service</code>/<code>server_cmd</code> 중 하나라도 값이 있으면 라우트 1개 생성:<br>
+    <code>RouteMeta(id=new_route_id(), hostname=..., service=..., server=ServiceSpec(kind="command", start_cmd=server_cmd, cwd=server_cwd, autostart=start_together))</code></li>
+    <li>둘 다 없으면 빈 <code>routes</code></li>
+    <li>잘못된 라우트 항목은 개별 스킵 (기존 방어 패턴 유지)</li>
+    <li>마이그레이션이 일어났으면 <code>load()</code> 반환 전에 <code>save()</code> 호출</li>
+  </ul>
+
+  <p><code>save()</code>는 중첩 dataclass를 <code>asdict</code>로 직렬화.</p>
+
+  <p><strong>테스트:</strong></p>
+  <ul>
+    <li>v1 형식 JSON(hostname/service/server_cmd/start_together) 로드 → 라우트 1개로 변환, autostart 보존, 파일이 새 형식으로 다시 저장됨</li>
+    <li>v2 형식 왕복 (라우트 2개, 도커 서비스 1개 포함)</li>
+    <li>라우트 배열에 잘못된 항목이 섞여 있어도 나머지는 로드</li>
+    <li>기존 손상 JSON 방어 테스트는 계속 통과</li>
+  </ul>
+
+  <p><strong>커밋:</strong> <code>feat: 라우트 기반 데이터 모델과 v1 마이그레이션</code></p>
+</div>
+
+<div class="task">
+  <h3><span class="num">3</span>config.yml 다중 ingress<span class="tag core">core</span></h3>
+  <div class="files">📁 <code>app/core/config_yml.py</code>, <code>tests/test_config_yml.py</code></div>
+
+  <pre><code>def build_config(tunnel_id: str, credentials_file: str,
+                 routes: list[tuple[str, str]]) -&gt; str      # [(hostname, service), ...]
+def get_routes(cfg: dict) -&gt; list[tuple[str, str]]
+def set_routes(text: str, routes: list[tuple[str, str]]) -&gt; str</code></pre>
+
+  <ul>
+    <li>ingress는 라우트 순서대로, 마지막에 <code>{"service": "http_status:404"}</code> 항상 유지</li>
+    <li><code>set_routes</code>는 <code>tunnel</code>/<code>credentials-file</code> 등 다른 키를 보존</li>
+    <li>라우트가 비면 fallback만 남긴다</li>
+    <li>기존 <code>get_main_ingress</code>/<code>update_service</code>는 호출부가 사라지면 제거 (grep으로 확인 후 정리)</li>
+    <li>잘못된 형식 방어(<code>isinstance</code> 가드) 유지</li>
+  </ul>
+
+  <p><strong>테스트:</strong> 라우트 3개 왕복 / 순서 보존 / fallback 항상 마지막 / <code>set_routes</code>가 tunnel id 보존 / 빈 라우트</p>
+
+  <p><strong>커밋:</strong> <code>feat: config.yml 다중 ingress 지원</code></p>
+</div>
+
+<div class="task">
+  <h3><span class="num">4</span>RunRegistry + ProcessManager v2<span class="tag core">core</span></h3>
+  <div class="files">📁 <code>app/core/run_registry.py</code> (신규), <code>app/core/process_mgr.py</code> (재작성), <code>tests/test_run_registry.py</code>, <code>tests/test_process_mgr.py</code></div>
+
+  <p><code>RunRegistry(runner)</code> — 대상 머신의 <code>~/.cloudflare-gui/run/</code> 관리:</p>
+  <pre><code>def unit_tunnel(name) -&gt; str                  # "tunnel-&lt;name&gt;"
+def unit_service(tunnel, route_id) -&gt; str     # "svc-&lt;tunnel&gt;-&lt;route_id&gt;"
+def pid_path(unit) -&gt; str / log_path(unit) -&gt; str
+def write_pid(unit, pid) / read_pid(unit) -&gt; int | None / clear_pid(unit)
+def rotate_log_if_big(unit, limit=5_000_000)
+def known_units() -&gt; list[str]                # run 디렉터리 스캔
+def alive_map(units: list[str]) -&gt; dict[str, bool]   # PID 일괄 확인</code></pre>
+
+  <p><code>ProcessManager(runner_provider)</code> 재작성 — 메모리 핸들 대신 레지스트리를 읽는다:</p>
+  <pre><code>def start_tunnel(name, client)            # spawn_detached(client.run_args(name)) → write_pid
+def stop_tunnel(name)                     # kill_pid → clear_pid
+def tunnel_state(name) -&gt; TunnelState     # 스펙의 판정 표
+def start_service(tunnel, route)          # kind별 분기
+def stop_service(tunnel, route)
+def service_running(tunnel, route) -&gt; bool
+def refresh(tunnels: list[TunnelMeta])    # 폴링 1회: PID 일괄 확인 + 도커 상태 조회 결과를 캐시
+def log_path_for_tunnel(name) / log_path_for_service(tunnel, route)</code></pre>
+
+  <ul>
+    <li>상태 판정은 <code>refresh()</code>가 채운 캐시를 읽는다(UI가 1초마다 <code>refresh()</code> 호출, 개별 조회는 캐시 히트).</li>
+    <li>터널 RUNNING 판정: PID 생존 + 로그 마커. 마커 탐색은 <code>tail_file</code>로 읽어들인 누적 텍스트에서 확인하고, 시작 시점 이후만 보도록 시작할 때 오프셋을 기록한다.</li>
+    <li>도커 서비스: <code>docker compose ps -q</code>를 <code>cwd</code>에서 실행, 출력이 비어있지 않으면 실행 중. 명령 실패(도커 미설치 등)는 "중지"로 간주하고 사유를 로그 파일에 남긴다.</li>
+    <li>명령 서비스 정지: <code>stop_cmd</code>가 있으면 그것을 실행, 없으면 <code>kill_pid</code>.</li>
+    <li><code>StatusTracker</code>(메모리 상태 기계)는 제거한다. <code>LogBuffer</code>도 파일 tail로 대체되므로 제거하고 뷰어가 오프셋을 관리한다.</li>
+  </ul>
+
+  <p><strong>테스트 (FakeRunner로 파일 시스템과 PID를 시뮬레이션):</strong></p>
+  <ul>
+    <li>판정 표 4분기(PID 없음/생존+마커/생존+마커없음/죽음) 각각</li>
+    <li>정지 시 PID 파일 삭제, 이후 상태는 STOPPED (ERROR 아님)</li>
+    <li>도커 서비스: <code>ps -q</code> 출력 유무에 따른 판정, 명령 실패 시 중지 처리</li>
+    <li><code>refresh()</code>가 PID 조회를 단위 수와 무관하게 1회만 호출하는지 (FakeRunner 호출 카운트)</li>
+    <li>서로 다른 러너로 시작한 상태가 섞이지 않는지 — 레지스트리가 대상별로 분리되므로 러너 교체 후 <code>refresh()</code> 결과가 새 대상 기준인지</li>
+  </ul>
+
+  <p><strong>커밋:</strong> <code>feat: 파일 기반 실행 상태 관리와 프로세스 매니저 재작성</code></p>
+</div>
+
+<div class="task">
+  <h3><span class="num">5</span>UI 공용 위젯 · 아이콘 정비<span class="tag ui">ui</span></h3>
+  <div class="files">📁 <code>app/ui/widgets.py</code> (신규), <code>app/ui/icons.py</code>, <code>app/ui/theme.py</code></div>
+
+  <ul>
+    <li><code>ToggleSwitch(QAbstractButton)</code>: 체크형 스위치. 크기 약 44×24, 켜짐은 accent 배경 + 오른쪽 노브, 꺼짐은 border 색 배경 + 왼쪽 노브. <code>QPainter</code>로 직접 그리고 <code>setCheckable(True)</code>. 팔레트를 생성자 인자로 받아 테마 전환 시 다시 만든다. 접근성: <code>setToolTip</code>으로 켜기/끄기 상태 표시.</li>
+    <li><code>make_icon("refresh")</code> 재작업: <code>QPainterPath</code>로 300° 원호(<code>arcTo</code>) + 끝점 접선 방향 삼각형 화살촉, <code>RoundCap</code>. 32px 기준 선 굵기 2.6.</li>
+    <li><code>make_icon("chevron_down")</code> 추가: 아래를 향한 갈매기 모양, 선 굵기 2.4.</li>
+    <li><code>theme.py</code>에 <code>ensure_qss_icons(mode) -&gt; dict[str, str]</code> 추가: 셰브론 PNG를 <code>%APPDATA%/CloudflareTunnelGUI/icons/chevron-&lt;mode&gt;.png</code>로 굽고 경로를 반환(슬래시 정규화). <code>build_qss(mode, icon_paths)</code>가 <code>QComboBox::drop-down</code>(테두리 제거, 폭 26)과 <code>QComboBox::down-arrow</code>(<code>image: url(...)</code>, 12×12)에 적용.</li>
+    <li><code>danger_menu_action(menu, text, palette, on_trigger) -&gt; QWidgetAction</code>: 라벨 기반 항목. 기본은 danger 색 글씨, hover 시 danger 배경 + 흰 글씨.</li>
+  </ul>
+
+  <p><strong>검증:</strong> <code>pytest -q</code> 통과, 오프스크린으로 스위치 켜짐/꺼짐과 새 아이콘을 렌더해 육안 확인.</p>
+
+  <p><strong>커밋:</strong> <code>feat: 토글 스위치 위젯과 아이콘 정비</code></p>
+</div>
+
+<div class="task">
+  <h3><span class="num">6</span>터널 카드 재구성<span class="tag ui">ui</span></h3>
+  <div class="files">📁 <code>app/ui/main_window.py</code></div>
+
+  <ul>
+    <li>카드 = 헤더(상태등 + 터널명 + 상태 텍스트 + <strong>터널 토글</strong> + 로그 + ⋮) + 라우트 행 목록 + "라우트 추가" 버튼.</li>
+    <li>라우트 행: hostname → 서비스 주소, <strong>서버 토글</strong>(서비스 미등록이면 "서버 등록" 버튼), 로그 버튼, ⋮(편집/삭제).</li>
+    <li>터널 토글 ON: <code>start_tunnel</code> 후 <code>autostart</code>인 서비스들을 <code>start_service</code>. OFF: 터널만 정지(서비스는 그대로 둔다 — 독립 토글이므로).</li>
+    <li>1초 폴링은 <code>manager.refresh(터널목록)</code> 1회 → 각 위젯이 캐시된 상태로 표시 갱신. 토글은 사용자가 조작 중일 때 신호 루프가 생기지 않도록 <code>blockSignals</code>로 상태만 반영.</li>
+    <li>⋮ 메뉴의 삭제는 <code>danger_menu_action</code> 사용. 삭제 확인 다이얼로그의 삭제 버튼도 danger 색.</li>
+    <li>터널 삭제 시 모든 라우트의 서비스와 터널을 먼저 정지하고 PID 파일을 정리한다.</li>
+  </ul>
+
+  <p><strong>검증:</strong> 오프스크린 렌더로 라우트 2개짜리 카드 표시 확인, <code>pytest -q</code>.</p>
+
+  <p><strong>커밋:</strong> <code>feat: 터널/서버 독립 토글과 라우트 목록 카드</code></p>
+</div>
+
+<div class="task">
+  <h3><span class="num">7</span>라우트 편집 다이얼로그와 추가·삭제 흐름<span class="tag ui">ui</span></h3>
+  <div class="files">📁 <code>app/ui/route_dialog.py</code> (신규), <code>app/ui/main_window.py</code></div>
+
+  <p><code>RouteDialog(ctx, tunnel, route=None)</code> — 추가/편집 겸용.</p>
+  <ul>
+    <li>입력: 서브도메인+루트 도메인(또는 전체 hostname), 로컬 서비스 주소, 서비스 종류 콤보(명령 / 도커 컴포즈), 시작 명령, 정지 명령, 작업 폴더, 함께 시작 체크.</li>
+    <li>종류가 "도커 컴포즈"면 시작·정지 명령 기본값을 채우고 작업 폴더를 필수 검증한다.</li>
+    <li>저장 시: (추가인 경우) <code>cloudflared tunnel route dns &lt;터널&gt; &lt;hostname&gt;</code> 실행 → 실패하면 중단하고 오류 표시. 그 다음 <code>set_routes</code>로 config.yml 갱신 → settings 저장.</li>
+    <li>터널이 실행 중이면 저장 후 "변경을 적용하려면 터널을 껐다 켜야 합니다" 안내를 배너로 표시.</li>
+    <li>라우트 삭제: 해당 서비스 정지 → config에서 제거 → settings에서 제거. DNS 레코드는 대시보드에서 직접 지우도록 안내(기존 정책과 동일).</li>
+  </ul>
+
+  <p><strong>검증:</strong> 오프스크린 렌더, 명령/도커 전환 시 필드 기본값 변화 확인.</p>
+
+  <p><strong>커밋:</strong> <code>feat: 라우트 추가·편집 다이얼로그</code></p>
+</div>
+
+<div class="task">
+  <h3><span class="num">8</span>생성 마법사 v2 대응<span class="tag core">core</span><span class="tag ui">ui</span></h3>
+  <div class="files">📁 <code>app/ui/wizard.py</code>, <code>app/core/wizard_logic.py</code>, <code>tests/test_wizard_logic.py</code></div>
+
+  <ul>
+    <li>마법사는 "터널 + 첫 라우트"를 만든다. 4단계(웹서버 명령)에 서비스 종류 선택을 추가하고, 도커를 고르면 명령 기본값을 채운다.</li>
+    <li><code>execute_creation</code>이 <code>build_config(tid, cred, [(hostname, service)])</code>를 쓰도록 변경.</li>
+    <li>완료 시 <code>TunnelMeta(name, routes=[RouteMeta(...)])</code>를 반환하도록 <code>created_meta</code> 구성.</li>
+    <li>기존 설명·검증·롤백·재시도 흐름은 유지한다.</li>
+  </ul>
+
+  <p><strong>테스트:</strong> <code>plan_steps</code>/검증 함수 기존 테스트 유지, <code>execute_creation</code>이 새 시그니처로 config를 쓰는지 fake로 확인.</p>
+
+  <p><strong>커밋:</strong> <code>feat: 마법사를 라우트 모델과 컨테이너 선택에 맞게 갱신</code></p>
+</div>
+
+<div class="task">
+  <h3><span class="num">9</span>로그 뷰어 파일 tail 전환<span class="tag ui">ui</span></h3>
+  <div class="files">📁 <code>app/ui/log_viewer.py</code>, <code>app/ui/main_window.py</code></div>
+
+  <ul>
+    <li><code>LogViewer(ctx, title, log_paths: dict[str, str])</code> — 탭 이름 → 로그 파일 경로. 터널 카드에서는 <code>{"터널": tunnel_log}</code>, 라우트 행에서는 <code>{"서버": svc_log}</code>.</li>
+    <li>200ms마다 <code>runner.tail_file(path, offset)</code>으로 증분을 읽어 붙인다. 오류 라인 하이라이트·자동 스크롤·지우기(파일 비우기 대신 화면만 지움, 파일은 유지)는 유지.</li>
+    <li>원격 대상에서도 동일하게 동작한다(SFTP 경유).</li>
+    <li>앱 재시작 후 열면 파일 처음부터 마지막 2000줄을 보여준다.</li>
+  </ul>
+
+  <p><strong>검증:</strong> 로컬에서 분리 실행한 프로세스의 로그가 실시간으로 갱신되는지 확인.</p>
+
+  <p><strong>커밋:</strong> <code>feat: 로그 뷰어를 파일 tail 방식으로 전환</code></p>
+</div>
+
+<div class="task">
+  <h3><span class="num">10</span>종료 동작 변경 · 문서 갱신<span class="tag ui">ui</span><span class="tag docs">docs</span></h3>
+  <div class="files">📁 <code>app/ui/main_window.py</code>, <code>app/main.py</code>, <code>README.md</code>, <code>docs/manual-test-checklist.md</code>(+ html), <code>docs/future-extensions.md</code>(+ html)</div>
+
+  <ul>
+    <li><code>closeEvent</code>에서 <code>stop_all()</code>을 제거한다. 실행 중인 단위가 있으면 확인 대신 정보성 안내를 한 번 표시하고 그대로 닫는다(설정에 "다시 보지 않기"는 만들지 않는다).</li>
+    <li>앱 시작 시 첫 <code>refresh()</code>에서 run 디렉터리를 읽어 카드 상태를 복원한다.</li>
+    <li>README에 상시 실행 동작과 컨테이너 등록 방법을 추가한다.</li>
+    <li>체크리스트에 v2 항목 추가: 앱 종료 후 재실행 시 상태 유지 / SSH 끊고 재접속 후 상태 유지 / 라우트 2개 동시 서비스 / 도커 컴포즈 서비스 시작·정지 / 터널만 끄고 서버는 유지되는지.</li>
+    <li><code>future-extensions.md</code>에 "docker run 단독 컨테이너 상태 판정", "라우트별 Access" 항목 추가.</li>
+  </ul>
+
+  <p><strong>커밋:</strong> <code>feat: 상시 실행 종료 동작과 문서 갱신</code></p>
+</div>
+
+<hr style="border: none; border-top: 1px solid var(--border); margin: 32px 0;">
+
+<h2>순서와 의존성</h2>
+<div class="flow">
+  <span class="step">1 → 2 → 3</span><span class="arrow">병렬 가능, 4에서 합침</span>
+  <span class="step">→ 4 → 5 → 6 · 7 · 9</span><span class="arrow">→ 8 → 10</span>
+</div>
+<p style="margin-top: 12px;">권장 실행 순서: <strong>1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10</strong></p>
+
+<h2>완료 기준</h2>
+<table style="margin-top: 16px;">
+  <tr><td style="border: none; padding: 0;">✓ <code>pytest -q</code> 전부 통과</td></tr>
+  <tr><td style="border: none; padding: 0;">✓ 로컬에서: 터널을 켜고 GUI를 종료했다가 다시 실행했을 때 카드가 실행 중으로 보이고 로그가 이어짐</td></tr>
+  <tr><td style="border: none; padding: 0;">✓ 라우트 2개를 등록해 서로 다른 서브도메인으로 각각 접속됨</td></tr>
+  <tr><td style="border: none; padding: 0;">✓ 도커 컴포즈 서비스가 토글로 시작·정지되고 상태가 정확히 표시됨</td></tr>
+  <tr><td style="border: none; padding: 0;">✓ 터널 토글과 서버 토글이 서로 영향을 주지 않음</td></tr>
+</table>
+
+</div>
+</body>
+</html>

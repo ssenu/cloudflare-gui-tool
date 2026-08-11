@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>v2 설계 — 상시 실행 · 다중 라우트 · 컨테이너 지원</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #181b24; --panel2: #1f2330; --border: #2a2f3f;
+    --text: #e8eaf0; --muted: #9aa1b5; --accent: #f6821f; --accent2: #4c9aff;
+    --green: #3fb950; --yellow: #d29922; --red: #f85149;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', 'Malgun Gothic', sans-serif; line-height: 1.7; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 40px 24px 80px; }
+  header { border-bottom: 2px solid var(--accent); padding-bottom: 24px; margin-bottom: 40px; }
+  header h1 { font-size: 2rem; }
+  header .meta { color: var(--muted); margin-top: 8px; font-size: .95rem; }
+  .badge { display: inline-block; padding: 3px 12px; border-radius: 12px; font-size: .85rem; font-weight: 600; margin-left: 8px; }
+  .badge.pending { background: rgba(210,153,34,.15); color: var(--yellow); border: 1px solid var(--yellow); }
+  h2 { font-size: 1.4rem; margin: 48px 0 16px; padding-left: 12px; border-left: 4px solid var(--accent); }
+  h3 { font-size: 1.1rem; margin: 28px 0 12px; color: var(--accent2); }
+  p, li { color: var(--text); }
+  ul, ol { padding-left: 24px; margin: 8px 0; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px 24px; margin: 16px 0; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; background: var(--panel); border-radius: 8px; overflow: hidden; }
+  th, td { padding: 10px 16px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { background: var(--panel2); color: var(--accent); font-size: .9rem; font-weight: 600; }
+  td { font-size: .95rem; }
+  code { background: var(--panel2); padding: 2px 8px; border-radius: 4px; font-family: 'Cascadia Code', Consolas, monospace; font-size: .88em; color: #ffd28e; }
+  pre { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; overflow-x: auto; margin: 12px 0; }
+  pre code { background: none; padding: 0; color: #c9d1d9; }
+  .note { border-left: 3px solid var(--yellow); background: rgba(210,153,34,.08); padding: 10px 16px; border-radius: 0 8px 8px 0; margin: 12px 0; color: var(--muted); }
+  .flow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }
+  .flow .step { background: var(--panel2); border: 1px solid var(--accent2); border-radius: 8px; padding: 8px 16px; font-size: .92rem; }
+  .flow .arrow { color: var(--accent); font-weight: bold; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+  .dot.g { background: var(--green); } .dot.y { background: var(--yellow); } .dot.r { background: var(--red); } .dot.w { background: #888; }
+  strong { color: var(--accent2); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>v2 설계 — 상시 실행 · 다중 라우트 · 컨테이너 지원</h1>
+  <div class="meta">2026-08-11 · <span class="badge pending">승인 대기</span>(사용자 요청 7건을 반영한 설계)</div>
+</header>
+
+<h2>배경</h2>
+<div class="card">
+  <p>v1은 GUI가 cloudflared와 웹서버를 자식 프로세스로 붙잡고 있는 구조였다. 그래서 앱을 닫으면 터널도 함께 꺼지고, 노트북에서 라즈베리파이를 관리하다 SSH가 끊기면 원격 프로세스까지 죽었다. 또한 터널 하나에 사이트 하나만 연결할 수 있었고, 웹서버는 자유 명령 하나만 등록 가능해 컨테이너 운영에 맞지 않았다.</p>
+  <p style="margin-top:12px">v2는 <strong>프로세스 소유권을 GUI에서 대상 머신으로 옮긴다.</strong> GUI는 실행 주체가 아니라 관찰자·조작자가 된다.</p>
+</div>
+
+<h2>요청 사항과 대응</h2>
+<table>
+  <tr><th>#</th><th>요청</th><th>대응</th></tr>
+  <tr><td>1</td><td>터널/서버 토글 분리</td><td>카드에 터널 토글 1개 + 라우트마다 서버 토글 1개 (그린 스위치 위젯)</td></tr>
+  <tr><td>2</td><td>컨테이너 등록</td><td>서비스 종류를 <code>명령</code>/<code>도커 컴포즈</code>로 구분, 시작·정지 명령 쌍과 상태 판정 방식을 종류별로 다르게</td></tr>
+  <tr><td>3</td><td>한 터널에 여러 개 등록</td><td>터널이 라우트 목록을 가짐. config.yml에 ingress 규칙이 여러 개 생성됨</td></tr>
+  <tr><td>4</td><td>GUI 종료해도 유지 + 재시작 시 복원</td><td>분리 실행(detached) + PID·로그 파일 기반 상태 관리</td></tr>
+  <tr><td>5</td><td>대상 드롭다운 화살표 디자인</td><td>직접 그린 셰브론 아이콘을 QSS에 연결</td></tr>
+  <tr><td>6</td><td>새로고침 아이콘 재작업</td><td>원호 + 화살촉을 QPainterPath로 다시 그림</td></tr>
+  <tr><td>7</td><td>삭제 빨간 글씨</td><td>메뉴의 삭제 항목과 확인 다이얼로그 버튼을 danger 색으로</td></tr>
+</table>
+
+<h2>핵심 구조 변경: 분리 실행과 파일 기반 상태</h2>
+
+<h3>실행 방식</h3>
+<p>GUI는 프로세스를 <strong>분리 실행</strong>하고 즉시 손을 뗀다. 프로세스의 신원과 출력은 대상 머신의 파일에 남는다.</p>
+<ul>
+  <li>로컬(Windows): <code>DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP</code>으로 spawn, stdout/stderr을 로그 파일로 리다이렉트</li>
+  <li>원격(SSH): <code>cd &lt;cwd&gt; &amp;&amp; setsid nohup &lt;cmd&gt; &gt;&gt; &lt;log&gt; 2&gt;&amp;1 &lt; /dev/null &amp; echo $!</code> — <code>nohup</code>으로 SIGHUP을 무시하고 <code>setsid</code>로 독립 프로세스 그룹을 만든다. 채널이 끊겨도 살아남는다.</li>
+</ul>
+
+<h3>실행 상태 디렉터리</h3>
+<p>대상 머신의 <code>~/.cloudflare-gui/run/</code> 아래에 단위별로 두 파일을 둔다.</p>
+<pre><code>tunnel-&lt;터널명&gt;.pid        tunnel-&lt;터널명&gt;.log
+svc-&lt;터널명&gt;-&lt;라우트ID&gt;.pid  svc-&lt;터널명&gt;-&lt;라우트ID&gt;.log</code></pre>
+<p>PID 파일이 곧 "이 단위는 실행 중이어야 한다"는 선언이다. GUI는 매 폴링마다 PID 생존 여부를 확인해 실제 상태를 만든다. 즉 <strong>상태는 메모리가 아니라 대상 머신의 디스크에 있다.</strong> 그래서 GUI를 껐다 켜도, 다른 노트북에서 접속해도 같은 상태가 보인다.</p>
+
+<h3>상태 판정</h3>
+<table>
+  <tr><th>단위</th><th>판정 방법</th></tr>
+  <tr><td>터널</td><td>PID 파일 없음 → 중지 / PID 살아있고 로그에 <code>Registered tunnel connection</code> → 실행 중 / PID 살아있고 마커 없음 → 시작 중 / PID 죽음 → 오류</td></tr>
+  <tr><td>서비스(명령)</td><td>PID 파일 + 생존 여부</td></tr>
+  <tr><td>서비스(도커)</td><td><code>docker compose ps -q</code>의 출력이 비어있지 않으면 실행 중 (PID 무관)</td></tr>
+</table>
+<p>PID 생존 확인은 라운드트립을 줄이기 위해 <strong>일괄 조회</strong>한다. 로컬은 ctypes <code>OpenProcess</code>, 원격은 한 번의 셸 명령으로 여러 PID를 검사한다.</p>
+
+<h3>종료 방식</h3>
+<ul>
+  <li>로컬: <code>taskkill /PID &lt;pid&gt; /T /F</code> (자식까지)</li>
+  <li>원격: <code>kill -TERM -&lt;pid&gt;</code> (프로세스 그룹) → 유예 후 <code>kill -KILL -&lt;pid&gt;</code>, 실패 시 그룹 없이 재시도</li>
+  <li>도커 서비스: 등록된 정지 명령(<code>docker compose down</code>) 실행</li>
+</ul>
+<p>정지가 성공하면 PID 파일을 지운다. 이것이 "사용자가 의도적으로 껐다"는 표시이며, 오류(비정상 종료)와 구분하는 근거다.</p>
+
+<h3>로그</h3>
+<p>파이프 대신 <strong>로그 파일을 tail</strong> 한다. 뷰어는 바이트 오프셋을 들고 있다가 증가분만 읽는다(로컬은 파일 시크, 원격은 SFTP 시크). 앱을 재시작해도 과거 로그를 그대로 볼 수 있고, 뷰어를 열지 않은 동안의 출력도 유실되지 않는다. 로그 파일이 무한히 커지지 않도록 시작 시 파일 크기가 5MB를 넘으면 새로 만든다(직전 것은 <code>.log.1</code>로 이동).</p>
+
+<h2>데이터 모델</h2>
+<pre><code>@dataclass
+class ServiceSpec:
+    kind: str = "command"        # "command" | "docker"
+    start_cmd: str = ""
+    stop_cmd: str = ""           # 비우면 PID 종료로 처리 (command 전용)
+    cwd: str = ""
+    autostart: bool = False      # 터널을 켤 때 함께 시작
+
+@dataclass
+class RouteMeta:
+    id: str                      # 8자리 난수 hex, 생성 후 불변
+    hostname: str = ""           # mysite.example.com
+    service: str = ""            # http://localhost:8000
+    server: ServiceSpec = field(default_factory=ServiceSpec)
+
+@dataclass
+class TunnelMeta:
+    name: str
+    routes: list[RouteMeta] = field(default_factory=list)</code></pre>
+<p>라우트 <code>id</code>는 hostname이 바뀌어도 PID·로그 파일과의 연결이 끊기지 않게 하기 위한 안정 키다.</p>
+
+<h3>기존 설정 마이그레이션</h3>
+<p>v1의 <code>TunnelMeta</code>는 <code>hostname</code>/<code>service</code>/<code>server_cmd</code>/<code>server_cwd</code>/<code>start_together</code>를 최상위에 두었다. 로드 시 <code>routes</code> 키가 없고 <code>hostname</code>이나 <code>service</code>가 있으면 라우트 하나로 변환한다. <code>start_together</code>는 <code>server.autostart</code>로, <code>server_cmd</code>/<code>server_cwd</code>는 <code>kind="command"</code> 서비스로 옮긴다. 변환 후 곧바로 저장해 다음 실행부터는 새 형식만 남는다.</p>
+
+<h2>config.yml 다중 ingress</h2>
+<pre><code>tunnel: &lt;uuid&gt;
+credentials-file: &lt;path&gt;
+ingress:
+  - hostname: blog.example.com
+    service: http://localhost:8000
+  - hostname: api.example.com
+    service: http://localhost:8001
+  - service: http_status:404</code></pre>
+<p><code>build_config(tunnel_id, credentials_file, routes)</code>가 라우트 목록을 받아 규칙을 만들고, 마지막 fallback은 항상 유지한다. <code>set_routes(text, routes)</code>는 기존 파일의 tunnel/credentials-file은 보존한 채 ingress만 교체한다. 라우트를 추가·삭제할 때마다 config를 다시 쓰고, <strong>터널이 실행 중이면 재시작이 필요하다는 안내를 표시한다</strong>(cloudflared는 config를 자동으로 다시 읽지 않는다).</p>
+
+<h2>화면 구성</h2>
+
+<h3>터널 카드</h3>
+<pre><code>● mysite                                    [터널 ●━]  로그  ⋮
+   blog.example.com → localhost:8000        [서버 ━○]  로그
+   api.example.com  → localhost:8001        [서버 ●━]  로그
+                                            ＋ 라우트 추가</code></pre>
+<ul>
+  <li>터널 토글과 서버 토글은 같은 스위치 위젯이지만 서로 독립적으로 동작한다. 터널을 켤 때 <code>autostart</code>가 켜진 서비스만 함께 시작한다.</li>
+  <li>서비스가 등록되지 않은 라우트는 서버 토글 대신 "서버 등록" 링크를 보여준다.</li>
+  <li>라우트 행의 ⋮ 메뉴: 편집 / 삭제.</li>
+</ul>
+
+<h3>라우트 편집 다이얼로그</h3>
+<p>hostname, 로컬 서비스 주소, 서비스 종류(명령 / 도커 컴포즈), 시작 명령, 정지 명령, 작업 폴더, 터널과 함께 시작 여부. 도커를 고르면 시작·정지 명령의 기본값을 <code>docker compose up -d</code> / <code>docker compose down</code>으로 채우고, 작업 폴더를 필수로 요구한다(compose 파일 위치).</p>
+
+<h3>종료 동작</h3>
+<p><code>closeEvent</code>에서 아무것도 중지하지 않는다. 실행 중인 것이 있으면 "터널과 서버는 계속 실행됩니다"라는 정보성 안내만 상태 표시줄 수준으로 남긴다. 다시 실행하면 대상 머신의 run 디렉터리를 읽어 카드 상태를 복원한다.</p>
+
+<h2>아이콘·스타일 세부</h2>
+<ul>
+  <li><strong>콤보 화살표</strong>: 테마 적용 시 셰브론 아이콘을 <code>%APPDATA%/CloudflareTunnelGUI/icons/</code>에 PNG로 굽고, QSS의 <code>QComboBox::down-arrow { image: url(...) }</code>로 연결한다. Qt 스타일시트는 메모리 픽스맵을 직접 받지 못하므로 파일 경유가 필요하다.</li>
+  <li><strong>새로고침</strong>: 300° 원호를 <code>QPainterPath.arcTo</code>로 그리고 끝점 접선 방향에 채워진 삼각형 화살촉을 붙인다. 선 끝은 둥글게(<code>RoundCap</code>).</li>
+  <li><strong>삭제 빨간 글씨</strong>: <code>QMenu</code>는 항목별 색을 QSS로 지정할 수 없으므로, 삭제 항목만 <code>QWidgetAction</code> + 라벨로 만들어 danger 색과 hover 배경을 직접 준다. 삭제 확인 다이얼로그의 실행 버튼도 danger 색으로 표시한다.</li>
+</ul>
+
+<h2>테스트 전략</h2>
+<ul>
+  <li>코어 단위 테스트(pytest): 마이그레이션, 다중 ingress 생성·교체, PID 파일 파싱, 상태 판정 표의 각 분기, 도커 상태 판정, 로그 tail 오프셋 처리. Runner는 fake로 대체한다.</li>
+  <li>분리 실행은 실제 프로세스로 검증한다: 파이썬 자식 프로세스를 spawn_detached로 띄우고 부모가 죽어도 살아있는지, kill로 정리되는지.</li>
+  <li>원격(SSH) 경로와 도커 실행은 수동 체크리스트로 확인한다.</li>
+</ul>
+
+<h2>v2에서 다루지 않는 것</h2>
+<ul>
+  <li><code>docker run</code> 단독 컨테이너의 정확한 상태 판정 (compose 프로젝트만 지원)</li>
+  <li>라우트별 Cloudflare Access 설정</li>
+  <li>여러 대상 머신을 한 화면에서 동시에 모니터링</li>
+</ul>
+
+</div>
+</body>
+</html>
