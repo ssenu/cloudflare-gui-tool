@@ -65,6 +65,6 @@ def execute_creation(client: CloudflaredClient, name: str, hostname: str,
     progress(1, f"{hostname} 연결 완료", True)
 
     progress(2, "설정 파일 작성 중...", True)
-    text = build_config(tid, cred, hostname, service)
+    text = build_config(tid, cred, [(hostname, service)])
     client.runner.write_file(client.config_path(name), text)
     progress(2, "설정 파일 작성 완료", True)
