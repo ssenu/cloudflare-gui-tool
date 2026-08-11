@@ -27,7 +27,7 @@ class TunnelWizard(QDialog):
         self._tunnel_created = False  # 터널 생성 성공 여부 추적
         self._current_tunnel_name = ""  # 롤백용 터널 이름
         self.setWindowTitle("터널 생성")
-        self.setMinimumSize(520, 380)
+        self.setMinimumSize(600, 520)
 
         palette = current_palette(ctx.store.settings.theme)
         self.stack = QStackedWidget()
@@ -82,8 +82,16 @@ class TunnelWizard(QDialog):
         v.addStretch(1)
         return w
 
+    def _hint(self, text: str) -> QLabel:
+        palette = current_palette(self.ctx.store.settings.theme)
+        lbl = QLabel(text)
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet(f"color: {palette['muted']};")
+        return lbl
+
     def _build_pages(self):
         s = self.ctx.store.settings
+        palette = current_palette(self.ctx.store.settings.theme)
         self.name_edit = QLineEdit()
         self.name_edit.setPlaceholderText("예: mysite")
         self.sub_edit = QLineEdit()
@@ -100,21 +108,53 @@ class TunnelWizard(QDialog):
             QFileDialog.getExistingDirectory(self, "작업 폴더") or self.cwd_edit.text()))
         self.together_chk = QCheckBox("터널을 켤 때 서버도 함께 시작")
 
+        self.hostname_result = QLabel()
+        self.hostname_result.setStyleSheet(
+            f"color: {palette['accent']}; font-weight: 700;")
+
         self.status_label = QLabel()
         self.status_label.setWordWrap(True)
 
-        self.stack.addWidget(self._page("1. 터널 이름",
-                                        QLabel("터널을 구분할 이름입니다."), self.name_edit))
-        self.stack.addWidget(self._page("2. 연결할 도메인",
-                                        QLabel("서브도메인"), self.sub_edit,
-                                        QLabel("루트 도메인"), self.domain_edit))
-        self.stack.addWidget(self._page("3. 로컬 서비스 주소",
-                                        QLabel("터널이 전달할 로컬 서비스입니다."),
-                                        self.service_edit))
-        self.stack.addWidget(self._page("4. 웹서버 명령 (선택)",
-                                        self.cmd_edit, self.cwd_edit, browse,
-                                        self.together_chk))
-        self.stack.addWidget(self._page("5. 실행", self.status_label))
+        self.stack.addWidget(self._page(
+            "1. 터널 이름",
+            self._hint("이 터널을 구분하기 위한 이름입니다. Cloudflare 계정 안에서만 "
+                       "사용되며 실제 접속 주소와는 관계가 없습니다."),
+            self._hint("영문, 숫자, 하이픈(-), 밑줄(_)만 사용할 수 있습니다. 설정 파일 "
+                       "이름(config-<이름>.yml)에도 그대로 쓰입니다."),
+            self._hint("예: mysite, blog, home-api"),
+            self.name_edit))
+        self.stack.addWidget(self._page(
+            "2. 연결할 도메인",
+            self._hint("방문자가 브라우저에 입력하게 될 주소입니다. 두 칸을 합친 "
+                       "주소로 Cloudflare에 CNAME 레코드가 자동 생성됩니다."),
+            self._hint("루트 도메인은 Cloudflare에 등록되어 상태가 Active여야 합니다."),
+            QLabel("서브도메인"), self.sub_edit,
+            QLabel("루트 도메인"), self.domain_edit,
+            self.hostname_result))
+        self.stack.addWidget(self._page(
+            "3. 로컬 서비스 주소",
+            self._hint("터널이 트래픽을 전달할 내 컴퓨터의 주소입니다. 웹서버가 실제로 "
+                       "듣고 있는 포트를 적어야 합니다."),
+            self._hint("로컬 구간은 http로 충분합니다. 외부 접속의 HTTPS는 Cloudflare가 "
+                       "자동으로 처리합니다."),
+            self._hint("예: http://localhost:8000 (uvicorn), "
+                       "http://localhost:5173 (Vite), http://localhost:3000 (Next.js)"),
+            self.service_edit))
+        self.stack.addWidget(self._page(
+            "4. 웹서버 실행 명령 (선택)",
+            self._hint("터널과 함께 켤 웹서버 명령을 등록해 두면 카드에서 한 번에 실행할 "
+                       "수 있습니다. 비워 두면 서버는 직접 실행해야 합니다."),
+            self._hint("작업 폴더는 명령을 실행할 위치입니다. 보통 프로젝트 폴더를 "
+                       "지정합니다."),
+            self._hint("명령 예: uvicorn main:app --port 8000, npm run dev"),
+            self.cmd_edit, self.cwd_edit, browse,
+            self.together_chk))
+        self.stack.addWidget(self._page(
+            "5. 실행",
+            self._hint("터널 생성 → DNS 연결 → 설정 파일 작성 순서로 자동 진행됩니다. "
+                       "중간에 실패하면 그 단계에서 멈추며, 이미 만들어진 터널은 롤백 "
+                       "버튼으로 삭제할 수 있습니다."),
+            self.status_label))
 
         for e in (self.name_edit, self.sub_edit, self.domain_edit,
                   self.service_edit):
@@ -146,6 +186,13 @@ class TunnelWizard(QDialog):
             self.preview.show()
         else:
             self.preview.hide()
+
+        sub = self.sub_edit.text().strip()
+        domain = self.domain_edit.text().strip()
+        if sub and domain:
+            self.hostname_result.setText(f"접속 주소: {sub}.{domain}")
+        else:
+            self.hostname_result.setText("접속 주소: (서브도메인과 루트 도메인을 입력하세요)")
 
     def _go(self, i: int):
         self.stack.setCurrentIndex(i)
