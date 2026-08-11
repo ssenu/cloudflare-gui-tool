@@ -232,6 +232,6 @@ class RouteDialog(QDialog):
             self.saved_route = self.route
 
         self.ctx.store.settings.root_domain = self.domain_edit.text().strip()
-        self.ctx.store.settings.tunnels[self.tunnel.name] = self.tunnel
+        self.ctx.store.settings.tunnels_for(self.ctx.runner.name)[self.tunnel.name] = self.tunnel
         self.ctx.store.save()
         self.accept()

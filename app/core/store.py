@@ -47,9 +47,17 @@ class SshProfile:
 class Settings:
     root_domain: str = ""
     cloudflared_path: str = ""
-    tunnels: dict[str, TunnelMeta] = field(default_factory=dict)
+    # 대상(로컬/SSH 프로필)별로 독립된 터널 설정. 바깥 키는
+    # CommandRunner.name ("local" 또는 "ssh:<프로필명>"), 안쪽은 기존과 같은
+    # {터널이름: TunnelMeta} dict. 같은 계정을 여러 대상에서 볼 수 있지만
+    # config-*.yml/프로세스/서버 실행 명령은 대상마다 다르므로 분리해야 한다.
+    targets: dict[str, dict[str, TunnelMeta]] = field(default_factory=dict)
     ssh_profiles: list[SshProfile] = field(default_factory=list)
     theme: str = "dark"
+
+    def tunnels_for(self, target_key: str) -> dict[str, TunnelMeta]:
+        """target_key에 해당하는 터널 dict를 돌려준다. 없으면 새로 만들어 등록한다."""
+        return self.targets.setdefault(target_key, {})
 
 
 def _filter_dataclass_kwargs(dataclass_type, data: dict) -> dict:
@@ -162,19 +170,36 @@ class SettingsStore:
                     self.settings = Settings()
                     return self.settings
 
-                # 유효한 터널만 로드 (v1 -> v2 마이그레이션 포함)
-                tunnels = {}
+                # 유효한 터널만 로드 (v1 -> v2 라우트 마이그레이션 포함,
+                # 평평한 tunnels -> targets["local"] 구조 마이그레이션 포함)
                 migrated_any = False
-                tunnels_data = raw.get("tunnels", {})
-                if isinstance(tunnels_data, dict):
-                    for k, v in tunnels_data.items():
-                        try:
-                            meta, migrated = _parse_tunnel_meta(v)
-                            tunnels[k] = meta
-                            migrated_any = migrated_any or migrated
-                        except (TypeError, ValueError, KeyError):
-                            # 유효하지 않은 항목은 스킵
-                            continue
+
+                def _parse_tunnels_dict(tunnels_data) -> dict:
+                    nonlocal migrated_any
+                    result = {}
+                    if isinstance(tunnels_data, dict):
+                        for k, v in tunnels_data.items():
+                            try:
+                                meta, migrated = _parse_tunnel_meta(v)
+                                result[k] = meta
+                                migrated_any = migrated_any or migrated
+                            except (TypeError, ValueError, KeyError):
+                                # 유효하지 않은 항목은 스킵
+                                continue
+                    return result
+
+                targets: dict[str, dict] = {}
+                if "targets" in raw:
+                    targets_data = raw.get("targets", {})
+                    if isinstance(targets_data, dict):
+                        for target_key, tunnels_data in targets_data.items():
+                            if not isinstance(target_key, str):
+                                continue
+                            targets[target_key] = _parse_tunnels_dict(tunnels_data)
+                elif "tunnels" in raw:
+                    # v1/v2 평평한 형식: 기존 tunnels는 전부 로컬 대상 것이었다
+                    targets["local"] = _parse_tunnels_dict(raw.get("tunnels", {}))
+                    migrated_any = True
 
                 # 유효한 SSH 프로필만 로드
                 ssh_profiles = []
@@ -195,7 +220,7 @@ class SettingsStore:
                 self.settings = Settings(
                     root_domain=raw.get("root_domain", ""),
                     cloudflared_path=raw.get("cloudflared_path", ""),
-                    tunnels=tunnels,
+                    targets=targets,
                     ssh_profiles=ssh_profiles,
                     theme=theme,
                 )
@@ -221,7 +246,10 @@ class SettingsStore:
         raw = {
             "root_domain": self.settings.root_domain,
             "cloudflared_path": self.settings.cloudflared_path,
-            "tunnels": {k: asdict(v) for k, v in self.settings.tunnels.items()},
+            "targets": {
+                target_key: {k: asdict(v) for k, v in tunnels.items()}
+                for target_key, tunnels in self.settings.targets.items()
+            },
             "ssh_profiles": [asdict(p) for p in self.settings.ssh_profiles],
             "theme": self.settings.theme,
         }

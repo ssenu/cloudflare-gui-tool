@@ -10,7 +10,7 @@ def test_load_missing_file_returns_defaults(tmp_path):
     store = SettingsStore(path=str(tmp_path / "settings.json"))
     s = store.load()
     assert s.root_domain == ""
-    assert s.tunnels == {}
+    assert s.tunnels_for("local") == {}
     assert s.ssh_profiles == []
 
 
@@ -19,7 +19,7 @@ def test_save_and_load_roundtrip(tmp_path):
     store = SettingsStore(path=path)
     store.load()
     store.settings.root_domain = "example.com"
-    store.settings.tunnels["mysite"] = TunnelMeta(
+    store.settings.tunnels_for("local")["mysite"] = TunnelMeta(
         name="mysite",
         routes=[
             RouteMeta(
@@ -42,11 +42,12 @@ def test_save_and_load_roundtrip(tmp_path):
 
     loaded = SettingsStore(path=path).load()
     assert loaded.root_domain == "example.com"
-    assert loaded.tunnels["mysite"].routes[0].server.autostart is True
+    assert loaded.tunnels_for("local")["mysite"].routes[0].server.autostart is True
     assert loaded.ssh_profiles[0].host == "192.168.0.10"
     # 파일이 사람이 읽을 수 있는 JSON인지
     raw = json.loads(open(path, encoding="utf-8").read())
-    assert "tunnels" in raw
+    assert "targets" in raw
+    assert "local" in raw["targets"]
 
 
 def test_theme_roundtrip(tmp_path):
@@ -72,7 +73,7 @@ def test_load_corrupt_json_falls_back_to_defaults(tmp_path):
     # load()가 예외를 raise하지 않고 기본값을 반환해야 함
     s = store.load()
     assert s.root_domain == ""
-    assert s.tunnels == {}
+    assert s.tunnels_for("local") == {}
     assert s.ssh_profiles == []
 
 
@@ -126,10 +127,10 @@ def test_load_ignores_bad_entries(tmp_path):
     # 기본값인 root_domain은 로드됨
     assert s.root_domain == "example.com"
     # 유효한 터널만 로드됨 (good, extra_field는 유효함 / missing_name은 필수 필드 없음)
-    assert "good" in s.tunnels
-    assert "extra_field" in s.tunnels
-    assert "missing_name" not in s.tunnels
-    assert len(s.tunnels) == 2  # 유효하지 않은 항목 1개는 제외
+    assert "good" in s.tunnels_for("local")
+    assert "extra_field" in s.tunnels_for("local")
+    assert "missing_name" not in s.tunnels_for("local")
+    assert len(s.tunnels_for("local")) == 2  # 유효하지 않은 항목 1개는 제외
     # 유효한 SSH 프로필만 로드됨
     assert len(s.ssh_profiles) == 1
     assert s.ssh_profiles[0].name == "good_ssh"
@@ -146,7 +147,7 @@ def test_load_non_object_root_falls_back(tmp_path):
     # AttributeError가 발생하지 않고 기본값을 반환해야 함
     s = store.load()
     assert s.root_domain == ""
-    assert s.tunnels == {}
+    assert s.tunnels_for("local") == {}
     assert s.ssh_profiles == []
 
 
@@ -166,7 +167,7 @@ def test_load_tunnels_wrong_type_skipped(tmp_path):
     # AttributeError가 발생하지 않고 터널을 빈 dict로 처리
     s = store.load()
     assert s.root_domain == "example.com"
-    assert s.tunnels == {}  # 형식이 잘못되었으므로 빈 dict
+    assert s.tunnels_for("local") == {}  # 형식이 잘못되었으므로 빈 dict
     assert s.ssh_profiles == []
 
 
@@ -205,7 +206,7 @@ def test_v1_format_migrates_to_single_route_and_resaves(tmp_path):
     store = SettingsStore(path=path)
     s = store.load()
 
-    meta = s.tunnels["mysite"]
+    meta = s.tunnels_for("local")["mysite"]
     assert len(meta.routes) == 1
     route = meta.routes[0]
     assert route.hostname == "mysite.example.com"
@@ -216,10 +217,10 @@ def test_v1_format_migrates_to_single_route_and_resaves(tmp_path):
     assert route.server.autostart is True
     assert isinstance(route.id, str) and route.id
 
-    # 파일이 v2 형식(routes 키)으로 다시 저장되었는지 확인
+    # 파일이 v2 형식(routes 키) + targets 구조로 다시 저장되었는지 확인
     raw = json.loads(open(path, encoding="utf-8").read())
-    assert "routes" in raw["tunnels"]["mysite"]
-    assert "hostname" not in raw["tunnels"]["mysite"]
+    assert "routes" in raw["targets"]["local"]["mysite"]
+    assert "hostname" not in raw["targets"]["local"]["mysite"]
 
 
 def test_v1_all_fields_empty_yields_empty_routes(tmp_path):
@@ -245,7 +246,7 @@ def test_v1_all_fields_empty_yields_empty_routes(tmp_path):
 
     store = SettingsStore(path=path)
     s = store.load()
-    assert s.tunnels["empty"].routes == []
+    assert s.tunnels_for("local")["empty"].routes == []
 
 
 def test_v2_roundtrip_multiple_routes_with_docker_service(tmp_path):
@@ -253,7 +254,7 @@ def test_v2_roundtrip_multiple_routes_with_docker_service(tmp_path):
     path = str(tmp_path / "settings.json")
     store = SettingsStore(path=path)
     store.load()
-    store.settings.tunnels["multi"] = TunnelMeta(
+    store.settings.tunnels_for("local")["multi"] = TunnelMeta(
         name="multi",
         routes=[
             RouteMeta(
@@ -274,7 +275,7 @@ def test_v2_roundtrip_multiple_routes_with_docker_service(tmp_path):
     store.save()
 
     loaded = SettingsStore(path=path).load()
-    meta = loaded.tunnels["multi"]
+    meta = loaded.tunnels_for("local")["multi"]
     assert len(meta.routes) == 2
     assert meta.routes[0].server.kind == "command"
     assert meta.routes[1].server.kind == "docker"
@@ -307,7 +308,7 @@ def test_route_array_with_bad_entries_loads_the_rest(tmp_path):
 
     store = SettingsStore(path=path)
     s = store.load()
-    routes = s.tunnels["mixed"].routes
+    routes = s.tunnels_for("local")["mixed"].routes
     assert len(routes) == 2
     assert {r.id for r in routes} == {"aaaa1111", "bbbb2222"}
 
@@ -334,7 +335,7 @@ def test_service_spec_bad_kind_coerced_to_command(tmp_path):
 
     store = SettingsStore(path=path)
     s = store.load()
-    assert s.tunnels["t"].routes[0].server.kind == "command"
+    assert s.tunnels_for("local")["t"].routes[0].server.kind == "command"
 
 
 def test_v2_only_file_load_does_not_rewrite_file(tmp_path):
@@ -342,7 +343,7 @@ def test_v2_only_file_load_does_not_rewrite_file(tmp_path):
     path = str(tmp_path / "settings.json")
     store = SettingsStore(path=path)
     store.load()
-    store.settings.tunnels["t"] = TunnelMeta(
+    store.settings.tunnels_for("local")["t"] = TunnelMeta(
         name="t",
         routes=[RouteMeta(id=new_route_id(), hostname="h.example.com",
                           service="http://localhost:8000")],
@@ -382,7 +383,7 @@ def test_route_server_null_falls_back_to_default_service_spec(tmp_path):
 
     store = SettingsStore(path=path)
     s = store.load()
-    route = s.tunnels["t"].routes[0]
+    route = s.tunnels_for("local")["t"].routes[0]
     assert route.server == ServiceSpec()
     assert route.server.kind == "command"
 
@@ -409,7 +410,7 @@ def test_route_server_wrong_type_falls_back_to_default_service_spec(tmp_path):
 
     store = SettingsStore(path=path)
     s = store.load()
-    route = s.tunnels["t"].routes[0]
+    route = s.tunnels_for("local")["t"].routes[0]
     assert route.server == ServiceSpec()
     assert route.server.kind == "command"
 
@@ -436,7 +437,7 @@ def test_route_id_wrong_type_is_skipped(tmp_path):
 
     store = SettingsStore(path=path)
     s = store.load()
-    routes = s.tunnels["t"].routes
+    routes = s.tunnels_for("local")["t"].routes
     assert len(routes) == 1
     assert routes[0].id == "bbbb2222"
 
@@ -471,6 +472,107 @@ def test_migration_save_oserror_does_not_crash_load(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "save", _boom)
 
     s = store.load()  # 예외를 raise하지 않아야 함
-    meta = s.tunnels["mysite"]
+    meta = s.tunnels_for("local")["mysite"]
     assert len(meta.routes) == 1
     assert meta.routes[0].hostname == "mysite.example.com"
+
+
+# ---- B1: 대상별 설정 분리 (targets) ----
+
+def test_flat_tunnels_migrates_to_targets_local_and_resaves(tmp_path):
+    """평평한 최상위 tunnels 형식을 로드하면 targets["local"]로 옮겨지고,
+    파일이 새 nested 형식으로 다시 저장된다."""
+    path = str(tmp_path / "settings.json")
+    flat_json = {
+        "root_domain": "example.com",
+        "cloudflared_path": "",
+        "tunnels": {
+            "mysite": {
+                "name": "mysite",
+                "routes": [
+                    {"id": "aaaa1111", "hostname": "mysite.example.com",
+                     "service": "http://localhost:8000"},
+                ],
+            }
+        },
+        "ssh_profiles": [],
+        "theme": "dark",
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(flat_json, f)
+
+    store = SettingsStore(path=path)
+    s = store.load()
+
+    assert "local" in s.targets
+    assert s.tunnels_for("local")["mysite"].routes[0].hostname == "mysite.example.com"
+
+    raw = json.loads(open(path, encoding="utf-8").read())
+    assert "targets" in raw
+    assert "tunnels" not in raw
+    assert raw["targets"]["local"]["mysite"]["routes"][0]["hostname"] == "mysite.example.com"
+
+
+def test_tunnels_for_is_independent_per_target(tmp_path):
+    """tunnels_for()는 대상마다 독립된 dict를 돌려주고, 한쪽을 수정해도 다른
+    대상에는 영향을 주지 않는다."""
+    path = str(tmp_path / "settings.json")
+    store = SettingsStore(path=path)
+    store.load()
+
+    local_tunnels = store.settings.tunnels_for("local")
+    local_tunnels["mysite"] = TunnelMeta(name="mysite")
+
+    ssh_tunnels = store.settings.tunnels_for("ssh:rpi")
+    assert ssh_tunnels == {}
+    assert "mysite" not in ssh_tunnels
+
+    ssh_tunnels["other"] = TunnelMeta(name="other")
+    assert "other" not in store.settings.tunnels_for("local")
+    assert list(store.settings.tunnels_for("local").keys()) == ["mysite"]
+
+    store.save()
+    loaded = SettingsStore(path=path).load()
+    assert list(loaded.tunnels_for("local").keys()) == ["mysite"]
+    assert list(loaded.tunnels_for("ssh:rpi").keys()) == ["other"]
+
+
+def test_tunnels_for_missing_target_returns_and_registers_empty_dict(tmp_path):
+    """존재하지 않는 대상 키로 조회하면 빈 dict를 만들어 targets에 등록한다."""
+    store = SettingsStore(path=str(tmp_path / "settings.json"))
+    store.load()
+    assert "ssh:new" not in store.settings.targets
+    result = store.settings.tunnels_for("ssh:new")
+    assert result == {}
+    assert "ssh:new" in store.settings.targets
+    assert store.settings.targets["ssh:new"] is result
+
+
+def test_nested_targets_format_roundtrips(tmp_path):
+    """이미 targets 형식인 파일은 그대로 로드/저장되며 재작성 트리거가 없다."""
+    path = str(tmp_path / "settings.json")
+    v2_json = {
+        "root_domain": "",
+        "cloudflared_path": "",
+        "targets": {
+            "local": {
+                "a": {"name": "a", "routes": []},
+            },
+            "ssh:rpi": {
+                "b": {"name": "b", "routes": []},
+            },
+        },
+        "ssh_profiles": [],
+        "theme": "dark",
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(v2_json, f)
+
+    store = SettingsStore(path=path)
+    save_calls = []
+    store.save = lambda: save_calls.append(True)
+    s = store.load()
+
+    assert save_calls == []  # 이미 v2/targets 형식이므로 재저장 없음
+    assert "a" in s.tunnels_for("local")
+    assert "b" in s.tunnels_for("ssh:rpi")

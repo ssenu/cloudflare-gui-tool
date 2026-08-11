@@ -10,7 +10,8 @@ from PyQt6.QtWidgets import QApplication
 
 from app.context import AppContext
 from app.core.runner import RunResult
-from app.core.store import RouteMeta, ServiceSpec, SettingsStore, TunnelMeta, new_route_id
+from app.core.store import (RouteMeta, ServiceSpec, SettingsStore, SshProfile,
+                            TunnelMeta, new_route_id)
 from app.ui.main_window import MainWindow
 from tests.fake_runner import FakeRunner
 
@@ -101,7 +102,7 @@ def test_delete_route_rolls_back_when_config_write_fails(qapp, tmp_path, monkeyp
     meta = TunnelMeta(name="t1", routes=[route])
 
     ctx = make_ctx(tmp_path, runner)
-    ctx.store.settings.tunnels["t1"] = meta
+    ctx.store.settings.tunnels_for(ctx.runner.name)["t1"] = meta
     win = MainWindow(ctx)
     win._timer.stop()
     card = win.cards[0]
@@ -118,5 +119,62 @@ def test_delete_route_rolls_back_when_config_write_fails(qapp, tmp_path, monkeyp
     win._delete_route(card, route)
 
     # config 쓰기가 실패했으므로 라우트가 여전히 남아있어야 한다 (고아 방지)
-    assert len(ctx.store.settings.tunnels["t1"].routes) == 1
-    assert ctx.store.settings.tunnels["t1"].routes[0].id == route.id
+    assert len(ctx.store.settings.tunnels_for(ctx.runner.name)["t1"].routes) == 1
+    assert ctx.store.settings.tunnels_for(ctx.runner.name)["t1"].routes[0].id == route.id
+
+
+# ---- B1: 대상별로 분리된 설정을 카드가 사용하는지 ----
+
+def test_refresh_uses_metas_for_current_target(qapp, tmp_path):
+    runner_a = FakeRunner(home="/home/a")
+    runner_a.name = "local"
+    runner_a.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"x","name":"t1","created_at":"","connections":[]}]', "")
+
+    win = make_window(qapp, tmp_path, runner_a)
+    route_a = RouteMeta(id=new_route_id(), hostname="a.local.example.com",
+                        service="http://localhost:1111")
+    win.ctx.store.settings.tunnels_for("local")["t1"] = TunnelMeta(
+        name="t1", routes=[route_a])
+    win.refresh()
+    assert win.cards[0].meta.routes[0].hostname == "a.local.example.com"
+
+    # 대상을 SSH 프로필로 바꾼다 (실제 SSH 연결 없이 러너만 교체)
+    runner_b = FakeRunner(home="/home/b")
+    runner_b.name = "ssh:rpi"
+    runner_b.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"x","name":"t1","created_at":"","connections":[]}]', "")
+    route_b = RouteMeta(id=new_route_id(), hostname="b.rpi.example.com",
+                        service="http://localhost:2222")
+    win.ctx.store.settings.tunnels_for("ssh:rpi")["t1"] = TunnelMeta(
+        name="t1", routes=[route_b])
+    win.ctx.runner = runner_b
+
+    win.refresh()
+    # 대상이 바뀌었으므로 카드는 로컬이 아니라 ssh:rpi 대상의 메타(다른 hostname)를 써야 한다
+    assert win.cards[0].meta.routes[0].hostname == "b.rpi.example.com"
+    assert win.cards[0].meta.routes[0].hostname != "a.local.example.com"
+
+
+# ---- B3: SSH 프로필 삭제 시 콤보/러너가 로컬로 되돌아가는지 ----
+
+def test_reload_targets_falls_back_to_local_when_profile_deleted(qapp, tmp_path):
+    win = make_window(qapp, tmp_path)
+    profile = SshProfile(name="rpi", host="1.2.3.4")
+    win.ctx.store.settings.ssh_profiles.append(profile)
+    win._reload_targets()
+
+    # rpi를 현재 대상으로 선택한 것처럼 상태를 맞춘다 (실제 SSH 연결은 하지 않음)
+    win._current_target_key = "rpi"
+    win._reload_targets()
+    assert win.target_combo.currentIndex() == 1
+    assert win.target_combo.currentData() is profile
+
+    # 사용 중이던 프로필을 삭제한 뒤 다시 로드하면 로컬로 되돌아가야 한다
+    win.ctx.store.settings.ssh_profiles.remove(profile)
+    win._reload_targets()
+
+    assert win._current_target_key is None
+    assert win.target_combo.currentIndex() == 0
+    assert win.target_combo.currentData() is None
+    assert win.ctx.runner is win.ctx.local_runner

@@ -12,7 +12,7 @@ from app.context import AppContext
 from app.core.cloudflared import CloudflaredError
 from app.core.config_yml import get_routes, parse_config, set_routes
 from app.core.process_mgr import TunnelState
-from app.core.store import RouteMeta, TunnelMeta, new_route_id
+from app.core.store import RouteMeta, SshProfile, TunnelMeta, new_route_id
 from app.ui.icons import make_icon
 from app.ui.theme import STATE_COLORS, build_qss, current_palette, ensure_qss_icons
 from app.ui.widgets import ToggleSwitch, danger_menu_action
@@ -266,7 +266,10 @@ class MainWindow(QWidget):
         self.ctx = ctx
         self.cards: list[TunnelCard] = []
         self._log_viewers: dict[str, "LogViewer"] = {}
-        self._current_target_index = 0
+        # B3: 인덱스가 아니라 현재 대상의 식별자로 콤보를 재선택한다. None이면
+        # 로컬, 문자열이면 SSH 프로필 이름. 인덱스만 쓰면 프로필이 삭제됐을 때
+        # 콤보 항목이 밀려서 엉뚱한 대상을 가리키게 된다.
+        self._current_target_key: str | None = None
         self.setWindowTitle("Cloudflare Tunnel GUI")
         self.resize(820, 620)
 
@@ -370,6 +373,16 @@ class MainWindow(QWidget):
         return False
 
     # ---- 대상 전환 ----
+    def _index_for_current_target(self) -> int | None:
+        """현재 대상 식별자에 해당하는 콤보 인덱스. 없으면 None (예: 프로필 삭제됨)."""
+        if self._current_target_key is None:
+            return 0
+        for i in range(self.target_combo.count()):
+            data = self.target_combo.itemData(i)
+            if isinstance(data, SshProfile) and data.name == self._current_target_key:
+                return i
+        return None
+
     def _reload_targets(self):
         icon_color = current_palette(self.ctx.store.settings.theme)["text"]
         self.target_combo.blockSignals(True)
@@ -380,8 +393,14 @@ class MainWindow(QWidget):
                 make_icon("server", icon_color), f"{p.name} ({p.host})", p)
         self.target_combo.addItem(
             make_icon("plus", icon_color), "SSH 대상 추가...", ADD_SSH_TARGET)
-        idx = self._current_target_index
-        if idx >= self.target_combo.count():
+
+        idx = self._index_for_current_target()
+        if idx is None:
+            # B3: 사용 중이던 SSH 프로필이 삭제되어 더 이상 목록에 없다.
+            # 콤보가 "SSH 대상 추가..."를 현재 대상처럼 보여주는 것을 막기
+            # 위해 명시적으로 로컬로 되돌린다.
+            self.ctx.set_local()
+            self._current_target_key = None
             idx = 0
         self.target_combo.setCurrentIndex(idx)
         self.target_combo.blockSignals(False)
@@ -389,7 +408,7 @@ class MainWindow(QWidget):
     def _switch_target(self):
         if self.target_combo.currentData() == ADD_SSH_TARGET:
             self.target_combo.blockSignals(True)
-            self.target_combo.setCurrentIndex(self._current_target_index)
+            self.target_combo.setCurrentIndex(self._index_for_current_target() or 0)
             self.target_combo.blockSignals(False)
             from app.ui.ssh_manager import SshManagerDialog
             SshManagerDialog(self.ctx, self).exec()
@@ -404,7 +423,7 @@ class MainWindow(QWidget):
                 "계속할까요?")
             if ok != QMessageBox.StandardButton.Yes:
                 self.target_combo.blockSignals(True)
-                self.target_combo.setCurrentIndex(self._current_target_index)
+                self.target_combo.setCurrentIndex(self._index_for_current_target() or 0)
                 self.target_combo.blockSignals(False)
                 return
 
@@ -413,10 +432,11 @@ class MainWindow(QWidget):
         try:
             if profile is None:
                 self.ctx.set_local()
+                self._current_target_key = None
             else:
                 self.setCursor(Qt.CursorShape.WaitCursor)
                 self.ctx.set_remote(profile)
-            self._current_target_index = self.target_combo.currentIndex()
+                self._current_target_key = profile.name
         except Exception as ex:
             self.banner.setText(f"SSH 연결 실패: {ex}")
             self.banner.show()
@@ -424,10 +444,23 @@ class MainWindow(QWidget):
             self.target_combo.setCurrentIndex(0)
             self.target_combo.blockSignals(False)
             self.ctx.set_local()
-            self._current_target_index = 0
+            self._current_target_key = None
         finally:
             self.unsetCursor()
+        # B2: 로그 뷰어는 열린 시점의 대상(runner)에 붙어 있어, 대상이 바뀌면
+        # 죽은 세션을 보거나 다른 대상의 로그를 잘못 보여줄 수 있다. 가장
+        # 단순하고 오해가 없는 방법으로 전부 닫는다.
+        self._close_all_log_viewers()
         self.refresh()
+
+    def _close_all_log_viewers(self):
+        for viewer in list(self._log_viewers.values()):
+            viewer.close()
+
+    def _target_display_name(self) -> str:
+        if not self.ctx.is_remote:
+            return "이 PC"
+        return self.ctx.runner.name.split(":", 1)[-1]
 
     # ---- 목록 ----
     def refresh(self):
@@ -446,9 +479,10 @@ class MainWindow(QWidget):
             c.setParent(None)
         self.cards.clear()
 
-        # tunnels dict는 local/remote 대상 간에 공유된다 (v1부터의 한계: 이름
-        # 충돌 시 메타가 섞일 수 있음)
-        metas = self.ctx.store.settings.tunnels
+        # 대상(로컬/SSH 프로필)마다 독립된 터널 설정을 쓴다. 계정 단위인
+        # tunnel list는 대상 간에 같아도, config-*.yml/서버 실행 명령은
+        # 대상마다 다르기 때문이다.
+        metas = self.ctx.store.settings.tunnels_for(self.ctx.runner.name)
         restored = False
         for info in infos:
             meta = metas.get(info.name)
@@ -482,7 +516,7 @@ class MainWindow(QWidget):
         if wiz.exec() == wiz.DialogCode.Accepted and wiz.created_meta:
             meta = wiz.created_meta
             if isinstance(meta, TunnelMeta):
-                self.ctx.store.settings.tunnels[meta.name] = meta
+                self.ctx.store.settings.tunnels_for(self.ctx.runner.name)[meta.name] = meta
                 self.ctx.store.save()
             self.refresh()
 
@@ -527,7 +561,7 @@ class MainWindow(QWidget):
             QMessageBox.critical(self, "삭제 실패", str(ex))
 
         if deleted:
-            self.ctx.store.settings.tunnels.pop(name, None)
+            self.ctx.store.settings.tunnels_for(self.ctx.runner.name).pop(name, None)
             self.ctx.store.save()
             try:
                 path = self.ctx.client.config_path(name)
@@ -585,7 +619,7 @@ class MainWindow(QWidget):
             pass
         self.ctx.manager.cleanup_logs_for_service(card.tunnel_name, route)
         card.meta.routes = remaining
-        self.ctx.store.settings.tunnels[card.tunnel_name] = card.meta
+        self.ctx.store.settings.tunnels_for(self.ctx.runner.name)[card.tunnel_name] = card.meta
         self.ctx.store.save()
         self._notify_restart_needed(card.tunnel_name)
         self.refresh()
@@ -598,13 +632,19 @@ class MainWindow(QWidget):
 
     # ---- 로그 ----
     def _open_log_tunnel(self, name: str):
+        # B2: 캐시 키에 대상(runner.name)을 포함시켜 대상 전환 후 다른 대상의
+        # 뷰어가 잘못 재사용되지 않게 한다.
+        target = self.ctx.runner.name
+        title = f"{name} ({self._target_display_name()})"
         self._open_log_viewer(
-            f"tunnel:{name}", name, {"터널": self.ctx.manager.log_path_for_tunnel(name)})
+            f"tunnel:{target}:{name}", title,
+            {"터널": self.ctx.manager.log_path_for_tunnel(name)})
 
     def _open_log_service(self, tunnel_name: str, route: RouteMeta):
-        title = f"{tunnel_name} · {route.hostname or route.id}"
+        target = self.ctx.runner.name
+        title = f"{tunnel_name} · {route.hostname or route.id} ({self._target_display_name()})"
         self._open_log_viewer(
-            f"svc:{tunnel_name}:{route.id}", title,
+            f"svc:{target}:{tunnel_name}:{route.id}", title,
             {"서버": self.ctx.manager.log_path_for_service(tunnel_name, route)})
 
     def _open_log_viewer(self, key: str, title: str, log_paths: dict[str, str]):
