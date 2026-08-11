@@ -181,8 +181,7 @@ class MainWindow(QWidget):
         scroll.setWidget(inner)
 
         self.banner = QLabel()
-        self.banner.setStyleSheet(
-            "background:#3a1d1d;color:#f85149;padding:6px;border-radius:6px;")
+        self._style_banner()
         self.banner.hide()
 
         root = QVBoxLayout(self)
@@ -205,6 +204,12 @@ class MainWindow(QWidget):
             sc.activated.connect(lambda n=i - 1: self._shortcut_tunnel(n))
             sc2 = QShortcut(QKeySequence(f"Ctrl+Shift+{i}"), self)
             sc2.activated.connect(lambda n=i - 1: self._shortcut_server(n))
+
+    def _style_banner(self):
+        p = current_palette(self.ctx.store.settings.theme)
+        self.banner.setStyleSheet(
+            f"background:{p['danger_bg']};color:{p['danger']};"
+            "padding:6px;border-radius:6px;")
 
     # ---- 대상 전환 ----
     def _reload_targets(self):
@@ -397,6 +402,7 @@ class MainWindow(QWidget):
         apply_titlebar_theme(self, mode == "dark")
         for viewer in list(self._log_viewers.values()):
             apply_titlebar_theme(viewer, mode == "dark")
+        self._style_banner()
         icon_color = current_palette(mode)["text"]
         self.refresh_btn.setIcon(make_icon("refresh", icon_color))
         self.settings_btn.setIcon(make_icon("gear", icon_color))

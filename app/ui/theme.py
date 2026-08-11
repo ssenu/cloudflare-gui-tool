@@ -23,6 +23,7 @@ PALETTES = {
         "log_bg": "#0b0d12",
         "danger_bg": "#3a1d1d",
         "danger": "#f85149",
+        "preview_text": "#ffd28e",
     },
     "light": {
         "bg": "#f5f6f8",
@@ -34,8 +35,9 @@ PALETTES = {
         "accent": ACCENT,
         "accent2": ACCENT2,
         "log_bg": "#ffffff",
-        "danger_bg": "#fbdede",
+        "danger_bg": "#fdecea",
         "danger": "#c62828",
+        "preview_text": "#7a4a00",
     },
 }
 

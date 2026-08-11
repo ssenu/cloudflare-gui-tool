@@ -109,14 +109,6 @@ def make_icon(name: str, color: str, size: int = 32) -> QIcon:
             painter.drawEllipse(QPointF(dot_cx, dot_cy), size * 0.025, size * 0.025)
             painter.setBrush(Qt.BrushStyle.NoBrush)
 
-    elif name == "check":
-        painter.drawLine(QPointF(m, size * 0.55), QPointF(size * 0.42, size - m))
-        painter.drawLine(QPointF(size * 0.42, size - m), QPointF(size - m, m))
-
-    elif name == "x":
-        painter.drawLine(QPointF(m, m), QPointF(size - m, size - m))
-        painter.drawLine(QPointF(size - m, m), QPointF(m, size - m))
-
     elif name == "trash":
         top = m * 1.3
         body = QRectF(m * 1.2, top, size - m * 2.4, size - top - m * 0.6)

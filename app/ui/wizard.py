@@ -29,16 +29,17 @@ class TunnelWizard(QDialog):
         self.setWindowTitle("터널 생성")
         self.setMinimumSize(520, 380)
 
+        palette = current_palette(ctx.store.settings.theme)
         self.stack = QStackedWidget()
         self.err = QLabel()
-        self.err.setStyleSheet("color: #f85149;")
+        self.err.setStyleSheet(f"color: {palette['danger']};")
         self.preview = QLabel()
         self.preview.setStyleSheet(
-            "font-family: Consolas; color: #ffd28e; background: #1f2330;"
-            "padding: 8px; border-radius: 6px;")
+            f"font-family: Consolas; color: {palette['preview_text']};"
+            f"background: {palette['panel2']}; padding: 8px; border-radius: 6px;")
         self.preview.setWordWrap(True)
 
-        icon_color = current_palette(ctx.store.settings.theme)["text"]
+        icon_color = palette["text"]
         self.back_btn = QPushButton("← 이전")
         self.next_btn = QPushButton("다음 →")
         self.next_btn.setObjectName("primary")

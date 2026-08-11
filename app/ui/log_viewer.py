@@ -10,15 +10,17 @@ from PyQt6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QPlainTextEdit,
 
 from app.context import AppContext
 from app.core.process_mgr import LogBuffer
+from app.ui.theme import current_palette
 from app.ui.winutil import apply_titlebar_theme
 
 ERROR_RE = re.compile(r"\b(ERR|error|failed|Failed)\b")
 
 
 class _LogTab(QWidget):
-    def __init__(self, buffer: LogBuffer):
+    def __init__(self, buffer: LogBuffer, error_color: str):
         super().__init__()
         self.buffer = buffer
+        self.error_color = error_color
         self.seq = 0
         self.view = QPlainTextEdit()
         self.view.setReadOnly(True)
@@ -41,7 +43,7 @@ class _LogTab(QWidget):
         for line in lines:
             if ERROR_RE.search(line):
                 self.view.appendHtml(
-                    f'<span style="color:#f85149">{html.escape(line)}</span>')
+                    f'<span style="color:{self.error_color}">{html.escape(line)}</span>')
             else:
                 self.view.appendPlainText(line)
         if lines and self.follow.isChecked():
@@ -62,9 +64,10 @@ class LogViewer(QDialog):
         self.setModal(False)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
 
+        error_color = current_palette(ctx.store.settings.theme)["danger"]
         tabs = QTabWidget()
-        self.t_tab = _LogTab(ctx.manager.tunnel_log(tunnel_name))
-        self.s_tab = _LogTab(ctx.manager.server_log(tunnel_name))
+        self.t_tab = _LogTab(ctx.manager.tunnel_log(tunnel_name), error_color)
+        self.s_tab = _LogTab(ctx.manager.server_log(tunnel_name), error_color)
         tabs.addTab(self.t_tab, "터널 (cloudflared)")
         tabs.addTab(self.s_tab, "웹서버")
 
