@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from functools import lru_cache
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
@@ -24,19 +25,59 @@ def make_icon(name: str, color: str, size: int = 32) -> QIcon:
     inner = size - 2 * m
 
     if name == "refresh":
-        rect = QRectF(m, m, inner, inner)
-        painter.drawArc(rect, 40 * 16, 280 * 16)
-        # 화살촉
-        end_angle_rad = 0.698  # 40도(rad)
+        # 300도짜리 원호 + 끝점 접선 방향 화살촉.
+        # 이전 구현의 문제: drawArc는 시작각 40°, 스윕 280°로 끝각이 320°인데
+        # 화살촉은 시작각(40°) 위치에 그려서 원호와 화살촉이 서로 다른 지점에
+        # 떨어져 있었다(끊어져 보이는 원인). 화살촉을 실제 끝각 위치에,
+        # 진행 방향(접선)을 향하도록 다시 계산한다.
+        pen.setWidthF(size * 2.6 / 32)
+        painter.setPen(pen)
+
         cx, cy, r = size / 2, size / 2, inner / 2
-        import math
-        ax = cx + r * math.cos(end_angle_rad)
-        ay = cy - r * math.sin(end_angle_rad)
-        p1 = QPointF(ax, ay)
-        p2 = QPointF(ax - size * 0.14, ay - size * 0.02)
-        p3 = QPointF(ax - size * 0.02, ay + size * 0.14)
+        start_deg = 90.0
+        sweep_deg = -300.0  # 시계 방향으로 300도
+        end_deg = start_deg + sweep_deg
+
+        path = QPainterPath()
+        rect = QRectF(cx - r, cy - r, 2 * r, 2 * r)
+        path.arcMoveTo(rect, start_deg)
+        path.arcTo(rect, start_deg, sweep_deg)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+
+        end_rad = math.radians(end_deg)
+        tip_base = QPointF(cx + r * math.cos(end_rad), cy - r * math.sin(end_rad))
+        # 시계 방향(각도 감소)으로 이동하는 접선 방향
+        travel = QPointF(math.sin(end_rad), math.cos(end_rad))
+        perp = QPointF(-travel.y(), travel.x())
+
+        arrow_len = size * 0.24
+        arrow_half_w = size * 0.14
+        tip = QPointF(tip_base.x() + travel.x() * arrow_len * 0.55,
+                       tip_base.y() + travel.y() * arrow_len * 0.55)
+        base = QPointF(tip_base.x() - travel.x() * arrow_len * 0.45,
+                        tip_base.y() - travel.y() * arrow_len * 0.45)
+        p2 = QPointF(base.x() + perp.x() * arrow_half_w, base.y() + perp.y() * arrow_half_w)
+        p3 = QPointF(base.x() - perp.x() * arrow_half_w, base.y() - perp.y() * arrow_half_w)
+
         painter.setBrush(QColor(color))
-        painter.drawPolygon(p1, p2, p3)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawPolygon(tip, p2, p3)
+
+    elif name == "chevron_down":
+        pen.setWidthF(size * 2.4 / 32)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        top = m + inner * 0.18
+        bottom = size - m - inner * 0.28
+        left_x = m + inner * 0.1
+        right_x = size - m - inner * 0.1
+        mid_x = size / 2
+        path = QPainterPath()
+        path.moveTo(left_x, top)
+        path.lineTo(mid_x, bottom)
+        path.lineTo(right_x, top)
+        painter.drawPath(path)
 
     elif name == "plus":
         cx, cy = size / 2, size / 2
@@ -48,7 +89,6 @@ def make_icon(name: str, color: str, size: int = 32) -> QIcon:
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawEllipse(QPointF(cx, cy), r, r)
         painter.drawEllipse(QPointF(cx, cy), r * 0.35, r * 0.35)
-        import math
         for i in range(6):
             ang = math.radians(i * 60)
             x1 = cx + r * math.cos(ang)

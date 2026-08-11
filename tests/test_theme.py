@@ -22,3 +22,15 @@ def test_dark_qss_has_orange_accent_only():
     qss = build_qss("dark")
     assert "#f6821f" in qss
     assert "#3182F6" not in qss
+
+
+def test_build_qss_with_chevron_icon_adds_down_arrow_rule():
+    qss = build_qss("dark", {"chevron": "C:/x/y.png"})
+    assert "down-arrow" in qss
+    assert "C:/x/y.png" in qss
+
+
+def test_build_qss_without_icons_still_valid():
+    qss = build_qss("dark")
+    assert ACCENT in qss
+    assert "down-arrow" not in qss

@@ -1,3 +1,5 @@
+import os
+
 from app.core.process_mgr import TunnelState
 
 STATE_COLORS = {
@@ -49,8 +51,41 @@ def current_palette(mode: str) -> dict:
     return PALETTES.get(mode, PALETTES["dark"])
 
 
-def build_qss(mode: str) -> str:
+def ensure_qss_icons(mode: str) -> dict[str, str]:
+    """콤보박스 셰브론 아이콘을 PNG로 구워 경로를 돌려준다.
+
+    Qt 스타일시트는 메모리 픽스맵을 직접 받지 못해 파일 경유가 필요하다.
+    저장에 실패하면(권한 등) 조용히 무시하고 빈 dict를 돌려준다 —
+    호출부는 이 경우 QSS를 기본 화살표로 폴백시킨다.
+    """
+    try:
+        from app.ui.icons import make_icon
+
+        p = current_palette(mode)
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        icon_dir = os.path.join(base, "CloudflareTunnelGUI", "icons")
+        os.makedirs(icon_dir, exist_ok=True)
+        path = os.path.join(icon_dir, f"chevron-{mode}.png")
+
+        icon = make_icon("chevron_down", p["text"], size=24)
+        pixmap = icon.pixmap(24, 24)
+        if pixmap.isNull() or not pixmap.save(path, "PNG"):
+            return {}
+
+        return {"chevron": path.replace("\\", "/")}
+    except Exception:
+        return {}
+
+
+def build_qss(mode: str, icon_paths: dict[str, str] | None = None) -> str:
     p = current_palette(mode)
+    icon_paths = icon_paths or {}
+    combo_arrow_qss = ""
+    if icon_paths.get("chevron"):
+        combo_arrow_qss = f"""
+QComboBox::drop-down {{ border: none; width: 26px; }}
+QComboBox::down-arrow {{ image: url({icon_paths['chevron']}); width: 12px; height: 12px; }}
+"""
     return f"""
 QWidget {{ background: {p['bg']}; color: {p['text']};
           font-family: 'Segoe UI', 'Malgun Gothic'; font-size: 13px; }}
@@ -90,7 +125,7 @@ QListWidget::item:selected {{ background: {p['accent']}; color: #ffffff; }}
 QSpinBox::up-button, QSpinBox::down-button {{ width: 16px; }}
 QScrollBar:vertical {{ background: {p['panel']}; width: 10px; }}
 QScrollBar::handle:vertical {{ background: {p['border']}; border-radius: 5px; }}
-"""
+{combo_arrow_qss}"""
 
 
 # 하위 호환용 별칭 (임시 스크립트 등에서 사용)

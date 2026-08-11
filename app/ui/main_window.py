@@ -14,7 +14,7 @@ from app.core.config_yml import get_main_ingress, parse_config
 from app.core.process_mgr import TunnelState
 from app.core.store import TunnelMeta
 from app.ui.icons import make_icon
-from app.ui.theme import STATE_COLORS, build_qss, current_palette
+from app.ui.theme import STATE_COLORS, build_qss, current_palette, ensure_qss_icons
 from app.ui.winutil import apply_titlebar_theme
 from app.ui.wizard import TunnelWizard
 
@@ -407,7 +407,7 @@ class MainWindow(QWidget):
         mode = self.ctx.store.settings.theme
         app = QApplication.instance()
         if app is not None:
-            app.setStyleSheet(build_qss(mode))
+            app.setStyleSheet(build_qss(mode, ensure_qss_icons(mode)))
         apply_titlebar_theme(self, mode == "dark")
         for viewer in list(self._log_viewers.values()):
             apply_titlebar_theme(viewer, mode == "dark")
