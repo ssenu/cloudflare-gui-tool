@@ -94,8 +94,10 @@ class CommandRunner(ABC):
         조회 실패를 "명령이 다르다"로 해석해 PID 파일을 지우면 안 된다.
 
         조회는 성공했지만 개별 PID가 응답에 없는 경우 그 PID는 결과
-        dict에 없다. 로컬은 이미지 이름(taskkill의 Image Name 등),
-        원격은 ``comm``(짧은 명령 이름)을 값으로 담는다.
+        dict에 없다. 값은 Windows에서는 이미지 이름(tasklist), POSIX와
+        원격에서는 전체 커맨드라인(``ps -o args=``)이다 - ``comm``은
+        인터프리터/래퍼로 실행된 명령을 실제 이미지(python3, node)로
+        돌려주기 때문에 쓰지 않는다.
         """
         ...
 
@@ -295,7 +297,9 @@ class LocalRunner(CommandRunner):
             pid_arg = ",".join(str(p) for p in pids)
             try:
                 res = subprocess.run(
-                    ["ps", "-p", pid_arg, "-o", "pid=,comm="],
+                    # comm은 실행 파일 이름이 아니라 실제 이미지를 주므로
+                    # (uvicorn -> python3, npm -> node) 전체 커맨드라인을 쓴다.
+                    ["ps", "-p", pid_arg, "-o", "pid=,args="],
                     capture_output=True, text=True, encoding="utf-8",
                     errors="replace", timeout=5.0)
             except (subprocess.SubprocessError, OSError):

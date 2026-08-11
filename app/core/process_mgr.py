@@ -46,9 +46,9 @@ def _split_cmd(cmd: str) -> list[str]:
 def _cmd_token(argv: list[str]) -> str:
     """실행 명령의 첫 토큰(실행 파일 이름)을 PID 검증용 태그로 뽑는다.
 
-    경로 전체가 아니라 basename만 쓰는 이유는 ps -o comm=/tasklist가 돌려주는
-    값도 짧은 이름(리눅스는 최대 15자로 잘리기도 함)이라, 포함(in) 비교로
-    맞춰보려면 우리 쪽도 짧은 이름이어야 하기 때문이다.
+    경로 전체가 아니라 basename만 쓰는 이유는, 실제 조회 값이 전체
+    커맨드라인(ps -o args=)이든 짧은 이미지 이름(tasklist)이든 양쪽 모두에
+    포함(in) 비교로 맞춰보려면 우리 쪽이 짧은 이름이어야 하기 때문이다.
     """
     if not argv:
         return ""
