@@ -70,11 +70,17 @@ def _parse_service_spec(data) -> ServiceSpec:
 
 
 def _parse_route_meta(data) -> RouteMeta:
-    """dict를 RouteMeta로 변환. id가 없으면 TypeError (유효하지 않은 항목)"""
+    """dict를 RouteMeta로 변환. id가 없거나 문자열이 아니면 TypeError (유효하지 않은 항목)"""
     kwargs = _filter_dataclass_kwargs(RouteMeta, data)
+    if not isinstance(kwargs.get("id"), str):
+        raise TypeError("id must be str")
+    # server가 dict가 아니면(None 포함, 잘못된 타입 포함) 기본 ServiceSpec으로 대체.
+    # None만 통과시키고 다른 잘못된 타입은 거부하는 비대칭을 두지 않는다.
     server_raw = kwargs.get("server")
-    if server_raw is not None:
+    if isinstance(server_raw, dict):
         kwargs["server"] = _parse_service_spec(server_raw)
+    else:
+        kwargs.pop("server", None)
     return RouteMeta(**kwargs)
 
 
@@ -197,7 +203,13 @@ class SettingsStore:
                 # v1 형식에서 실제로 마이그레이션이 일어난 경우에만 재저장.
                 # v2 형식만 있는 파일은 매번 다시 쓰지 않는다.
                 if migrated_any:
-                    self.save()
+                    try:
+                        self.save()
+                    except OSError:
+                        # 디스크 가득/읽기 전용/클라우드 동기화 잠금 등으로 저장에
+                        # 실패해도 메모리상의 마이그레이션 결과는 그대로 유지한 채
+                        # 조용히 진행한다 (다음 save() 시점에 다시 시도됨).
+                        pass
             except (TypeError, KeyError, ValueError, AttributeError):
                 # 예상치 못한 형식 에러 시 기본값으로 폴백
                 self.settings = Settings()

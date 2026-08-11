@@ -359,3 +359,118 @@ def test_v2_only_file_load_does_not_rewrite_file(tmp_path):
 
     assert save_calls == []
     assert os.path.getmtime(path) == mtime_before
+
+
+def test_route_server_null_falls_back_to_default_service_spec(tmp_path):
+    """server가 null이어도 기본 ServiceSpec으로 로드되어야 한다 (거부와 비대칭 금지)."""
+    path = str(tmp_path / "settings.json")
+    v2_json = {
+        "root_domain": "",
+        "cloudflared_path": "",
+        "tunnels": {
+            "t": {
+                "name": "t",
+                "routes": [
+                    {"id": "aaaa1111", "hostname": "h.example.com", "server": None},
+                ],
+            }
+        },
+        "ssh_profiles": [],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(v2_json, f)
+
+    store = SettingsStore(path=path)
+    s = store.load()
+    route = s.tunnels["t"].routes[0]
+    assert route.server == ServiceSpec()
+    assert route.server.kind == "command"
+
+
+def test_route_server_wrong_type_falls_back_to_default_service_spec(tmp_path):
+    """server가 dict가 아닌 잘못된 타입(예: 숫자)이어도 라우트 자체는 로드되고
+    기본 ServiceSpec으로 대체된다."""
+    path = str(tmp_path / "settings.json")
+    v2_json = {
+        "root_domain": "",
+        "cloudflared_path": "",
+        "tunnels": {
+            "t": {
+                "name": "t",
+                "routes": [
+                    {"id": "aaaa1111", "hostname": "h.example.com", "server": 123},
+                ],
+            }
+        },
+        "ssh_profiles": [],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(v2_json, f)
+
+    store = SettingsStore(path=path)
+    s = store.load()
+    route = s.tunnels["t"].routes[0]
+    assert route.server == ServiceSpec()
+    assert route.server.kind == "command"
+
+
+def test_route_id_wrong_type_is_skipped(tmp_path):
+    """id가 문자열이 아니면 name 검사와 동일한 수준으로 해당 라우트를 스킵한다."""
+    path = str(tmp_path / "settings.json")
+    v2_json = {
+        "root_domain": "",
+        "cloudflared_path": "",
+        "tunnels": {
+            "t": {
+                "name": "t",
+                "routes": [
+                    {"id": 12345, "hostname": "bad.example.com"},
+                    {"id": "bbbb2222", "hostname": "good.example.com"},
+                ],
+            }
+        },
+        "ssh_profiles": [],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(v2_json, f)
+
+    store = SettingsStore(path=path)
+    s = store.load()
+    routes = s.tunnels["t"].routes
+    assert len(routes) == 1
+    assert routes[0].id == "bbbb2222"
+
+
+def test_migration_save_oserror_does_not_crash_load(tmp_path, monkeypatch):
+    """마이그레이션 재저장이 OSError로 실패해도 load()는 예외 없이 마이그레이션된
+    Settings를 메모리상에 반환해야 한다."""
+    path = str(tmp_path / "settings.json")
+    v1_json = {
+        "root_domain": "example.com",
+        "cloudflared_path": "",
+        "tunnels": {
+            "mysite": {
+                "name": "mysite",
+                "hostname": "mysite.example.com",
+                "service": "http://localhost:8000",
+                "server_cmd": "",
+                "server_cwd": "",
+                "start_together": False,
+            }
+        },
+        "ssh_profiles": [],
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(v1_json, f)
+
+    store = SettingsStore(path=path)
+
+    def _boom():
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "save", _boom)
+
+    s = store.load()  # 예외를 raise하지 않아야 함
+    meta = s.tunnels["mysite"]
+    assert len(meta.routes) == 1
+    assert meta.routes[0].hostname == "mysite.example.com"
