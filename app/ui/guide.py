@@ -149,8 +149,8 @@ class GuideDialog(QDialog):
         badge.setFixedSize(26, 26)
         badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         badge.setStyleSheet(
-            f"background: {self.p['accent']}; color: #ffffff; border-radius: 13px; "
-            "font-weight: 700;")
+            f"background: {self.p['accent']}; color: {self.p['on_accent']}; "
+            "border-radius: 13px; font-weight: 700;")
 
         title_lbl = QLabel(title)
         title_lbl.setStyleSheet("font-weight: 700;")

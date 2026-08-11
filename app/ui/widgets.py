@@ -45,6 +45,15 @@ class ToggleSwitch(QAbstractButton):
     def _on_toggled(self, _checked: bool) -> None:
         self._update_tooltip()
 
+    def update_tooltip(self) -> None:
+        """켜기/끄기 툴팁을 현재 체크 상태에 맞게 갱신한다.
+
+        폴링으로 setChecked()를 blockSignals(True) 상태에서 호출하면 toggled
+        시그널이 안 나가 _on_toggled()가 자동으로 불리지 않는다. 그런 경로에서는
+        이 메서드를 명시적으로 호출해야 한다.
+        """
+        self._update_tooltip()
+
     def _update_tooltip(self) -> None:
         self.setToolTip("켜기" if not self.isChecked() else "끄기")
 

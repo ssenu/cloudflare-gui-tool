@@ -4,9 +4,9 @@ import time
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction
-from PyQt6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QMenu,
-                             QMessageBox, QPushButton, QScrollArea, QSizePolicy,
-                             QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QApplication, QComboBox, QFrame, QHBoxLayout, QLabel,
+                             QMenu, QMessageBox, QPushButton, QScrollArea,
+                             QSizePolicy, QVBoxLayout, QWidget)
 
 from app.context import AppContext
 from app.core.cloudflared import CloudflaredError
@@ -20,6 +20,12 @@ from app.ui.winutil import apply_titlebar_theme
 from app.ui.wizard import TunnelWizard
 
 ADD_SSH_TARGET = "__add__"
+
+# C1: 폴링(_tick) 간격. 정상일 땐 1초, 대상 연결이 끊긴 것으로 보이면 5초로
+# 물러나 실패한 원격 호출을 계속 재시도하며 UI를 붙잡지 않게 한다.
+POLL_INTERVAL_NORMAL_MS = 1000
+POLL_INTERVAL_BACKOFF_MS = 5000
+POLL_FAILURE_HINT_THRESHOLD = 3
 
 STATE_LABELS = {
     TunnelState.STOPPED: "중지됨",
@@ -65,7 +71,9 @@ class RouteRow(QWidget):
         self.text_label.setSizePolicy(QSizePolicy.Policy.Expanding,
                                       QSizePolicy.Policy.Preferred)
 
-        self.has_service = bool(route.server.start_cmd)
+        # I12: 도커는 start_cmd가 비어 있어도(기본값 폴백) 서버로 취급해야
+        # 토글이 사라지지 않는다.
+        self.has_service = bool(route.server.start_cmd) or route.server.kind == "docker"
         self.server_switch: ToggleSwitch | None = None
         self.register_btn: QPushButton | None = None
         toggle_label = _toggle_label("서버", palette)
@@ -107,6 +115,7 @@ class RouteRow(QWidget):
                 ctx.manager.stop_service(self.card.tunnel_name, self.route)
         except Exception as ex:
             QMessageBox.critical(self, "서버 오류", str(ex))
+        self.card.win.info_banner.hide()
         self.update_state()
 
     def _menu(self, anchor: QPushButton):
@@ -132,6 +141,14 @@ class RouteRow(QWidget):
             self.server_switch.blockSignals(True)
             self.server_switch.setChecked(running)
             self.server_switch.blockSignals(False)
+            # blockSignals로 setChecked하면 toggled가 안 나가 툴팁이 안
+            # 갱신되므로 직접 호출한다.
+            self.server_switch.update_tooltip()
+            if self.route.server.kind == "docker":
+                # I5: 도커 조회 실패 사유를 토글 툴팁으로 보여준다.
+                err = ctx.manager.docker_error(self.card.tunnel_name, self.route)
+                if err:
+                    self.server_switch.setToolTip(err)
 
 
 class TunnelCard(QFrame):
@@ -218,6 +235,7 @@ class TunnelCard(QFrame):
                 ctx.manager.stop_tunnel(self.tunnel_name)
         except Exception as ex:
             QMessageBox.critical(self, "오류", str(ex))
+        self.win.info_banner.hide()
         self.update_state()
 
     def _tunnel_menu(self, anchor: QPushButton):
@@ -237,6 +255,7 @@ class TunnelCard(QFrame):
         self.tunnel_switch.blockSignals(True)
         self.tunnel_switch.setChecked(running)
         self.tunnel_switch.blockSignals(False)
+        self.tunnel_switch.update_tooltip()
         for row in self.route_rows:
             row.update_state()
 
@@ -253,13 +272,14 @@ class MainWindow(QWidget):
 
         # 상단 바
         self.target_combo = QComboBox()
-        icon_color = current_palette(ctx.store.settings.theme)["text"]
+        palette = current_palette(ctx.store.settings.theme)
+        icon_color = palette["text"]
         self.refresh_btn = QPushButton()
         self.refresh_btn.setIcon(make_icon("refresh", icon_color))
         self.refresh_btn.setFixedWidth(40)
         self.refresh_btn.setToolTip("새로고침")
         self.add_btn = QPushButton("터널 생성")
-        self.add_btn.setIcon(make_icon("plus", "#ffffff"))
+        self.add_btn.setIcon(make_icon("plus", palette["on_accent"]))
         self.add_btn.setObjectName("primary")
         self.settings_btn = QPushButton("설정")
         self.settings_btn.setIcon(make_icon("gear", icon_color))
@@ -307,9 +327,13 @@ class MainWindow(QWidget):
         self.refresh()
         apply_titlebar_theme(self, ctx.store.settings.theme == "dark")
 
+        # C1: 폴링 실패 연속 횟수와 백오프 활성 여부. _tick()에서 관리한다.
+        self._poll_failures = 0
+        self._poll_backoff_active = False
+
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(1000)
+        self._timer.start(POLL_INTERVAL_NORMAL_MS)
 
         # 단축키 등록
         from PyQt6.QtGui import QKeySequence, QShortcut
@@ -483,8 +507,12 @@ class MainWindow(QWidget):
         except Exception:
             pass
         # cloudflared가 연결을 정리할 시간을 준다 (곧바로 delete하면 "active
-        # connection" 오류가 날 수 있다).
-        time.sleep(1.0)
+        # connection" 오류가 날 수 있다). time.sleep(1.0) 단독 호출은 UI
+        # 스레드를 그대로 얼려버리므로, 짧게 나눠 자면서 그 사이 이벤트
+        # 루프에 제어를 돌려준다.
+        for _ in range(5):
+            QApplication.processEvents()
+            time.sleep(0.2)
 
         deleted = False
         try:
@@ -508,6 +536,9 @@ class MainWindow(QWidget):
             except Exception as ex:
                 QMessageBox.warning(self, "파일 삭제 실패",
                                     f"터널은 삭제되었지만 config 파일 삭제에 실패했습니다.\n{ex}")
+            for route in card.meta.routes:
+                self.ctx.manager.cleanup_logs_for_service(name, route)
+            self.ctx.manager.cleanup_logs_for_tunnel(name)
         self.refresh()
 
     # ---- 라우트 추가/편집/삭제 ----
@@ -533,19 +564,27 @@ class MainWindow(QWidget):
             "- DNS CNAME 레코드는 Cloudflare 대시보드에서 직접 삭제해야 합니다")
         if ok != QMessageBox.StandardButton.Yes:
             return
-        try:
-            self.ctx.manager.stop_service(card.tunnel_name, route)
-        except Exception:
-            pass
-        card.meta.routes = [r for r in card.meta.routes if r.id != route.id]
+
+        # I7: config.yml을 먼저 쓰고, 그것이 성공했을 때만 meta.routes와
+        # settings를 갱신한다. 순서가 반대면 config 쓰기 실패 시 settings에는
+        # 없는데 config/DNS에는 남는 고아 라우트가 생긴다.
+        remaining = [r for r in card.meta.routes if r.id != route.id]
         try:
             path = self.ctx.client.config_path(card.tunnel_name)
             if self.ctx.runner.file_exists(path):
                 text = self.ctx.runner.read_file(path)
-                routes = [(r.hostname, r.service) for r in card.meta.routes]
+                routes = [(r.hostname, r.service) for r in remaining]
                 self.ctx.runner.write_file(path, set_routes(text, routes))
         except Exception as ex:
             QMessageBox.warning(self, "config 갱신 실패", str(ex))
+            return  # 아무것도 바꾸지 않는다
+
+        try:
+            self.ctx.manager.stop_service(card.tunnel_name, route)
+        except Exception:
+            pass
+        self.ctx.manager.cleanup_logs_for_service(card.tunnel_name, route)
+        card.meta.routes = remaining
         self.ctx.store.settings.tunnels[card.tunnel_name] = card.meta
         self.ctx.store.save()
         self._notify_restart_needed(card.tunnel_name)
@@ -578,7 +617,15 @@ class MainWindow(QWidget):
                 return
         viewer = LogViewer(self.ctx, title, log_paths, self)
         self._log_viewers[key] = viewer
-        viewer.destroyed.connect(lambda *_, k=key: self._log_viewers.pop(k, None))
+
+        def _cleanup(*_args, k=key, v=viewer):
+            # 같은 key로 뷰어를 새로 열었으면 dict에는 이미 새 뷰어가 들어가
+            # 있다. 늦게 도착한 옛 뷰어의 destroyed 시그널이 그 새 항목을
+            # 지우지 않도록, key뿐 아니라 객체 동일성까지 확인하고 pop한다.
+            if self._log_viewers.get(k) is v:
+                self._log_viewers.pop(k, None)
+
+        viewer.destroyed.connect(_cleanup)
         viewer.show()
 
     def _open_settings(self):
@@ -611,7 +658,31 @@ class MainWindow(QWidget):
         self.refresh()  # 카드를 새 팔레트로 다시 그린다 (ToggleSwitch 포함)
 
     def _tick(self):
-        self.ctx.manager.refresh([c.meta for c in self.cards])
+        # C1: 이 슬롯은 QTimer에서 호출되는데, PyQt6는 슬롯의 미처리 예외에서
+        # 프로세스를 abort시킨다(실증됨). SSH가 끊기면 refresh() 안에서
+        # paramiko가 OSError/EOFError/ConnectionError 등을 던질 수 있으므로
+        # 전체를 감싸 앱이 죽지 않게 하고, 배너로 사용자에게 알린 뒤 폴링
+        # 주기를 늘려(백오프) 계속 실패하는 원격 호출로 UI를 붙잡지 않는다.
+        try:
+            self.ctx.manager.refresh([c.meta for c in self.cards])
+        except Exception:
+            self._poll_failures += 1
+            msg = "대상과의 연결이 끊겼습니다. 잠시 후 다시 시도합니다."
+            if self._poll_failures > POLL_FAILURE_HINT_THRESHOLD:
+                msg += " 설정에서 대상을 다시 선택하거나 로컬로 전환하세요."
+            self.banner.setText(msg)
+            self.banner.show()
+            if not self._poll_backoff_active:
+                self._poll_backoff_active = True
+                self._timer.setInterval(POLL_INTERVAL_BACKOFF_MS)
+            return
+
+        if self._poll_backoff_active:
+            self._poll_backoff_active = False
+            self._poll_failures = 0
+            self.banner.hide()
+            self._timer.setInterval(POLL_INTERVAL_NORMAL_MS)
+
         for c in self.cards:
             c.update_state()
 

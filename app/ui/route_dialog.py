@@ -129,6 +129,10 @@ class RouteDialog(QDialog):
             return e
         if self.kind_combo.currentData() == "docker" and not self.cwd_edit.text().strip():
             return "도커 컴포즈는 작업 폴더(compose 파일 위치)가 필요합니다"
+        hostname = f"{sub}.{domain}"
+        for r in self.tunnel.routes:
+            if r.hostname == hostname and (self.route is None or r.id != self.route.id):
+                return f"같은 터널 안에 이미 '{hostname}' hostname이 있습니다"
         return ""
 
     # ---- 저장 ----
@@ -157,6 +161,25 @@ class RouteDialog(QDialog):
 
         is_new = self.route is None
         hostname_changed = (not is_new) and self.route.hostname != hostname
+
+        # I8: 실행 중인 서비스의 kind/start_cmd/stop_cmd/cwd를 바꾸면 기존
+        # 프로세스(또는 도커 컨테이너)가 GUI에서 더 이상 손댈 수 없는 고아가
+        # 된다. 저장 전에 중지 여부를 확인한다.
+        if not is_new and self.ctx.manager.service_running(self.tunnel.name, self.route):
+            server = self.route.server
+            changed = (kind != server.kind or start_cmd != server.start_cmd
+                      or stop_cmd != server.stop_cmd or cwd != server.cwd)
+            if changed:
+                ok = QMessageBox.question(
+                    self, "서버 중지 필요",
+                    "변경을 적용하려면 서버를 중지해야 합니다. 지금 중지할까요?")
+                if ok != QMessageBox.StandardButton.Yes:
+                    return
+                try:
+                    self.ctx.manager.stop_service(self.tunnel.name, self.route)
+                except Exception as ex:
+                    QMessageBox.critical(self, "중지 실패", str(ex))
+                    return
 
         if is_new or hostname_changed:
             try:
