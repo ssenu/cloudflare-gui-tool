@@ -36,6 +36,8 @@ class EditTunnelDialog(QDialog):
 
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Save
                                 | QDialogButtonBox.StandardButton.Cancel)
+        btns.button(QDialogButtonBox.StandardButton.Save).setText("저장")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
         btns.accepted.connect(self._save)
         btns.rejected.connect(self.reject)
         form.addRow(btns)
