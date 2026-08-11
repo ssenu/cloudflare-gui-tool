@@ -24,6 +24,11 @@ DOCKER_POLL_INTERVAL = 5.0
 DOCKER_START_DEFAULT = ["docker", "compose", "up", "-d"]
 DOCKER_STOP_DEFAULT = ["docker", "compose", "down"]
 
+# PID 재사용 판정에 필요한 연속 명령 불일치 횟수. 조회 실패나 npm->node 같은
+# 래퍼 exec 한 번만으로 살아있는 프로세스를 고아로 만들지 않기 위해 1회
+# 불일치로는 절대 정리하지 않는다 (fail-open).
+CMD_MISMATCH_LIMIT = 3
+
 
 class TunnelState(Enum):
     STOPPED = auto()
@@ -48,6 +53,25 @@ def _cmd_token(argv: list[str]) -> str:
     if not argv:
         return ""
     return os.path.basename(argv[0].strip('"'))
+
+
+def _cmd_tokens_match(expected: str, actual: str) -> bool:
+    """저장된 명령 토큰과 실제 조회된 명령을 양방향 접두사로 비교한다.
+
+    완전 일치 대신 접두사 포함 관계를 쓰는 이유: 리눅스 ``comm``은 15자로
+    잘릴 수 있고(길이가 다른 쪽이 잘린 쪽의 접두사가 됨), npm처럼 실행
+    파일 이름과 실제 comm이 달라지는 래퍼도 있다. 대소문자와 확장자(.exe)
+    차이도 흡수한다.
+    """
+    a = expected.strip().lower()
+    b = actual.strip().lower()
+    if a.endswith(".exe"):
+        a = a[:-4]
+    if b.endswith(".exe"):
+        b = b[:-4]
+    if not a or not b:
+        return False
+    return a.startswith(b) or b.startswith(a)
 
 
 class ProcessManager:
@@ -77,6 +101,12 @@ class ProcessManager:
         self._alive: dict[str, tuple[bool, bool]] = {}
         # unit -> RUNNING_MARKER를 이 실행에서 본 적 있는지
         self._marker_seen: dict[str, bool] = {}
+        # unit -> 이미 명령 대조에 성공(일치)한 PID. 재검증 없이 건너뛴다
+        # (매 tick tasklist/ps를 다시 돌리지 않기 위한 캐시).
+        self._cmd_verified_pid: dict[str, int] = {}
+        # unit -> (마지막으로 대조를 시도한 PID, 그 PID에 대한 연속 불일치 횟수).
+        # PID가 바뀌면(재시작) 카운터를 리셋한다.
+        self._cmd_mismatch: dict[str, tuple[int, int]] = {}
         # unit -> 다음 refresh에서 tail_file을 이어 읽을 오프셋
         self._log_offset: dict[str, int] = {}
         # unit -> 도커 서비스 실행 여부 (refresh()의 ps -q 결과, 또는 낙관적 갱신값)
@@ -114,6 +144,8 @@ class ProcessManager:
         self._alive.clear()
         self._marker_seen.clear()
         self._log_offset.clear()
+        self._cmd_verified_pid.clear()
+        self._cmd_mismatch.clear()
         self._docker_running.clear()
         self._docker_checked_at.clear()
         self._docker_error.clear()
@@ -135,6 +167,8 @@ class ProcessManager:
         self._log_offset[unit] = offset
         self._marker_seen[unit] = False
         self._alive[unit] = (True, True)
+        self._cmd_verified_pid.pop(unit, None)
+        self._cmd_mismatch.pop(unit, None)
 
     def stop_tunnel(self, name: str) -> None:
         reg = self._registry()
@@ -145,6 +179,8 @@ class ProcessManager:
         reg.clear_pid(unit)
         self._alive[unit] = (False, False)
         self._marker_seen[unit] = False
+        self._cmd_verified_pid.pop(unit, None)
+        self._cmd_mismatch.pop(unit, None)
 
     def tunnel_state(self, name: str) -> TunnelState:
         reg = self._registry()
@@ -189,6 +225,8 @@ class ProcessManager:
         pid = reg.runner.spawn_detached(cmd, server.cwd or None, log_path)
         reg.write_pid(unit, pid, cmd=_cmd_token(cmd))
         self._alive[unit] = (True, True)
+        self._cmd_verified_pid.pop(unit, None)
+        self._cmd_mismatch.pop(unit, None)
 
     def stop_service(self, tunnel: str, route: RouteMeta) -> None:
         reg = self._registry()
@@ -216,6 +254,8 @@ class ProcessManager:
                 reg.runner.kill_pid(pid)
         reg.clear_pid(unit)
         self._alive[unit] = (False, False)
+        self._cmd_verified_pid.pop(unit, None)
+        self._cmd_mismatch.pop(unit, None)
 
     def service_running(self, tunnel: str, route: RouteMeta) -> bool:
         reg = self._registry()
@@ -278,9 +318,22 @@ class ProcessManager:
         pids = [rec[0] for rec in records.values() if rec is not None]
         alive_pids = reg.runner.pids_alive(pids, timeout=POLL_TIMEOUT)  # 호출 1회
 
-        cmd_check_pids = [rec[0] for rec in records.values()
-                          if rec is not None and rec[1] and rec[0] in alive_pids]
-        cmdlines = reg.runner.pid_cmdlines(cmd_check_pids) if cmd_check_pids else {}
+        # PID는 유닛이 재시작되기 전까지 바뀌지 않으므로, 이미 명령 대조에
+        # 성공(캐시됨)한 PID는 다시 조회하지 않는다 - 매 tick tasklist/ps를
+        # 새로 돌리는 비용을 없앤다.
+        cmd_check_pids = sorted({
+            rec[0] for unit, rec in records.items()
+            if rec is not None and rec[1] and rec[0] in alive_pids
+            and self._cmd_verified_pid.get(unit) != rec[0]
+        })
+        cmdlines: dict[int, str] | None = (
+            reg.runner.pid_cmdlines(cmd_check_pids) if cmd_check_pids else {})
+        # fail-open: 조회 자체가 실패(None)하면 "모름"으로 취급한다. 절대
+        # "명령이 다르다"로 해석하지 않는다 - 살아있는 프로세스를 고아로
+        # 만드는 사고(리뷰에서 지적된 fail-closed 버그)를 막기 위함이다.
+        lookup_failed = cmdlines is None
+        if lookup_failed:
+            cmdlines = {}
 
         for unit, rec in records.items():
             if rec is None:
@@ -288,19 +341,36 @@ class ProcessManager:
                 continue
             pid, cmd_token = rec
             alive = pid in alive_pids
-            if alive and cmd_token:
-                actual = cmdlines.get(pid, "")
-                if cmd_token not in actual:
-                    # PID 재사용: 저장된 cmd와 실제 실행 중인 명령이 다르므로
-                    # 남의 프로세스를 우리 것으로 오판하지 않도록 즉시 중지로
-                    # 판정하고 PID 파일을 정리한다.
-                    self._append_log(
-                        reg, unit,
-                        f"[정보] PID {pid}가 재사용된 것으로 보여(다른 명령 실행 중) "
-                        "중지 상태로 판정하고 PID 파일을 정리합니다.")
-                    reg.clear_pid(unit)
-                    self._alive[unit] = (False, False)
-                    continue
+            if alive and cmd_token and self._cmd_verified_pid.get(unit) != pid:
+                if lookup_failed:
+                    # 조회 실패(모름): 대조를 건너뛰고 카운터를 리셋한다.
+                    # PID 파일은 절대 건드리지 않는다.
+                    self._cmd_mismatch.pop(unit, None)
+                elif pid in cmdlines:
+                    actual = cmdlines[pid]
+                    if _cmd_tokens_match(cmd_token, actual):
+                        self._cmd_verified_pid[unit] = pid
+                        self._cmd_mismatch.pop(unit, None)
+                    else:
+                        prev_pid, prev_count = self._cmd_mismatch.get(unit, (pid, 0))
+                        count = (prev_count + 1) if prev_pid == pid else 1
+                        if count >= CMD_MISMATCH_LIMIT:
+                            # 연속으로 명령이 달라 재사용된 PID로 판단한다.
+                            # 남의 프로세스를 우리 것으로 오판하지 않도록
+                            # 중지 상태로 정리한다.
+                            self._append_log(
+                                reg, unit,
+                                f"[정보] PID {pid} 명령이 달라 재사용된 PID로 "
+                                f"판단했습니다(연속 {count}회 불일치, 저장된 명령="
+                                f"{cmd_token!r}, 실제={actual!r}) - 중지 상태로 "
+                                "정리합니다.")
+                            reg.clear_pid(unit)
+                            self._alive[unit] = (False, False)
+                            self._cmd_mismatch.pop(unit, None)
+                            continue
+                        self._cmd_mismatch[unit] = (pid, count)
+                # else: 이번 조회 응답에 이 PID가 없었다(응답 누락) - 모름으로
+                # 보류하고 카운터는 건드리지 않는다.
             if not alive:
                 # 죽은 PID 파일을 자동 정리한다(값싼 minor). 이번 tick은
                 # ERROR로 보여주고(has_pid=True, alive=False), 파일은 지워
@@ -309,6 +379,8 @@ class ProcessManager:
                 self._append_log(
                     reg, unit, f"[정보] PID {pid}가 죽어 있어 PID 파일을 정리합니다.")
                 reg.clear_pid(unit)
+                self._cmd_verified_pid.pop(unit, None)
+                self._cmd_mismatch.pop(unit, None)
             self._alive[unit] = (True, alive)
 
         for unit in tunnel_units:

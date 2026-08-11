@@ -28,6 +28,9 @@ class FakeRunner(CommandRunner):
         self.spawn_detached_calls: list[tuple] = []
         # pid -> 명령 이름(comm/이미지 이름). PID 재사용 검증 테스트용
         self.pid_cmdlines_map: dict[int, str] = {}
+        # True면 pid_cmdlines()가 조회 실패(None)를 흉내낸다 - fail-open
+        # 회귀 테스트용 (SSH 타임아웃, busybox ps -p/-o 미지원 등 재현)
+        self.pid_cmdlines_fail: bool = False
 
     # ---- 명령 실행 ----
     def run(self, cmd, timeout: float = 60.0, cwd: str | None = None) -> RunResult:
@@ -81,6 +84,8 @@ class FakeRunner(CommandRunner):
 
     def pid_cmdlines(self, pids):
         self.pid_cmdlines_calls += 1
+        if self.pid_cmdlines_fail:
+            return None
         return {p: self.pid_cmdlines_map[p] for p in pids if p in self.pid_cmdlines_map}
 
     def kill_pid(self, pid: int) -> None:

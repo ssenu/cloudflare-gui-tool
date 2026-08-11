@@ -215,14 +215,17 @@ class SshRunner(CommandRunner):
         res = self.run(["sh", "-c", cmd], timeout=timeout)
         return {int(ln) for ln in res.stdout.splitlines() if ln.strip()}
 
-    def pid_cmdlines(self, pids: list[int]) -> dict[int, str]:
+    def pid_cmdlines(self, pids: list[int]) -> dict[int, str] | None:
         if not pids:
             return {}
         pid_arg = ",".join(str(p) for p in pids)
         try:
             res = self.run(["ps", "-p", pid_arg, "-o", "pid=,comm="], timeout=5.0)
         except (TimeoutError, ConnectionError, OSError):
-            return {}
+            return None
+        if res.exit_code != 0:
+            # 연결 순단, busybox ps의 -p/-o 미지원 등 - 대조 불가(모름)로 취급한다.
+            return None
         result: dict[int, str] = {}
         for line in res.stdout.splitlines():
             bits = line.strip().split(None, 1)

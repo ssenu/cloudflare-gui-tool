@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 import time
 
 from app.core.runner import CommandRunner
+
+logger = logging.getLogger(__name__)
 
 
 class RunRegistry:
@@ -66,8 +69,15 @@ class RunRegistry:
         path = self.pid_path(unit)
         try:
             content = self.runner.read_file(path)
-        except (OSError, IOError):
+        except FileNotFoundError:
             return None
+        except UnicodeDecodeError:
+            # 깨진 PID 파일 - 연결 문제가 아니므로 배너/백오프를 유발하면
+            # 안 된다. "없음"으로 취급하되 원인 추적을 위해 로그만 남긴다.
+            logger.warning("PID 파일 디코드 실패, 없음으로 취급: %s", path)
+            return None
+        # socket.timeout 등 다른 OSError는 여기서 삼키지 않고 그대로
+        # 올려보낸다 - _tick()이 연결 오류 배너를 띄우고 백오프하도록.
         lines = content.splitlines()
         if not lines:
             return None

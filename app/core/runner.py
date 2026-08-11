@@ -84,11 +84,18 @@ class CommandRunner(ABC):
         ...
 
     @abstractmethod
-    def pid_cmdlines(self, pids: list[int]) -> dict[int, str]:
+    def pid_cmdlines(self, pids: list[int]) -> dict[int, str] | None:
         """주어진 PID들의 명령/이미지 이름을 일괄 조회한다 (PID 재사용 검증용).
 
-        조회에 실패한 PID는 결과 dict에 없다. 로컬은 이미지 이름(taskkill의
-        Image Name 등), 원격은 ``comm``(짧은 명령 이름)을 값으로 담는다.
+        조회 자체가 실패하면(원격 연결 오류, ps/tasklist 실행 실패, 종료
+        코드 비정상 등) ``None``을 반환한다 - 이는 "PID가 없다"는 것과
+        구분되는 "모름" 상태다. 호출자는 None을 받으면 명령 대조를
+        건너뛰고 PID 생존 여부만으로 판정해야 한다(fail-open) - 절대
+        조회 실패를 "명령이 다르다"로 해석해 PID 파일을 지우면 안 된다.
+
+        조회는 성공했지만 개별 PID가 응답에 없는 경우 그 PID는 결과
+        dict에 없다. 로컬은 이미지 이름(taskkill의 Image Name 등),
+        원격은 ``comm``(짧은 명령 이름)을 값으로 담는다.
         """
         ...
 
@@ -258,7 +265,7 @@ class LocalRunner(CommandRunner):
                 pass
         return alive
 
-    def pid_cmdlines(self, pids: list[int]) -> dict[int, str]:
+    def pid_cmdlines(self, pids: list[int]) -> dict[int, str] | None:
         if not pids:
             return {}
         result: dict[int, str] = {}
@@ -270,7 +277,9 @@ class LocalRunner(CommandRunner):
                     capture_output=True, text=True, encoding="utf-8",
                     errors="replace", timeout=5.0, creationflags=CREATE_NO_WINDOW)
             except (subprocess.SubprocessError, OSError):
-                return {}
+                return None
+            if res.returncode != 0:
+                return None
             for line in res.stdout.splitlines():
                 parts = [p.strip('"') for p in line.split('","')]
                 if len(parts) < 2:
@@ -290,7 +299,11 @@ class LocalRunner(CommandRunner):
                     capture_output=True, text=True, encoding="utf-8",
                     errors="replace", timeout=5.0)
             except (subprocess.SubprocessError, OSError):
-                return {}
+                return None
+            if res.returncode != 0:
+                # busybox 등 -p/-o를 지원하지 않는 ps는 보통 여기서 걸린다 -
+                # 대조 불가능(모름)으로 취급한다.
+                return None
             for line in res.stdout.splitlines():
                 bits = line.strip().split(None, 1)
                 if len(bits) != 2:

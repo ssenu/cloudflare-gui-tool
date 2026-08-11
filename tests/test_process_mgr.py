@@ -310,7 +310,9 @@ def test_log_path_helpers():
 
 # ---- C3: PID 재사용 검증 ----
 
-def test_reused_pid_with_mismatched_cmd_is_treated_as_stopped_and_cleared():
+def test_reused_pid_with_mismatched_cmd_needs_three_consecutive_ticks_to_clear():
+    # fail-open: npm->node exec 같은 오탐을 흡수하기 위해 1회 불일치로는
+    # 절대 정리하지 않는다. 연속 3회 불일치가 확인돼야 재사용으로 판정한다.
     mgr, runner, reg = make_mgr()
     client = CloudflaredClient(runner)
     mgr.start_tunnel("t1", client)
@@ -323,9 +325,38 @@ def test_reused_pid_with_mismatched_cmd_is_treated_as_stopped_and_cleared():
     runner.pid_cmdlines_map[pid] = "unrelated-process"
 
     mgr.refresh([meta("t1")])
+    assert reg.read_pid(unit) == pid  # 1회차: 아직 보존됨
+    mgr.refresh([meta("t1")])
+    assert reg.read_pid(unit) == pid  # 2회차: 아직 보존됨
+
+    mgr.refresh([meta("t1")])  # 3회차: 재사용으로 확정
 
     assert mgr.tunnel_state("t1") == TunnelState.STOPPED  # ERROR가 아니라 STOPPED
     assert reg.read_pid(unit) is None  # PID 파일이 정리되어야 함
+
+
+def test_reused_pid_mismatch_streak_resets_on_match():
+    # 연속 불일치 중간에 일치가 한 번이라도 나오면 정리로 이어지지 않는다.
+    mgr, runner, reg = make_mgr()
+    client = CloudflaredClient(runner)
+    mgr.start_tunnel("t1", client)
+    unit = reg.unit_tunnel("t1")
+    pid = reg.read_pid(unit)
+    correct_cmd = runner.pid_cmdlines_map[pid]
+
+    runner.pid_cmdlines_map[pid] = "unrelated-process"
+    mgr.refresh([meta("t1")])
+    mgr.refresh([meta("t1")])
+    assert reg.read_pid(unit) == pid  # 아직 2회, 정리 안 됨
+
+    runner.pid_cmdlines_map[pid] = correct_cmd  # 다시 일치
+    mgr.refresh([meta("t1")])
+    assert reg.read_pid(unit) == pid
+
+    runner.pid_cmdlines_map[pid] = "unrelated-process"
+    mgr.refresh([meta("t1")])
+    mgr.refresh([meta("t1")])
+    assert reg.read_pid(unit) == pid  # 리셋되었으므로 이번에도 2회일 뿐
 
 
 def test_alive_pid_with_matching_cmd_stays_running():
@@ -340,6 +371,83 @@ def test_alive_pid_with_matching_cmd_stays_running():
 
     assert mgr.tunnel_state("t1") == TunnelState.RUNNING
     assert reg.read_pid(unit) == pid  # 정리되지 않아야 함
+
+
+def test_verified_cmd_is_cached_and_not_rechecked_every_tick():
+    # 중요도 #2: 이미 검증된 PID는 이후 tick에서 pid_cmdlines()를 다시
+    # 부르지 않는다 (매 tick tasklist/ps 전체 조회를 없애는 캐시).
+    mgr, runner, reg = make_mgr()
+    client = CloudflaredClient(runner)
+    mgr.start_tunnel("t1", client)
+
+    mgr.refresh([meta("t1")])
+    assert runner.pid_cmdlines_calls == 1
+
+    mgr.refresh([meta("t1")])
+    mgr.refresh([meta("t1")])
+    assert runner.pid_cmdlines_calls == 1  # 캐시돼서 더 이상 호출 안 됨
+
+
+def test_wrapper_prefix_cmd_match_npm_execs_node():
+    # npm run dev가 실제로는 node로 보이는 경우 - 양방향 접두사 매칭이면
+    # 자바스크립트 런타임 이름 차이도 흡수되진 않지만(완전 무관), 15자
+    # 잘림이나 확장자 차이 같은 정상적인 케이스는 통과해야 한다.
+    mgr, runner, reg = make_mgr()
+    client = CloudflaredClient(runner)
+    mgr.start_tunnel("t1", client)
+    unit = reg.unit_tunnel("t1")
+    pid = reg.read_pid(unit)
+    # cloudflared의 comm이 15자 제한 등으로 잘려 보이는 상황을 흉내낸다
+    runner.pid_cmdlines_map[pid] = "cloudflare"  # 저장된 토큰("cloudflared")의 접두사
+
+    mgr.refresh([meta("t1")])
+
+    assert mgr.tunnel_state("t1") != TunnelState.STOPPED
+    assert reg.read_pid(unit) == pid
+
+
+# ---- Critical: pid_cmdlines() 조회 실패 시 fail-open ----
+
+def test_pid_cmdlines_lookup_failure_never_clears_pid_file():
+    # 리뷰에서 지적된 fail-closed 버그의 핵심 회귀 테스트: pid_cmdlines()가
+    # 조회 실패(None)를 반환하면(SSH 타임아웃, busybox ps -p/-o 미지원 등)
+    # 명령 대조를 건너뛰고 PID 생존 판정만 써야 한다. 절대 PID 파일을
+    # 지우면 안 된다 - 살아있는 프로세스를 고아로 만들면 안 되기 때문이다.
+    mgr, runner, reg = make_mgr()
+    client = CloudflaredClient(runner)
+    mgr.start_tunnel("t1", client)
+    unit = reg.unit_tunnel("t1")
+    pid = reg.read_pid(unit)
+    assert pid in runner.live_pids
+
+    runner.pid_cmdlines_fail = True  # 조회 자체가 실패하도록 흉내
+
+    for _ in range(5):  # 여러 tick 반복해도 정리되면 안 된다
+        mgr.refresh([meta("t1")])
+        assert reg.read_pid(unit) == pid  # (a) PID 파일이 남아 있다
+        assert pid in runner.live_pids
+        assert mgr.tunnel_state("t1") != TunnelState.STOPPED  # (b) 실행 중으로 유지
+
+
+def test_pid_cmdlines_lookup_failure_then_recovery_still_verifies():
+    # 조회가 한동안 실패하다 복구되면, 그 뒤로는 정상적으로 검증되어야 한다
+    # (실패했던 tick의 카운터가 다음 성공 조회를 오염시키지 않아야 함).
+    mgr, runner, reg = make_mgr()
+    client = CloudflaredClient(runner)
+    mgr.start_tunnel("t1", client)
+    unit = reg.unit_tunnel("t1")
+    pid = reg.read_pid(unit)
+
+    runner.pid_cmdlines_fail = True
+    mgr.refresh([meta("t1")])
+    mgr.refresh([meta("t1")])
+    assert reg.read_pid(unit) == pid
+
+    runner.pid_cmdlines_fail = False  # 복구
+    mgr.refresh([meta("t1")])
+
+    assert reg.read_pid(unit) == pid  # 여전히 보존(정상 일치이므로)
+    assert mgr.tunnel_state("t1") != TunnelState.STOPPED
 
 
 def test_legacy_pid_file_without_cmd_token_only_checks_liveness():

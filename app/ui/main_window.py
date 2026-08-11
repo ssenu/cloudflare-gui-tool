@@ -326,13 +326,15 @@ class MainWindow(QWidget):
         root.addWidget(self.info_banner)
         root.addWidget(scroll, 1)
 
+        # C1: 폴링 실패 연속 횟수와 백오프 활성 여부. _tick()에서 관리한다.
+        # refresh()가 배너를 함부로 덮어쓰지 않으려면(연결 오류 배너 보호)
+        # 첫 refresh() 호출보다 먼저 초기화되어 있어야 한다.
+        self._poll_failures = 0
+        self._poll_backoff_active = False
+
         self._reload_targets()
         self.refresh()
         apply_titlebar_theme(self, ctx.store.settings.theme == "dark")
-
-        # C1: 폴링 실패 연속 횟수와 백오프 활성 여부. _tick()에서 관리한다.
-        self._poll_failures = 0
-        self._poll_backoff_active = False
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -413,6 +415,10 @@ class MainWindow(QWidget):
             from app.ui.ssh_manager import SshManagerDialog
             SshManagerDialog(self.ctx, self).exec()
             self._reload_targets()
+            # B3/I: 프로필 삭제로 _reload_targets()가 로컬로 폴백했을 수 있다.
+            # 러너만 로컬로 바뀌고 카드 목록은 이전 대상 것이 남는 것을
+            # 막기 위해 항상 refresh()한다(대상이 안 바뀌어도 비용은 미미함).
+            self.refresh()
             return
 
         if self._any_running():
@@ -467,7 +473,12 @@ class MainWindow(QWidget):
         try:
             self.setCursor(Qt.CursorShape.WaitCursor)
             infos = self.ctx.client.list_tunnels()
-            self.banner.hide()
+            # _tick()의 연결 오류 배너와 위젯을 공유한다. _tick()이 이미
+            # 폴링 백오프 상태(연결 끊김으로 판단)라면 이 refresh()의 성공이
+            # 그 배너를 조용히 지워버리지 않도록 둔다 - 다음 _tick()이
+            # 스스로 판단해서 켜고 끈다.
+            if not self._poll_backoff_active:
+                self.banner.hide()
         except Exception as ex:
             self.banner.setText(f"터널 목록 조회 실패: {ex}")
             self.banner.show()
@@ -543,10 +554,16 @@ class MainWindow(QWidget):
         # cloudflared가 연결을 정리할 시간을 준다 (곧바로 delete하면 "active
         # connection" 오류가 날 수 있다). time.sleep(1.0) 단독 호출은 UI
         # 스레드를 그대로 얼려버리므로, 짧게 나눠 자면서 그 사이 이벤트
-        # 루프에 제어를 돌려준다.
-        for _ in range(5):
-            QApplication.processEvents()
-            time.sleep(0.2)
+        # 루프에 제어를 돌려준다. processEvents()는 그 사이 클릭을 배달할
+        # 수 있어(삭제 메뉴 재진입, 삭제 중인 카드 토글 조작 등) 대기하는
+        # 동안 창 전체를 비활성화해 재진입을 막는다.
+        self.setEnabled(False)
+        try:
+            for _ in range(5):
+                QApplication.processEvents()
+                time.sleep(0.2)
+        finally:
+            self.setEnabled(True)
 
         deleted = False
         try:
@@ -674,7 +691,10 @@ class MainWindow(QWidget):
         SettingsDialog(self.ctx, self).exec()
         self._reload_targets()
         if self.ctx.store.settings.theme != prev_theme:
-            self._apply_theme()
+            self._apply_theme()  # 내부에서 refresh()까지 호출한다
+        else:
+            # B3/I: 프로필 삭제로 로컬 폴백이 일어났을 수 있으니 항상 갱신한다.
+            self.refresh()
 
     def _open_guide(self):
         from app.ui.guide import GuideDialog
