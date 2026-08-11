@@ -1,5 +1,5 @@
 from app.core.cloudflared import CloudflaredClient
-from app.core.process_mgr import RUNNING_MARKER, ProcessManager, TunnelState
+from app.core.process_mgr import RUNNING_MARKER, ProcessManager, TunnelState, _cmd_tokens_match
 from app.core.run_registry import RunRegistry
 from app.core.runner import RunResult
 from app.core.store import RouteMeta, ServiceSpec, TunnelMeta
@@ -331,8 +331,41 @@ def test_reused_pid_with_mismatched_cmd_needs_three_consecutive_ticks_to_clear()
 
     mgr.refresh([meta("t1")])  # 3회차: 재사용으로 확정
 
-    assert mgr.tunnel_state("t1") == TunnelState.STOPPED  # ERROR가 아니라 STOPPED
-    assert reg.read_pid(unit) is None  # PID 파일이 정리되어야 함
+    # D2: 이름 불일치만으로는 절대 PID 파일을 지우지 않는다. 대신 ERROR로
+    # 표시하고("확인 불가", STOPPED가 아님) PID 파일은 보존한다 - 사용자
+    # 상태를 추측만으로 지우는 게 진짜 위험이기 때문이다.
+    assert mgr.tunnel_state("t1") == TunnelState.ERROR
+    assert reg.read_pid(unit) == pid  # PID 파일은 보존되어야 함
+    assert mgr.tunnel_mismatch_reason("t1") is not None
+
+
+def test_reused_pid_confirmed_mismatch_preserves_pid_and_stop_skips_kill():
+    # 필수 회귀 테스트 (b)+(c): 3연속 불일치가 확정되면 PID 파일은 보존되고
+    # ERROR + 사유가 노출되며, 그 상태에서 stop을 호출하면 kill_pid는 절대
+    # 불리지 않고(남의 프로세스일 수 있으므로) PID 파일만 정리되어야 한다.
+    mgr, runner, reg = make_mgr()
+    client = CloudflaredClient(runner)
+    mgr.start_tunnel("t1", client)
+    unit = reg.unit_tunnel("t1")
+    pid = reg.read_pid(unit)
+
+    runner.pid_cmdlines_map[pid] = "totally-unrelated-command"
+    for _ in range(3):
+        mgr.refresh([meta("t1")])
+
+    assert mgr.tunnel_state("t1") == TunnelState.ERROR
+    assert reg.read_pid(unit) == pid
+    reason = mgr.tunnel_mismatch_reason("t1")
+    assert reason and "재사용" in reason
+    assert pid in runner.live_pids  # 아직 "죽이지" 않았다
+
+    mgr.stop_tunnel("t1")
+
+    assert runner.kill_pid_calls == []  # kill_pid가 전혀 호출되지 않아야 함
+    assert pid in runner.live_pids  # 그래서 여전히 살아있다(다른 프로세스니까)
+    assert reg.read_pid(unit) is None  # 그러나 우리 쪽 PID 파일은 정리됨
+    assert mgr.tunnel_state("t1") == TunnelState.STOPPED
+    assert mgr.tunnel_mismatch_reason("t1") is None
 
 
 def test_reused_pid_mismatch_streak_resets_on_match():
@@ -404,6 +437,41 @@ def test_wrapper_prefix_cmd_match_npm_execs_node():
 
     assert mgr.tunnel_state("t1") != TunnelState.STOPPED
     assert reg.read_pid(unit) == pid
+
+
+# ---- D1: 인터프리터/래퍼로 실행되는 명령의 args 포함 비교 ----
+
+def test_cmd_tokens_match_interpreter_wrapped_args():
+    # 필수 회귀 테스트 (a): SSH의 ps -o args=가 돌려주는 전체 커맨드라인에
+    # "uvicorn"으로 등록된 토큰이 인터프리터 경로에 섞여 나와도(shebang이
+    # /usr/bin/python3라서 comm은 "python3"이 되지만 args에는 uvicorn 경로가
+    # 그대로 남는다) 일치로 판정되어야 한다.
+    assert _cmd_tokens_match("uvicorn", "/usr/bin/python3 /usr/local/bin/uvicorn main:app")
+    # npm run dev도 실제로는 node로 exec되지만 args엔 npm 경로가 남는다.
+    assert _cmd_tokens_match("npm", "node /usr/bin/npm run dev")
+
+
+def test_cmd_tokens_match_real_mismatch_still_fails():
+    assert not _cmd_tokens_match("uvicorn", "/usr/sbin/sshd -D")
+
+
+def test_alive_pid_with_interpreter_wrapped_args_stays_running_via_refresh():
+    # 위 매칭 로직이 실제 refresh() 경로에서도 살아있는 것으로 유지시키는지
+    # 확인한다 (고아가 되지 않아야 하는 게 이 Critical의 핵심). "uvicorn"으로
+    # 등록된 서비스 유닛의 args가 인터프리터 경로("/usr/bin/python3
+    # /usr/local/bin/uvicorn main:app")로 조회되는 상황을 흉내낸다.
+    mgr, runner, reg = make_mgr()
+    route = command_route(start_cmd="uvicorn")
+    unit = reg.unit_service("t1", route.id)
+    reg.write_pid(unit, 111, cmd="uvicorn")
+    runner.live_pids.add(111)
+    runner.pid_cmdlines_map[111] = "/usr/bin/python3 /usr/local/bin/uvicorn main:app"
+
+    for _ in range(3):  # 3번 연속으로도 문제없이 계속 실행 중으로 유지되어야 한다
+        mgr.refresh([meta("t1", [route])])
+        assert mgr.service_running("t1", route) is True
+        assert reg.read_pid(unit) == 111
+        assert mgr.service_mismatch_reason("t1", route) is None
 
 
 # ---- Critical: pid_cmdlines() 조회 실패 시 fail-open ----

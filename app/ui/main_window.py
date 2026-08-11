@@ -149,6 +149,14 @@ class RouteRow(QWidget):
                 err = ctx.manager.docker_error(self.card.tunnel_name, self.route)
                 if err:
                     self.server_switch.setToolTip(err)
+            else:
+                # D2: PID 재사용 의심(명령 불일치 확정) 사유를 같은 자리에
+                # 툴팁으로 보여준다. 서비스는 꺼짐으로 표시하지 않는다 -
+                # PID는 여전히 살아있으므로 "확인 불가"일 뿐이다.
+                reason = ctx.manager.service_mismatch_reason(self.card.tunnel_name,
+                                                              self.route)
+                if reason:
+                    self.server_switch.setToolTip(reason)
 
 
 class TunnelCard(QFrame):
@@ -252,10 +260,23 @@ class TunnelCard(QFrame):
             f"background: {STATE_COLORS[st]}; border-radius: 6px;")
         self.state_label.setText(STATE_LABELS[st])
         running = st in (TunnelState.STARTING, TunnelState.RUNNING)
+        mismatch_reason = None
+        if st == TunnelState.ERROR:
+            mismatch_reason = ctx.manager.tunnel_mismatch_reason(self.tunnel_name)
+            if mismatch_reason:
+                # D2: PID는 여전히 살아있으므로(재사용 의심일 뿐) 토글을
+                # ON으로 보여준다 - 그래야 사용자가 "끄기"를 눌러
+                # stop_tunnel(kill_pid 없이 PID 파일만 정리)을 호출할 수
+                # 있다. 죽은 PID로 인한 ERROR(사유 없음)는 그대로 OFF.
+                running = True
         self.tunnel_switch.blockSignals(True)
         self.tunnel_switch.setChecked(running)
         self.tunnel_switch.blockSignals(False)
         self.tunnel_switch.update_tooltip()
+        if mismatch_reason:
+            # 도커 오류 툴팁과 같은 자리를 재사용한다: update_tooltip()이
+            # 기본 켜기/끄기 문구로 덮어쓴 뒤 사유로 다시 덮어쓴다.
+            self.tunnel_switch.setToolTip(mismatch_reason)
         for row in self.route_rows:
             row.update_state()
 
@@ -435,6 +456,13 @@ class MainWindow(QWidget):
 
         profile = self.target_combo.currentData()
         self.banner.hide()
+        # D3: 대상을 바꾸면 이전 대상 폴링 실패로 켜졌던 백오프 상태가 새
+        # 대상에도 그대로 남아(5초 주기 + 배너 억제) 새 대상 상태가 굼뜨게
+        # 보일 수 있다. 대상 전환은 곧 "다시 시도"이므로 정상 주기로
+        # 리셋한다.
+        self._poll_backoff_active = False
+        self._poll_failures = 0
+        self._timer.setInterval(POLL_INTERVAL_NORMAL_MS)
         try:
             if profile is None:
                 self.ctx.set_local()
@@ -727,9 +755,16 @@ class MainWindow(QWidget):
             self.ctx.manager.refresh([c.meta for c in self.cards])
         except Exception:
             self._poll_failures += 1
-            msg = "대상과의 연결이 끊겼습니다. 잠시 후 다시 시도합니다."
-            if self._poll_failures > POLL_FAILURE_HINT_THRESHOLD:
-                msg += " 설정에서 대상을 다시 선택하거나 로컬로 전환하세요."
+            # D3: read_record()가 OSError를 그대로 전파하게 되면서, 로컬의
+            # PermissionError(상태 파일 접근 실패) 같은 것도 이 except로
+            # 들어온다. 로컬은 "연결"이 아예 없으므로 원인에 맞는 문구로
+            # 나눈다 - 원격은 연결 문제, 로컬은 파일 접근 문제.
+            if self.ctx.is_remote:
+                msg = "대상과의 연결이 끊겼습니다. 잠시 후 다시 시도합니다."
+                if self._poll_failures > POLL_FAILURE_HINT_THRESHOLD:
+                    msg += " 설정에서 대상을 다시 선택하거나 로컬로 전환하세요."
+            else:
+                msg = "상태 파일을 읽지 못했습니다. 잠시 후 다시 시도합니다."
             self.banner.setText(msg)
             self.banner.show()
             if not self._poll_backoff_active:

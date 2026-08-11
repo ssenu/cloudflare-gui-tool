@@ -56,22 +56,29 @@ def _cmd_token(argv: list[str]) -> str:
 
 
 def _cmd_tokens_match(expected: str, actual: str) -> bool:
-    """저장된 명령 토큰과 실제 조회된 명령을 양방향 접두사로 비교한다.
+    """저장된 명령 토큰과 실제 조회된 명령을 비교한다.
 
-    완전 일치 대신 접두사 포함 관계를 쓰는 이유: 리눅스 ``comm``은 15자로
-    잘릴 수 있고(길이가 다른 쪽이 잘린 쪽의 접두사가 됨), npm처럼 실행
-    파일 이름과 실제 comm이 달라지는 래퍼도 있다. 대소문자와 확장자(.exe)
-    차이도 흡수한다.
+    D1: SSH 쪽은 이제 ``ps -o args=``로 전체 커맨드라인을 받아온다(comm이
+    아니라). ``uvicorn``으로 등록한 명령이 실제로는
+    ``/usr/bin/python3 /usr/local/bin/uvicorn main:app``로 보이는 것처럼
+    인터프리터/래퍼로 실행되는 경우가 흔하므로, 우선 "등록된 토큰이 실제
+    문자열에 포함되는가"(대소문자 무시)로 판정한다 - 포함되면 그걸로 충분.
+
+    로컬(Windows) tasklist는 이미지 이름만 주기 때문에(예: uvicorn.exe)
+    포함 검사만으로도 대개 맞아떨어지지만, 리눅스 ``comm``이 15자로
+    잘리는 것처럼 값이 등록된 토큰보다 "짧게" 잘리는 레거시 케이스를 위해
+    양방향 접두사 매칭도 폴백으로 유지한다.
     """
     a = expected.strip().lower()
     b = actual.strip().lower()
     if a.endswith(".exe"):
         a = a[:-4]
-    if b.endswith(".exe"):
-        b = b[:-4]
     if not a or not b:
         return False
-    return a.startswith(b) or b.startswith(a)
+    if a in b:
+        return True
+    b_short = b[:-4] if b.endswith(".exe") else b
+    return a.startswith(b_short) or b_short.startswith(a)
 
 
 class ProcessManager:
@@ -107,6 +114,14 @@ class ProcessManager:
         # unit -> (마지막으로 대조를 시도한 PID, 그 PID에 대한 연속 불일치 횟수).
         # PID가 바뀌면(재시작) 카운터를 리셋한다.
         self._cmd_mismatch: dict[str, tuple[int, int]] = {}
+        # unit -> 연속 CMD_MISMATCH_LIMIT회 불일치로 "PID 재사용 의심"이 확정된
+        # 사유 문구. D2: 이름 불일치만으로는 PID 파일을 절대 지우지 않는다 -
+        # 남의 프로세스를 우리 것으로 오판해 죽이거나, 반대로 진짜 살아있는
+        # 우리 프로세스의 PID 기록을 지워 고아로 만들 위험이 있기 때문이다.
+        # 대신 이 사유를 보관해 tunnel_state()를 ERROR로 표시하고 UI 툴팁으로
+        # 노출한다. 여기 들어간 unit은 이후 tick마다 재조회하지 않는다
+        # (아래 refresh()에서 _cmd_verified_pid에도 같이 채워 넣어 스킵함).
+        self._mismatch_reason: dict[str, str] = {}
         # unit -> 다음 refresh에서 tail_file을 이어 읽을 오프셋
         self._log_offset: dict[str, int] = {}
         # unit -> 도커 서비스 실행 여부 (refresh()의 ps -q 결과, 또는 낙관적 갱신값)
@@ -146,6 +161,7 @@ class ProcessManager:
         self._log_offset.clear()
         self._cmd_verified_pid.clear()
         self._cmd_mismatch.clear()
+        self._mismatch_reason.clear()
         self._docker_running.clear()
         self._docker_checked_at.clear()
         self._docker_error.clear()
@@ -169,22 +185,30 @@ class ProcessManager:
         self._alive[unit] = (True, True)
         self._cmd_verified_pid.pop(unit, None)
         self._cmd_mismatch.pop(unit, None)
+        self._mismatch_reason.pop(unit, None)
 
     def stop_tunnel(self, name: str) -> None:
         reg = self._registry()
         unit = reg.unit_tunnel(name)
         pid = reg.read_pid(unit)
-        if pid is not None:
+        # D2: 명령 불일치로 확정된(PID 재사용 의심) 유닛은 kill_pid를 호출하지
+        # 않는다 - 이 PID가 우리가 시작한 프로세스라는 보장이 없으므로, 남의
+        # 프로세스를 죽이는 사고를 막기 위해 PID 파일 정리로만 그친다.
+        if pid is not None and unit not in self._mismatch_reason:
             reg.runner.kill_pid(pid)
         reg.clear_pid(unit)
         self._alive[unit] = (False, False)
         self._marker_seen[unit] = False
         self._cmd_verified_pid.pop(unit, None)
         self._cmd_mismatch.pop(unit, None)
+        self._mismatch_reason.pop(unit, None)
 
     def tunnel_state(self, name: str) -> TunnelState:
         reg = self._registry()
         unit = reg.unit_tunnel(name)
+        if unit in self._mismatch_reason:
+            # D2: 이름 불일치 확정 - "중지됨"이 아니라 "확인 불가"로 보여준다.
+            return TunnelState.ERROR
         has_pid, alive = self._alive.get(unit, (False, False))
         if not has_pid:
             return TunnelState.STOPPED
@@ -193,6 +217,11 @@ class ProcessManager:
         if self._marker_seen.get(unit, False):
             return TunnelState.RUNNING
         return TunnelState.STARTING
+
+    def tunnel_mismatch_reason(self, name: str) -> str | None:
+        """D2: 이름 불일치로 확정된 사유(UI 툴팁용). 없으면 None."""
+        reg = self._registry()
+        return self._mismatch_reason.get(reg.unit_tunnel(name))
 
     # ---- 서비스 ----
     def start_service(self, tunnel: str, route: RouteMeta) -> None:
@@ -227,6 +256,7 @@ class ProcessManager:
         self._alive[unit] = (True, True)
         self._cmd_verified_pid.pop(unit, None)
         self._cmd_mismatch.pop(unit, None)
+        self._mismatch_reason.pop(unit, None)
 
     def stop_service(self, tunnel: str, route: RouteMeta) -> None:
         reg = self._registry()
@@ -250,12 +280,15 @@ class ProcessManager:
             reg.runner.run(cmd, cwd=server.cwd or None)
         else:
             pid = reg.read_pid(unit)
-            if pid is not None:
+            # D2: 명령 불일치로 확정된 유닛은 kill_pid를 호출하지 않는다 -
+            # 이 PID가 우리가 시작한 프로세스라는 보장이 없기 때문이다.
+            if pid is not None and unit not in self._mismatch_reason:
                 reg.runner.kill_pid(pid)
         reg.clear_pid(unit)
         self._alive[unit] = (False, False)
         self._cmd_verified_pid.pop(unit, None)
         self._cmd_mismatch.pop(unit, None)
+        self._mismatch_reason.pop(unit, None)
 
     def service_running(self, tunnel: str, route: RouteMeta) -> bool:
         reg = self._registry()
@@ -270,6 +303,17 @@ class ProcessManager:
         reg = self._registry()
         unit = reg.unit_service(tunnel, route.id)
         return self._docker_error.get(unit)
+
+    def service_mismatch_reason(self, tunnel: str, route: RouteMeta) -> str | None:
+        """D2: 이름 불일치로 확정된 사유(UI 툴팁용). 없으면 None.
+
+        서비스는 PID가 살아있는 한 service_running()이 계속 True를 준다
+        (D2 스펙: "실행 중 아님"이 아니라 "확인 불가" 상태로 다뤄야 하므로
+        토글을 끄지 않는다) - 이 사유는 그 토글의 툴팁으로만 노출된다.
+        """
+        reg = self._registry()
+        unit = reg.unit_service(tunnel, route.id)
+        return self._mismatch_reason.get(unit)
 
     # ---- 로그 경로 ----
     def log_path_for_tunnel(self, name: str) -> str:
@@ -338,6 +382,7 @@ class ProcessManager:
         for unit, rec in records.items():
             if rec is None:
                 self._alive[unit] = (False, False)
+                self._mismatch_reason.pop(unit, None)
                 continue
             pid, cmd_token = rec
             alive = pid in alive_pids
@@ -351,22 +396,33 @@ class ProcessManager:
                     if _cmd_tokens_match(cmd_token, actual):
                         self._cmd_verified_pid[unit] = pid
                         self._cmd_mismatch.pop(unit, None)
+                        self._mismatch_reason.pop(unit, None)
                     else:
                         prev_pid, prev_count = self._cmd_mismatch.get(unit, (pid, 0))
                         count = (prev_count + 1) if prev_pid == pid else 1
                         if count >= CMD_MISMATCH_LIMIT:
-                            # 연속으로 명령이 달라 재사용된 PID로 판단한다.
-                            # 남의 프로세스를 우리 것으로 오판하지 않도록
-                            # 중지 상태로 정리한다.
+                            # D2: 연속 불일치를 확인했다고 해서 PID 파일을
+                            # 지우지는 않는다 - 추측만으로 사용자 상태를
+                            # 지우는 게 진짜 위험이다. 대신 "확인 불가"
+                            # 사유를 기록해 ERROR로 표시하고, 사용자가
+                            # 명시적으로 끄기를 눌러야 정리되게 한다.
+                            reason = (
+                                "PID 재사용이 의심됩니다(실행 중인 명령이 등록된 "
+                                "명령과 다릅니다). 끄기를 눌러 정리하세요.")
                             self._append_log(
                                 reg, unit,
                                 f"[정보] PID {pid} 명령이 달라 재사용된 PID로 "
                                 f"판단했습니다(연속 {count}회 불일치, 저장된 명령="
-                                f"{cmd_token!r}, 실제={actual!r}) - 중지 상태로 "
-                                "정리합니다.")
-                            reg.clear_pid(unit)
-                            self._alive[unit] = (False, False)
+                                f"{cmd_token!r}, 실제={actual!r}) - PID 파일은 "
+                                "보존하고 확인 불가 상태로 표시합니다.")
+                            self._mismatch_reason[unit] = reason
                             self._cmd_mismatch.pop(unit, None)
+                            # 이 pid에 대해서는 더 이상 매 tick 재조회하지
+                            # 않도록 verified 캐시에 넣어 스킵시킨다(단,
+                            # "정상 일치"가 아니라 "확정된 불일치" 의미임에
+                            # 유의 - _mismatch_reason이 함께 있으면 불일치다).
+                            self._cmd_verified_pid[unit] = pid
+                            self._alive[unit] = (True, alive)
                             continue
                         self._cmd_mismatch[unit] = (pid, count)
                 # else: 이번 조회 응답에 이 PID가 없었다(응답 누락) - 모름으로
@@ -380,6 +436,7 @@ class ProcessManager:
                     reg, unit, f"[정보] PID {pid}가 죽어 있어 PID 파일을 정리합니다.")
                 reg.clear_pid(unit)
                 self._cmd_verified_pid.pop(unit, None)
+                self._mismatch_reason.pop(unit, None)
                 self._cmd_mismatch.pop(unit, None)
             self._alive[unit] = (True, alive)
 

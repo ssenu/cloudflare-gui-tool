@@ -216,11 +216,17 @@ class SshRunner(CommandRunner):
         return {int(ln) for ln in res.stdout.splitlines() if ln.strip()}
 
     def pid_cmdlines(self, pids: list[int]) -> dict[int, str] | None:
+        # D1: comm(실행 이미지 이름)이 아니라 args(전체 커맨드라인)를 쓴다.
+        # comm은 인터프리터/래퍼로 실행되는 프로세스에서 실제 실행 파일
+        # 이름을 주지 않는다 - shebang이 /usr/bin/python3인 uvicorn은
+        # comm이 "python3"로, node로 실행되는 /usr/bin/npm은 "node"로
+        # 나와 등록된 명령과 결정적으로 어긋난다. 반면 args에는 실제
+        # 실행한 스크립트/명령 경로가 그대로 남아 포함(in) 비교가 통한다.
         if not pids:
             return {}
         pid_arg = ",".join(str(p) for p in pids)
         try:
-            res = self.run(["ps", "-p", pid_arg, "-o", "pid=,comm="], timeout=5.0)
+            res = self.run(["ps", "-p", pid_arg, "-o", "pid=,args="], timeout=5.0)
         except (TimeoutError, ConnectionError, OSError):
             return None
         if res.exit_code != 0:
@@ -228,6 +234,9 @@ class SshRunner(CommandRunner):
             return None
         result: dict[int, str] = {}
         for line in res.stdout.splitlines():
+            # args는 공백을 포함하므로 맨 앞 PID 토큰만 떼고 나머지는 통째로
+            # 남긴다 (maxsplit=1). 파싱 실패(토큰이 하나뿐인 라인 등)는
+            # 대조 불가 라인으로 보고 건너뛴다.
             bits = line.strip().split(None, 1)
             if len(bits) != 2:
                 continue

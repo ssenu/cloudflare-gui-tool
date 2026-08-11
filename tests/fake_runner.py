@@ -21,6 +21,7 @@ class FakeRunner(CommandRunner):
         self._next_pid = 1000
         self.pids_alive_calls = 0
         self.pid_cmdlines_calls = 0
+        self.kill_pid_calls: list[int] = []
         self.run_calls: list[tuple[tuple[str, ...], str | None]] = []
         # cmd 튜플 -> RunResult. 없으면 기본값(성공, 빈 출력)
         self.run_results: dict[tuple[str, ...], RunResult] = {}
@@ -89,6 +90,7 @@ class FakeRunner(CommandRunner):
         return {p: self.pid_cmdlines_map[p] for p in pids if p in self.pid_cmdlines_map}
 
     def kill_pid(self, pid: int) -> None:
+        self.kill_pid_calls.append(pid)
         self.live_pids.discard(pid)
 
     def tail_file(self, path: str, offset: int):

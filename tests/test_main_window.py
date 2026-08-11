@@ -44,7 +44,11 @@ def make_window(qapp, tmp_path, runner: FakeRunner | None = None) -> MainWindow:
 # ---- C1: _tick() 예외 방어 + 배너 + 백오프 ----
 
 def test_tick_exception_shows_banner_and_backs_off_without_crashing(qapp, tmp_path):
+    # D3: 로컬 대상은 "연결"이 애초에 없으므로 원격용 연결 문구가 아니라
+    # 상태 파일 접근 실패 문구를 보여줘야 한다(read_record()가 로컬
+    # PermissionError 같은 OSError를 그대로 전파하게 되면서 생긴 요구사항).
     win = make_window(qapp, tmp_path)
+    assert not win.ctx.is_remote
 
     def boom(_tunnels):
         raise ConnectionError("SSH 연결이 끊겼습니다")
@@ -54,18 +58,47 @@ def test_tick_exception_shows_banner_and_backs_off_without_crashing(qapp, tmp_pa
     win._tick()  # 예외가 슬롯 밖으로 새어나가면 안 된다 (PyQt6 abort 방지)
 
     assert not win.banner.isHidden()
-    assert "연결이 끊겼" in win.banner.text()
+    assert "상태 파일을 읽지 못했습니다" in win.banner.text()
     assert win._timer.interval() == 5000  # 백오프
 
 
-def test_tick_repeated_failures_add_hint_after_threshold(qapp, tmp_path):
+def test_tick_exception_on_remote_shows_connection_banner(qapp, tmp_path):
+    # 원격 대상에서의 폴링 실패는 여전히 "연결이 끊겼다" 문구를 써야 한다.
     win = make_window(qapp, tmp_path)
+    win.ctx.runner = FakeRunner(home="/home/remote")  # local_runner와 다른 인스턴스 -> is_remote
+    assert win.ctx.is_remote
+
+    win.ctx.manager.refresh = lambda _t: (_ for _ in ()).throw(ConnectionError("no route"))
+
+    win._tick()
+
+    assert not win.banner.isHidden()
+    assert "연결이 끊겼" in win.banner.text()
+    assert win._timer.interval() == 5000
+
+
+def test_tick_repeated_failures_add_hint_after_threshold(qapp, tmp_path):
+    # 재시도 안내 힌트("로컬로 전환")는 원격 대상에서만 의미가 있다 -
+    # 로컬은 이미 로컬이므로 힌트를 보여주지 않는다(D3).
+    win = make_window(qapp, tmp_path)
+    win.ctx.runner = FakeRunner(home="/home/remote")
     win.ctx.manager.refresh = lambda _t: (_ for _ in ()).throw(OSError("no route"))
 
     for _ in range(4):
         win._tick()
 
     assert "로컬로 전환" in win.banner.text()
+
+
+def test_tick_repeated_failures_on_local_have_no_reconnect_hint(qapp, tmp_path):
+    win = make_window(qapp, tmp_path)
+    win.ctx.manager.refresh = lambda _t: (_ for _ in ()).throw(OSError("no route"))
+
+    for _ in range(4):
+        win._tick()
+
+    assert "상태 파일을 읽지 못했습니다" in win.banner.text()
+    assert "로컬로 전환" not in win.banner.text()
 
 
 def test_tick_recovers_and_returns_to_normal_interval(qapp, tmp_path):
