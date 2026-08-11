@@ -33,6 +33,17 @@ def _elide(text: str, metrics, width: int) -> str:
     return metrics.elidedText(text, Qt.TextElideMode.ElideMiddle, width)
 
 
+TOGGLE_LABEL_WIDTH = 30  # 헤더/라우트 행의 토글 라벨 폭을 맞춰 정렬을 유지한다
+
+
+def _toggle_label(text: str, palette: dict) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setStyleSheet(f"color: {palette['muted']}; font-size: 11px;")
+    lbl.setFixedWidth(TOGGLE_LABEL_WIDTH)
+    lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    return lbl
+
+
 class RouteRow(QWidget):
     """라우트 한 줄: hostname → 서비스 주소, 서버 토글(또는 등록 버튼), 로그, 메뉴."""
 
@@ -57,10 +68,12 @@ class RouteRow(QWidget):
         self.has_service = bool(route.server.start_cmd)
         self.server_switch: ToggleSwitch | None = None
         self.register_btn: QPushButton | None = None
+        toggle_label = _toggle_label("서버", palette)
         if self.has_service:
             self.server_switch = ToggleSwitch(palette)
             self.server_switch.toggled.connect(self._on_server_toggled)
         else:
+            toggle_label.setText("")  # 등록 버튼 자체가 의미를 나타내므로 라벨은 폭 정렬용 공백
             self.register_btn = QPushButton("서버 등록")
             self.register_btn.clicked.connect(self._edit_route)
 
@@ -78,6 +91,7 @@ class RouteRow(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 2, 0, 2)
         lay.addWidget(self.text_label, 1)
+        lay.addWidget(toggle_label)
         lay.addWidget(self.server_switch if self.server_switch else self.register_btn)
         lay.addWidget(self.log_btn)
         lay.addWidget(menu_btn)
@@ -154,6 +168,7 @@ class TunnelCard(QFrame):
         header.addWidget(title)
         header.addWidget(self.state_label)
         header.addStretch(1)
+        header.addWidget(_toggle_label("터널", palette))
         header.addWidget(self.tunnel_switch)
         header.addWidget(log_btn)
         header.addWidget(menu_btn)
@@ -166,7 +181,7 @@ class TunnelCard(QFrame):
             self.route_rows.append(row)
             routes_lay.addWidget(row)
 
-        add_route_btn = QPushButton("+ 라우트 추가")
+        add_route_btn = QPushButton("라우트 추가")
         add_route_btn.setIcon(make_icon("plus", icon_color))
         add_route_btn.clicked.connect(lambda: win._add_route(self))
         add_row = QHBoxLayout()
