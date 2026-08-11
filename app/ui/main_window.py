@@ -385,7 +385,8 @@ class MainWindow(QWidget):
                 viewer.raise_()
                 viewer.activateWindow()
                 return
-        viewer = LogViewer(self.ctx, name, self)
+        log_paths = {"터널": self.ctx.manager.log_path_for_tunnel(name)}
+        viewer = LogViewer(self.ctx, name, log_paths, self)
         self._log_viewers[name] = viewer
         viewer.destroyed.connect(lambda *_, n=name: self._log_viewers.pop(n, None))
         viewer.show()

@@ -32,6 +32,7 @@ class FakeRunner(CommandRunner):
     def pids_alive(self, pids): return set()
     def kill_pid(self, pid): pass
     def tail_file(self, path, offset): return (0, "")
+    def file_size(self, path): return 0
     def ensure_dir(self, path): pass
     def list_dir(self, path): return []
 

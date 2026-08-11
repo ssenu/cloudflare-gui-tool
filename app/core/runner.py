@@ -89,6 +89,11 @@ class CommandRunner(ABC):
         ...
 
     @abstractmethod
+    def file_size(self, path: str) -> int:
+        """파일 크기를 바이트 단위로 반환한다. 파일이 없으면 0."""
+        ...
+
+    @abstractmethod
     def ensure_dir(self, path: str) -> None: ...
 
     @abstractmethod
@@ -279,6 +284,12 @@ class LocalRunner(CommandRunner):
             data = f.read()
         text, consumed = decode_tail(data)
         return offset + consumed, text
+
+    def file_size(self, path: str) -> int:
+        path = os.path.expanduser(path)
+        if not os.path.exists(path):
+            return 0
+        return os.path.getsize(path)
 
     def ensure_dir(self, path: str) -> None:
         os.makedirs(os.path.expanduser(path), exist_ok=True)

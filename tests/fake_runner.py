@@ -78,6 +78,11 @@ class FakeRunner(CommandRunner):
         chunk = data[offset:]
         return offset + len(chunk), chunk.decode("utf-8")
 
+    def file_size(self, path: str) -> int:
+        if path not in self.files:
+            return 0
+        return len(self.files[path].encode("utf-8"))
+
     def ensure_dir(self, path: str) -> None:
         self.dirs.add(path)
 

@@ -230,6 +230,14 @@ class SshRunner(CommandRunner):
         text, consumed = decode_tail(data)
         return offset + consumed, text
 
+    def file_size(self, path: str) -> int:
+        assert self._sftp
+        try:
+            attrs = self._sftp.stat(self._expand(path))
+        except FileNotFoundError:
+            return 0
+        return attrs.st_size or 0
+
     def ensure_dir(self, path: str) -> None:
         self.run(["mkdir", "-p", self._expand(path)])
 
