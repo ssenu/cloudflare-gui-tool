@@ -1,73 +1,246 @@
-import sys
-import time
-from app.core.process_mgr import (LogBuffer, ProcessManager, StatusTracker,
-                                  TunnelState)
-from app.core.runner import LocalRunner
+from app.core.cloudflared import CloudflaredClient
+from app.core.process_mgr import RUNNING_MARKER, ProcessManager, TunnelState
+from app.core.run_registry import RunRegistry
+from app.core.runner import RunResult
 from app.core.store import RouteMeta, ServiceSpec, TunnelMeta
+from tests.fake_runner import FakeRunner
 
 
-def _server_meta(name: str, cmd: str) -> TunnelMeta:
-    return TunnelMeta(
-        name=name,
-        routes=[RouteMeta(id="00000000", server=ServiceSpec(start_cmd=cmd))],
-    )
+def make_mgr(runner: FakeRunner | None = None):
+    runner = runner or FakeRunner()
+    reg = RunRegistry(runner)
+    mgr = ProcessManager(lambda: reg)
+    return mgr, runner, reg
 
 
-def test_tracker_transitions_to_running():
-    t = StatusTracker()
-    assert t.state == TunnelState.STOPPED
-    t.mark_starting()
-    assert t.state == TunnelState.STARTING
-    t.feed("2026-08-10T00:00:00Z INF Registered tunnel connection connIndex=0")
-    assert t.state == TunnelState.RUNNING
+def meta(name: str, routes=None) -> TunnelMeta:
+    return TunnelMeta(name=name, routes=routes or [])
 
 
-def test_tracker_user_stop_vs_crash():
-    t = StatusTracker()
-    t.mark_starting()
-    t.mark_stopping()
-    t.on_exit(1)
-    assert t.state == TunnelState.STOPPED  # 사용자가 중지한 경우
-    t2 = StatusTracker()
-    t2.mark_starting()
-    t2.on_exit(1)
-    assert t2.state == TunnelState.ERROR  # 비정상 종료
+def command_route(route_id="r1", **spec_kwargs) -> RouteMeta:
+    return RouteMeta(id=route_id, hostname="h", service="s",
+                     server=ServiceSpec(kind="command", **spec_kwargs))
 
 
-def test_log_buffer_incremental():
-    b = LogBuffer(maxlen=10)
-    b.append("stdout", "a")
-    b.append("stderr", "b")
-    seq, lines = b.get_since(0)
-    assert lines == ["a", "b"]
-    b.append("stdout", "c")
-    seq2, lines2 = b.get_since(seq)
-    assert lines2 == ["c"]
+def docker_route(route_id="r1", cwd="/srv/app") -> RouteMeta:
+    return RouteMeta(id=route_id, hostname="h", service="s",
+                     server=ServiceSpec(kind="docker", cwd=cwd,
+                                        start_cmd="docker compose up -d",
+                                        stop_cmd="docker compose down"))
 
 
-def test_server_start_stop():
-    mgr = ProcessManager()
-    runner = LocalRunner()
-    meta = _server_meta("t1", f'"{sys.executable}" -c "import time; time.sleep(60)"')
-    mgr.start_server(meta, runner)
-    assert mgr.server_running("t1")
-    mgr.stop_server("t1")
-    time.sleep(0.3)
-    assert not mgr.server_running("t1")
-    mgr.stop_all()
+# ---- 터널 상태 판정 표: 4분기 ----
+
+def test_tunnel_state_no_pid_file_is_stopped():
+    mgr, runner, reg = make_mgr()
+    mgr.refresh([meta("t1")])
+    assert mgr.tunnel_state("t1") == TunnelState.STOPPED
 
 
-def test_handles_scoped_by_runner():
-    mgr = ProcessManager()
-    runner = LocalRunner()
-    meta = _server_meta("t2", f'"{sys.executable}" -c "import time; time.sleep(60)"')
-    mgr.start_server(meta, runner)
-    try:
-        assert mgr.server_running("t2", "local") is True
-        assert mgr.server_running("t2", "ssh:rpi") is False
-        assert mgr.tunnel_state("t2", "ssh:rpi") == TunnelState.STOPPED
-        # 다른 러너 이름으로는 stop이 no-op이어야 한다
-        mgr.stop_server("t2", "ssh:rpi")
-        assert mgr.server_running("t2", "local") is True
-    finally:
-        mgr.stop_all()
+def test_tunnel_state_alive_with_marker_is_running():
+    mgr, runner, reg = make_mgr()
+    unit = reg.unit_tunnel("t1")
+    reg.write_pid(unit, 111)
+    runner.live_pids.add(111)
+    runner.write_file(reg.log_path(unit), "INF Registered tunnel connection ok\n")
+
+    mgr.refresh([meta("t1")])
+
+    assert mgr.tunnel_state("t1") == TunnelState.RUNNING
+
+
+def test_tunnel_state_alive_without_marker_is_starting():
+    mgr, runner, reg = make_mgr()
+    unit = reg.unit_tunnel("t1")
+    reg.write_pid(unit, 111)
+    runner.live_pids.add(111)
+    runner.write_file(reg.log_path(unit), "connecting...\n")
+
+    mgr.refresh([meta("t1")])
+
+    assert mgr.tunnel_state("t1") == TunnelState.STARTING
+
+
+def test_tunnel_state_dead_pid_is_error():
+    mgr, runner, reg = make_mgr()
+    unit = reg.unit_tunnel("t1")
+    reg.write_pid(unit, 111)  # live_pids에는 없음 -> 죽은 것으로 취급
+
+    mgr.refresh([meta("t1")])
+
+    assert mgr.tunnel_state("t1") == TunnelState.ERROR
+
+
+# ---- 정지 후 상태 ----
+
+def test_stop_tunnel_clears_pid_and_state_is_stopped_not_error():
+    mgr, runner, reg = make_mgr()
+    unit = reg.unit_tunnel("t1")
+    reg.write_pid(unit, 111)
+    runner.live_pids.add(111)
+    runner.write_file(reg.log_path(unit), f"{RUNNING_MARKER}\n")
+    mgr.refresh([meta("t1")])
+    assert mgr.tunnel_state("t1") == TunnelState.RUNNING
+
+    mgr.stop_tunnel("t1")
+
+    assert reg.read_pid(unit) is None
+    assert mgr.tunnel_state("t1") == TunnelState.STOPPED  # ERROR가 아니어야 함
+    assert 111 not in runner.live_pids
+
+
+def test_start_tunnel_writes_pid_and_spawns():
+    mgr, runner, reg = make_mgr()
+    client = CloudflaredClient(runner)
+
+    mgr.start_tunnel("t1", client)
+
+    unit = reg.unit_tunnel("t1")
+    pid = reg.read_pid(unit)
+    assert pid is not None
+    assert pid in runner.live_pids
+    assert len(runner.spawn_detached_calls) == 1
+    assert mgr.tunnel_state("t1") == TunnelState.STARTING  # 마커 전
+
+
+def test_start_tunnel_offset_ignores_stale_marker_from_previous_run():
+    mgr, runner, reg = make_mgr()
+    unit = reg.unit_tunnel("t1")
+    log_path = reg.log_path(unit)
+    # 이전 실행이 남긴 로그(마커 포함)가 이미 존재
+    runner.write_file(log_path, f"{RUNNING_MARKER}\n")
+    client = CloudflaredClient(runner)
+
+    mgr.start_tunnel("t1", client)
+    mgr.refresh([meta("t1")])
+
+    # 새 실행은 아직 마커를 찍지 않았으므로 STARTING이어야 한다 (RUNNING 아님)
+    assert mgr.tunnel_state("t1") == TunnelState.STARTING
+
+
+# ---- 명령 서비스 ----
+
+def test_service_running_reflects_pid_liveness():
+    mgr, runner, reg = make_mgr()
+    route = command_route(start_cmd="myserver")
+    mgr.start_service("t1", route)
+    assert mgr.service_running("t1", route) is True
+
+    mgr.stop_service("t1", route)
+    assert mgr.service_running("t1", route) is False
+
+
+def test_stop_service_uses_stop_cmd_when_present():
+    mgr, runner, reg = make_mgr()
+    route = command_route(start_cmd="myserver", stop_cmd="myserver --stop")
+    mgr.start_service("t1", route)
+    unit = reg.unit_service("t1", route.id)
+    pid = reg.read_pid(unit)
+
+    mgr.stop_service("t1", route)
+
+    assert (("myserver", "--stop"), None) in runner.run_calls
+    assert pid in runner.live_pids  # stop_cmd 경로는 kill_pid를 쓰지 않는다
+    assert reg.read_pid(unit) is None
+    assert mgr.service_running("t1", route) is False
+
+
+# ---- 도커 서비스 ----
+
+def test_docker_service_running_when_ps_outputs_container_id():
+    mgr, runner, reg = make_mgr()
+    route = docker_route(cwd="/srv/app")
+    runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(0, "abc123\n", "")
+
+    mgr.refresh([meta("t1", [route])])
+
+    assert mgr.service_running("t1", route) is True
+    assert (("docker", "compose", "ps", "-q"), "/srv/app") in runner.run_calls
+
+
+def test_docker_service_stopped_when_ps_output_empty():
+    mgr, runner, reg = make_mgr()
+    route = docker_route(cwd="/srv/app")
+    runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(0, "", "")
+
+    mgr.refresh([meta("t1", [route])])
+
+    assert mgr.service_running("t1", route) is False
+
+
+def test_docker_service_command_failure_treated_as_stopped_and_logged():
+    mgr, runner, reg = make_mgr()
+    route = docker_route(cwd="/srv/app")
+    runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(
+        1, "", "docker: command not found")
+
+    mgr.refresh([meta("t1", [route])])
+
+    assert mgr.service_running("t1", route) is False
+    unit = reg.unit_service("t1", route.id)
+    assert "docker: command not found" in runner.read_file(reg.log_path(unit))
+
+
+def test_docker_service_start_stop_invokes_compose_and_survives_failure():
+    mgr, runner, reg = make_mgr()
+    route = docker_route(cwd="/srv/app")
+    runner.run_raises[("docker", "compose", "up", "-d")] = RuntimeError("docker daemon down")
+
+    mgr.start_service("t1", route)  # 예외가 UI로 전파되면 안 됨
+
+    unit = reg.unit_service("t1", route.id)
+    # start_service의 run()은 refresh()와 달리 예외를 그대로 잡지 않을 수 있으므로
+    # 최소한 상태 조회 자체는 안전해야 한다
+    assert mgr.service_running("t1", route) is False
+
+
+# ---- refresh() 배치 조회 ----
+
+def test_refresh_calls_pids_alive_exactly_once_regardless_of_unit_count():
+    mgr, runner, reg = make_mgr()
+    tunnels = []
+    for i in range(5):
+        name = f"t{i}"
+        route = command_route(route_id=f"r{i}", start_cmd="cmd")
+        t = meta(name, [route])
+        reg.write_pid(reg.unit_tunnel(name), 100 + i)
+        reg.write_pid(reg.unit_service(name, route.id), 200 + i)
+        runner.live_pids.add(100 + i)
+        tunnels.append(t)
+
+    mgr.refresh(tunnels)
+
+    assert runner.pids_alive_calls == 1
+
+
+# ---- 러너 교체 시 상태 분리 ----
+
+def test_refresh_reflects_current_registry_after_target_switch():
+    runner_a = FakeRunner(home="/home/a")
+    runner_b = FakeRunner(home="/home/b")
+    reg_a = RunRegistry(runner_a)
+    reg_b = RunRegistry(runner_b)
+    current = {"reg": reg_a}
+    mgr = ProcessManager(lambda: current["reg"])
+
+    unit = reg_a.unit_tunnel("t1")
+    reg_a.write_pid(unit, 1)
+    runner_a.live_pids.add(1)
+    runner_a.write_file(reg_a.log_path(unit), f"{RUNNING_MARKER}\n")
+    mgr.refresh([meta("t1")])
+    assert mgr.tunnel_state("t1") == TunnelState.RUNNING
+
+    # 대상 전환: runner_b에는 t1의 PID 파일이 없음
+    current["reg"] = reg_b
+    mgr.refresh([meta("t1")])
+    assert mgr.tunnel_state("t1") == TunnelState.STOPPED
+
+
+# ---- 로그 경로 ----
+
+def test_log_path_helpers():
+    mgr, runner, reg = make_mgr()
+    route = command_route(route_id="r9")
+    assert mgr.log_path_for_tunnel("t1") == reg.log_path(reg.unit_tunnel("t1"))
+    assert (mgr.log_path_for_service("t1", route)
+            == reg.log_path(reg.unit_service("t1", route.id)))

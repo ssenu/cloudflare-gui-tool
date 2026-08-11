@@ -135,8 +135,12 @@ class SshRunner(CommandRunner):
             raise ConnectionError("SSH 연결이 없습니다. 먼저 연결하세요.")
         return self._client  # type: ignore[return-value]
 
-    def run(self, cmd: list[str], timeout: float = 60.0) -> RunResult:
-        _, stdout, stderr = self._require().exec_command(quote_cmd(cmd),
+    def run(self, cmd: list[str], timeout: float = 60.0,
+           cwd: str | None = None) -> RunResult:
+        command_str = quote_cmd(cmd)
+        if cwd:
+            command_str = f"cd {shlex.quote(cwd)} && {command_str}"
+        _, stdout, stderr = self._require().exec_command(command_str,
                                                          timeout=timeout)
         try:
             # paramiko's timeout is per-recv inactivity, not overall command time.

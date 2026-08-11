@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import shlex
-import threading
-from collections import deque
 from enum import Enum, auto
+from typing import Callable
 
 from app.core.cloudflared import CloudflaredClient
-from app.core.runner import CommandRunner, ManagedProcess
-from app.core.store import TunnelMeta
+from app.core.run_registry import RunRegistry
+from app.core.store import RouteMeta, TunnelMeta
 
 RUNNING_MARKER = "Registered tunnel connection"
 
@@ -19,150 +18,196 @@ class TunnelState(Enum):
     ERROR = auto()
 
 
-class StatusTracker:
-    def __init__(self):
-        self.state = TunnelState.STOPPED
-        self._stopping = False
-
-    def mark_starting(self):
-        self.state = TunnelState.STARTING
-        self._stopping = False
-
-    def mark_stopping(self):
-        self._stopping = True
-
-    def feed(self, line: str):
-        if RUNNING_MARKER in line:
-            self.state = TunnelState.RUNNING
-
-    def on_exit(self, code: int):
-        if self._stopping or code == 0:
-            self.state = TunnelState.STOPPED
-        else:
-            self.state = TunnelState.ERROR
-
-
-class LogBuffer:
-    def __init__(self, maxlen: int = 2000):
-        self._lines: deque[tuple[int, str]] = deque(maxlen=maxlen)
-        self._seq = 0
-        self._lock = threading.Lock()
-
-    def append(self, stream: str, line: str):
-        with self._lock:
-            self._seq += 1
-            self._lines.append((self._seq, line))
-
-    def get_since(self, seq: int) -> tuple[int, list[str]]:
-        with self._lock:
-            new = [l for s, l in self._lines if s > seq]
-            return self._seq, new
-
-    def clear(self):
-        with self._lock:
-            self._lines.clear()
-
-
-class _Handle:
-    def __init__(self, proc: ManagedProcess, tracker: StatusTracker, log: LogBuffer,
-                 runner_name: str):
-        self.proc = proc
-        self.tracker = tracker
-        self.log = log
-        self.runner_name = runner_name
+def _split_cmd(cmd: str) -> list[str]:
+    # posix=False: Windows 경로의 역슬래시를 보존한다. 이후 따옴표만 벗겨준다.
+    parts = shlex.split(cmd, posix=False)
+    return [p.strip('"') for p in parts]
 
 
 class ProcessManager:
-    def __init__(self):
-        self._tunnels: dict[str, _Handle] = {}
-        self._servers: dict[str, _Handle] = {}
-        self._log_cache: dict[str, LogBuffer] = {}
+    """PID·로그 파일 기반으로 터널/서비스 상태를 판정한다 (v2).
+
+    메모리에 프로세스 핸들을 들고 있지 않는다 — 진짜 상태는 대상 머신의
+    run 디렉터리(RunRegistry)에 있고, 이 클래스는 그것을 읽고 쓸 뿐이다.
+
+    생성자 형태: ``ProcessManager(registry_provider)``. registry_provider는
+    "현재 대상의 RunRegistry"를 돌려주는 콜러블이다. UI는 ``ctx.runner``를
+    바꿔 대상(로컬<->SSH)을 전환하는데, ProcessManager가 러너를 필드로
+    캐시해버리면 대상 전환 후에도 옛 러너를 계속 바라보는 문제가 생긴다.
+    provider를 매 호출마다 통해서 현재 registry(및 그 안의 runner)를
+    다시 얻으면 이 문제가 사라진다 — ProcessManager를 재생성할 필요도 없다.
+
+    상태 판정은 refresh()가 채운 캐시를 읽는다. 개별 조회 메서드
+    (tunnel_state/service_running)는 캐시만 보고 runner를 직접 두드리지
+    않는다 — UI가 1초마다 refresh()를 호출하고 여러 카드가 그 결과를
+    나눠 읽는 구조를 전제로 한다. start_tunnel/stop_tunnel 등 상태를
+    바꾸는 동작은 다음 refresh()를 기다리지 않도록 캐시를 낙관적으로
+    갱신한다(정지 직후 바로 STOPPED로 보이는 것을 보장하기 위함).
+    """
+
+    def __init__(self, registry_provider: Callable[[], RunRegistry]):
+        self._registry_provider = registry_provider
+        # unit -> (has_pid, alive)
+        self._alive: dict[str, tuple[bool, bool]] = {}
+        # unit -> RUNNING_MARKER를 이 실행에서 본 적 있는지
+        self._marker_seen: dict[str, bool] = {}
+        # unit -> 다음 refresh에서 tail_file을 이어 읽을 오프셋
+        self._log_offset: dict[str, int] = {}
+        # unit -> 도커 서비스 실행 여부 (refresh()의 ps -q 결과)
+        self._docker_running: dict[str, bool] = {}
+
+    def _registry(self) -> RunRegistry:
+        return self._registry_provider()
 
     # ---- 터널 ----
-    def start_tunnel(self, name: str, runner: CommandRunner,
-                     client: CloudflaredClient) -> None:
-        if name in self._tunnels and self._tunnels[name].proc.is_running():
-            return
-        tracker = StatusTracker()
-        log = self.tunnel_log(name)
-        tracker.mark_starting()
+    def start_tunnel(self, name: str, client: CloudflaredClient) -> None:
+        reg = self._registry()
+        unit = reg.unit_tunnel(name)
+        reg.rotate_log_if_big(unit)
+        log_path = reg.log_path(unit)
+        pid = reg.runner.spawn_detached(client.run_args(name), None, log_path)
+        reg.write_pid(unit, pid)
+        # 시작 시점 로그 오프셋을 기록해 RUNNING 마커 탐색이 이번 실행의
+        # 출력만 보도록 한다 (로테이션 안 된 기존 로그에 이전 실행의
+        # 마커가 남아 있어도 오탐하지 않는다).
+        offset, _ = reg.runner.tail_file(log_path, 0)
+        self._log_offset[unit] = offset
+        self._marker_seen[unit] = False
+        self._alive[unit] = (True, True)
 
-        def on_line(stream, line):
-            log.append(stream, line)
-            tracker.feed(line)
+    def stop_tunnel(self, name: str) -> None:
+        reg = self._registry()
+        unit = reg.unit_tunnel(name)
+        pid = reg.read_pid(unit)
+        if pid is not None:
+            reg.runner.kill_pid(pid)
+        reg.clear_pid(unit)
+        self._alive[unit] = (False, False)
+        self._marker_seen[unit] = False
 
-        proc = runner.spawn(client.run_args(name), on_line=on_line,
-                            on_exit=tracker.on_exit)
-        self._tunnels[name] = _Handle(proc, tracker, log, runner.name)
-
-    def stop_tunnel(self, name: str, runner_name: str | None = None) -> None:
-        h = self._tunnels.get(name)
-        if h and (runner_name is None or h.runner_name == runner_name):
-            h.tracker.mark_stopping()
-            h.proc.stop()
-
-    def tunnel_state(self, name: str, runner_name: str | None = None) -> TunnelState:
-        h = self._tunnels.get(name)
-        if not h or (runner_name is not None and h.runner_name != runner_name):
+    def tunnel_state(self, name: str) -> TunnelState:
+        reg = self._registry()
+        unit = reg.unit_tunnel(name)
+        has_pid, alive = self._alive.get(unit, (False, False))
+        if not has_pid:
             return TunnelState.STOPPED
-        if h.tracker.state == TunnelState.RUNNING and not h.proc.is_running():
+        if not alive:
             return TunnelState.ERROR
-        return h.tracker.state
+        if self._marker_seen.get(unit, False):
+            return TunnelState.RUNNING
+        return TunnelState.STARTING
 
-    def tunnel_log(self, name: str) -> LogBuffer:
-        h = self._tunnels.get(name)
-        return h.log if h else self._make_log("_t_" + name)
-
-    # ---- 웹서버 ----
-    def start_server(self, meta: TunnelMeta, runner: CommandRunner) -> None:
-        # TODO(v2 후속 태스크): 지금은 첫 번째 라우트의 서비스만 기동하는
-        # 임시 조치. 라우트별 개별 프로세스 관리로 교체될 예정.
-        name = meta.name
-        if name in self._servers and self._servers[name].proc.is_running():
+    # ---- 서비스 ----
+    def start_service(self, tunnel: str, route: RouteMeta) -> None:
+        reg = self._registry()
+        unit = reg.unit_service(tunnel, route.id)
+        server = route.server
+        if server.kind == "docker":
+            try:
+                res = reg.runner.run(["docker", "compose", "up", "-d"], cwd=server.cwd)
+                if res.exit_code != 0:
+                    self._append_log(reg, unit,
+                                     f"[오류] docker compose up 실패: "
+                                     f"{res.stderr.strip() or res.stdout.strip()}")
+            except Exception as exc:  # 도커 미설치 등도 UI로 전파하지 않는다
+                self._append_log(reg, unit, f"[오류] docker compose up 실패: {exc}")
+            # 실제 상태는 다음 refresh()의 ps -q 조회로 확정한다
             return
-        route = meta.routes[0] if meta.routes else None
-        server = route.server if route else None
-        start_cmd = server.start_cmd if server else ""
-        cwd = server.cwd if server else ""
-        log = self.server_log(name)
-        tracker = StatusTracker()
-        cmd = shlex.split(start_cmd, posix=False)
-        # posix=False: Windows 경로 역슬래시 보존. 따옴표는 벗겨준다.
-        cmd = [c.strip('"') for c in cmd]
-        proc = runner.spawn(cmd, cwd=cwd or None,
-                            on_line=lambda s, l: log.append(s, l),
-                            on_exit=tracker.on_exit)
-        self._servers[name] = _Handle(proc, tracker, log, runner.name)
+        reg.rotate_log_if_big(unit)
+        log_path = reg.log_path(unit)
+        cmd = _split_cmd(server.start_cmd)
+        pid = reg.runner.spawn_detached(cmd, server.cwd or None, log_path)
+        reg.write_pid(unit, pid)
+        self._alive[unit] = (True, True)
 
-    def stop_server(self, name: str, runner_name: str | None = None) -> None:
-        h = self._servers.get(name)
-        if h and (runner_name is None or h.runner_name == runner_name):
-            h.tracker.mark_stopping()
-            h.proc.stop()
+    def stop_service(self, tunnel: str, route: RouteMeta) -> None:
+        reg = self._registry()
+        unit = reg.unit_service(tunnel, route.id)
+        server = route.server
+        if server.kind == "docker":
+            try:
+                res = reg.runner.run(["docker", "compose", "down"], cwd=server.cwd)
+                if res.exit_code != 0:
+                    self._append_log(reg, unit,
+                                     f"[오류] docker compose down 실패: "
+                                     f"{res.stderr.strip() or res.stdout.strip()}")
+            except Exception as exc:
+                self._append_log(reg, unit, f"[오류] docker compose down 실패: {exc}")
+            return
+        if server.stop_cmd:
+            cmd = _split_cmd(server.stop_cmd)
+            reg.runner.run(cmd, cwd=server.cwd or None)
+        else:
+            pid = reg.read_pid(unit)
+            if pid is not None:
+                reg.runner.kill_pid(pid)
+        reg.clear_pid(unit)
+        self._alive[unit] = (False, False)
 
-    def server_running(self, name: str, runner_name: str | None = None) -> bool:
-        h = self._servers.get(name)
-        if not h or (runner_name is not None and h.runner_name != runner_name):
-            return False
-        return bool(h.proc.is_running())
+    def service_running(self, tunnel: str, route: RouteMeta) -> bool:
+        reg = self._registry()
+        unit = reg.unit_service(tunnel, route.id)
+        if route.server.kind == "docker":
+            return self._docker_running.get(unit, False)
+        has_pid, alive = self._alive.get(unit, (False, False))
+        return has_pid and alive
 
-    def server_log(self, name: str) -> LogBuffer:
-        h = self._servers.get(name)
-        return h.log if h else self._make_log("_s_" + name)
+    # ---- 로그 경로 ----
+    def log_path_for_tunnel(self, name: str) -> str:
+        reg = self._registry()
+        return reg.log_path(reg.unit_tunnel(name))
 
-    # ---- 공통 ----
-    def _make_log(self, key: str) -> LogBuffer:
-        # start 전에 로그 객체를 요청해도 같은 인스턴스를 돌려주기 위한 캐시
-        if key not in self._log_cache:
-            self._log_cache[key] = LogBuffer()
-        return self._log_cache[key]
+    def log_path_for_service(self, tunnel: str, route: RouteMeta) -> str:
+        reg = self._registry()
+        return reg.log_path(reg.unit_service(tunnel, route.id))
 
-    def stop_all(self) -> None:
-        for name in list(self._tunnels):
-            self.stop_tunnel(name)
-        for name in list(self._servers):
-            self.stop_server(name)
+    # ---- 폴링 ----
+    def refresh(self, tunnels: list[TunnelMeta]) -> None:
+        """단위 수와 무관하게 PID 생존 확인은 pids_alive() 한 번으로 끝낸다."""
+        reg = self._registry()
 
-    def any_running(self) -> bool:
-        return (any(h.proc.is_running() for h in self._tunnels.values())
-                or any(h.proc.is_running() for h in self._servers.values()))
+        tunnel_units = [reg.unit_tunnel(t.name) for t in tunnels]
+        command_units: list[str] = []
+        docker_units: list[tuple[str, str]] = []  # (unit, cwd)
+        for t in tunnels:
+            for r in t.routes:
+                unit = reg.unit_service(t.name, r.id)
+                if r.server.kind == "docker":
+                    docker_units.append((unit, r.server.cwd))
+                else:
+                    command_units.append(unit)
+
+        pid_units = tunnel_units + command_units
+        pid_by_unit = {u: reg.read_pid(u) for u in pid_units}
+        pids = [p for p in pid_by_unit.values() if p is not None]
+        alive_pids = reg.runner.pids_alive(pids)  # 단위 수와 무관하게 호출 1회
+        for u, p in pid_by_unit.items():
+            self._alive[u] = (p is not None, p is not None and p in alive_pids)
+
+        for unit in tunnel_units:
+            has_pid, alive = self._alive[unit]
+            if not (has_pid and alive):
+                continue
+            base = self._log_offset.get(unit, 0)
+            new_offset, text = reg.runner.tail_file(reg.log_path(unit), base)
+            if RUNNING_MARKER in text:
+                self._marker_seen[unit] = True
+            self._log_offset[unit] = new_offset
+
+        for unit, cwd in docker_units:
+            try:
+                res = reg.runner.run(["docker", "compose", "ps", "-q"], cwd=cwd)
+                running = res.exit_code == 0 and bool(res.stdout.strip())
+                if res.exit_code != 0:
+                    self._append_log(reg, unit,
+                                     f"[오류] docker compose ps 실패: "
+                                     f"{res.stderr.strip() or res.stdout.strip()}")
+            except Exception as exc:  # 도커 미설치 등 예상 못한 예외도 "중지"로 간주
+                running = False
+                self._append_log(reg, unit, f"[오류] docker compose ps 실패: {exc}")
+            self._docker_running[unit] = running
+
+    def _append_log(self, reg: RunRegistry, unit: str, text: str) -> None:
+        path = reg.log_path(unit)
+        existing = reg.runner.read_file(path) if reg.runner.file_exists(path) else ""
+        reg.runner.write_file(path, existing + text + "\n")

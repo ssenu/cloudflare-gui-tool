@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.core.cloudflared import CloudflaredClient
 from app.core.process_mgr import ProcessManager
+from app.core.run_registry import RunRegistry
 from app.core.runner import CommandRunner, LocalRunner
 from app.core.ssh_runner import SshRunner
 from app.core.store import SettingsStore, SshProfile
@@ -11,10 +12,13 @@ class AppContext:
     def __init__(self, store: SettingsStore | None = None):
         self.store = store or SettingsStore()
         self.store.load()
-        self.manager = ProcessManager()
         self.local_runner = LocalRunner()
         self.runner: CommandRunner = self.local_runner
         self._remote: SshRunner | None = None
+        # registry_provider: 항상 현재 ctx.runner(대상 전환 반영)를 감싼
+        # RunRegistry를 새로 만들어 돌려준다 - ProcessManager는 러너를
+        # 캐시하지 않으므로 set_local()/set_remote() 이후에도 최신 대상을 본다.
+        self.manager = ProcessManager(lambda: RunRegistry(self.runner))
 
     def _binary(self) -> str:
         if not self.is_remote and self.store.settings.cloudflared_path:

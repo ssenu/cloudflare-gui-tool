@@ -37,7 +37,8 @@ class CommandRunner(ABC):
     name: str = "local"
 
     @abstractmethod
-    def run(self, cmd: list[str], timeout: float = 60.0) -> RunResult: ...
+    def run(self, cmd: list[str], timeout: float = 60.0,
+           cwd: str | None = None) -> RunResult: ...
 
     @abstractmethod
     def spawn(self, cmd: list[str], cwd: str | None = None,
@@ -156,10 +157,12 @@ class LocalProcess(ManagedProcess):
 class LocalRunner(CommandRunner):
     name = "local"
 
-    def run(self, cmd: list[str], timeout: float = 60.0) -> RunResult:
+    def run(self, cmd: list[str], timeout: float = 60.0,
+           cwd: str | None = None) -> RunResult:
         res = subprocess.run(
             cmd, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=timeout, creationflags=CREATE_NO_WINDOW)
+            errors="replace", timeout=timeout, creationflags=CREATE_NO_WINDOW,
+            cwd=cwd or None)
         return RunResult(res.returncode, res.stdout, res.stderr)
 
     def spawn(self, cmd, cwd=None, on_line=None, on_exit=None) -> ManagedProcess:
