@@ -1,6 +1,6 @@
 from app.core.config_yml import parse_config
-from app.core.wizard_logic import (execute_creation, plan_steps, validate_name,
-                                   validate_service, validate_subdomain)
+from app.core.wizard_logic import (execute_creation, finish_creation, plan_steps,
+                                   validate_name, validate_service, validate_subdomain)
 
 
 class FakeClient:
@@ -9,6 +9,7 @@ class FakeClient:
     def __init__(self):
         self.written: dict[str, str] = {}
         self.routed = []
+        self.create_calls = 0
 
         class _Runner:
             def __init__(self, outer):
@@ -20,10 +21,11 @@ class FakeClient:
         self.runner = _Runner(self)
 
     def create_tunnel(self, name):
+        self.create_calls += 1
         return "tunnel-id-1234", "/creds/tunnel-id-1234.json"
 
-    def route_dns(self, name, hostname):
-        self.routed.append((name, hostname))
+    def route_dns(self, name, hostname, overwrite=False):
+        self.routed.append((name, hostname, overwrite))
 
     def config_path(self, name):
         return f"/config/config-{name}.yml"
@@ -65,7 +67,7 @@ def test_execute_creation_writes_config_with_new_build_config_signature():
     execute_creation(client, "mysite", "mysite.example.com",
                      "http://localhost:8000", lambda i, m, ok: events.append((i, m, ok)))
 
-    assert client.routed == [("mysite", "mysite.example.com")]
+    assert client.routed == [("mysite", "mysite.example.com", False)]
     text = client.written["/config/config-mysite.yml"]
     cfg = parse_config(text)
     assert cfg["tunnel"] == "tunnel-id-1234"
@@ -74,4 +76,33 @@ def test_execute_creation_writes_config_with_new_build_config_signature():
     assert ingress[0] == {"hostname": "mysite.example.com",
                           "service": "http://localhost:8000"}
     assert ingress[-1] == {"service": "http_status:404"}
+    assert all(ok for _, _, ok in events)
+
+
+def test_execute_creation_fills_created_dict():
+    client = FakeClient()
+    created: dict = {}
+
+    execute_creation(client, "mysite", "mysite.example.com",
+                     "http://localhost:8000", lambda i, m, ok: None, created=created)
+
+    assert created == {"tunnel_id": "tunnel-id-1234",
+                       "credentials": "/creds/tunnel-id-1234.json"}
+
+
+def test_finish_creation_does_not_recreate_tunnel():
+    # 재개 경로: DNS 레코드 충돌로 실패한 뒤 터널을 다시 만들지 않고
+    # DNS 연결 + 설정 파일 작성만 수행해야 한다.
+    client = FakeClient()
+    events = []
+
+    finish_creation(client, "mysite", "mysite.example.com", "http://localhost:8000",
+                    "tunnel-id-1234", "/creds/tunnel-id-1234.json",
+                    lambda i, m, ok: events.append((i, m, ok)), overwrite_dns=True)
+
+    assert client.create_calls == 0
+    assert client.routed == [("mysite", "mysite.example.com", True)]
+    text = client.written["/config/config-mysite.yml"]
+    cfg = parse_config(text)
+    assert cfg["tunnel"] == "tunnel-id-1234"
     assert all(ok for _, _, ok in events)

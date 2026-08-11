@@ -55,16 +55,39 @@ def plan_steps(name: str, hostname: str, service: str) -> list[PlannedStep]:
 
 def execute_creation(client: CloudflaredClient, name: str, hostname: str,
                      service: str,
-                     progress: Callable[[int, str, bool], None]) -> None:
+                     progress: Callable[[int, str, bool], None],
+                     created: dict | None = None) -> None:
+    """터널 생성 → DNS 연결 → 설정 파일 작성을 순서대로 수행한다.
+
+    ``created``가 주어지면 create_tunnel() 성공 직후 그 결과
+    (``tunnel_id``/``credentials``)를 채워 넣는다 - 이후 단계(DNS 연결)가
+    실패해도 호출자가 이미 만들어진 터널 정보를 알 수 있게 하기 위함이다
+    (마법사의 "기존 DNS 레코드 덮어쓰기" 재개 경로가 이 값을 쓴다).
+    """
     progress(0, "터널 생성 중...", True)
     tid, cred = client.create_tunnel(name)
+    if created is not None:
+        created["tunnel_id"] = tid
+        created["credentials"] = cred
     progress(0, f"터널 생성 완료 (id: {tid[:8]}...)", True)
 
+    finish_creation(client, name, hostname, service, tid, cred, progress)
+
+
+def finish_creation(client: CloudflaredClient, name: str, hostname: str,
+                    service: str, tunnel_id: str, credentials: str,
+                    progress: Callable[[int, str, bool], None],
+                    overwrite_dns: bool = False) -> None:
+    """DNS 연결 + 설정 파일 작성만 수행한다 (터널 생성은 이미 끝난 상태).
+
+    DNS 레코드 충돌(DnsRecordExistsError)로 실패한 뒤, 이미 만들어진 터널을
+    다시 만들지 않고 DNS 연결부터 재개할 때 쓴다.
+    """
     progress(1, "DNS 라우팅 중...", True)
-    client.route_dns(name, hostname)
+    client.route_dns(name, hostname, overwrite=overwrite_dns)
     progress(1, f"{hostname} 연결 완료", True)
 
     progress(2, "설정 파일 작성 중...", True)
-    text = build_config(tid, cred, [(hostname, service)])
+    text = build_config(tunnel_id, credentials, [(hostname, service)])
     client.runner.write_file(client.config_path(name), text)
     progress(2, "설정 파일 작성 완료", True)

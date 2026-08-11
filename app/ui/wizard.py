@@ -8,9 +8,10 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog,
                              QStackedWidget, QVBoxLayout, QWidget)
 
 from app.context import AppContext
+from app.core.cloudflared import DnsRecordExistsError
 from app.core.store import RouteMeta, ServiceSpec, TunnelMeta, new_route_id
-from app.core.wizard_logic import (execute_creation, plan_steps, validate_name,
-                                   validate_service, validate_subdomain)
+from app.core.wizard_logic import (execute_creation, finish_creation, plan_steps,
+                                   validate_name, validate_service, validate_subdomain)
 from app.ui.icons import make_icon
 from app.ui.route_dialog import (DOCKER_START_DEFAULT, DOCKER_STOP_DEFAULT,
                                  KIND_LABELS)
@@ -27,7 +28,10 @@ class TunnelWizard(QDialog):
         self._events: list[tuple] = []  # 워커 스레드 → UI 폴링 큐
         self._next_mode = "nav"  # "nav" | "close" | "done"
         self._tunnel_created = False  # 터널 생성 성공 여부 추적
-        self._current_tunnel_name = ""  # 롤백용 터널 이름
+        self._current_tunnel_name = ""  # 롤백/재개용 터널 이름
+        self._created: dict = {}  # execute_creation이 채우는 tunnel_id/credentials (재개용)
+        self._last_error_is_dns_conflict = False
+        self._close_countdown = 5  # 성공 시 자동 닫기 카운트다운(초)
         self.setWindowTitle("터널 생성")
         self.setMinimumSize(600, 580)
 
@@ -48,20 +52,31 @@ class TunnelWizard(QDialog):
         self.rollback_btn = QPushButton("터널 롤백(삭제)")
         self.rollback_btn.setIcon(make_icon("trash", icon_color))
         self.rollback_btn.setVisible(False)
+        self.overwrite_btn = QPushButton("기존 DNS 레코드 덮어쓰기")
+        self.overwrite_btn.setVisible(False)
+        self.overwrite_hint = self._hint(
+            "이미 있는 레코드를 이 터널로 바꿔 연결합니다.")
+        self.overwrite_hint.setVisible(False)
         self.back_btn.clicked.connect(self._back)
         self.next_btn.clicked.connect(self._on_next_clicked)  # 상태 기반 디스패처
         self.rollback_btn.clicked.connect(self._start_rollback)
+        self.overwrite_btn.clicked.connect(self._start_overwrite)
 
         lay = QVBoxLayout(self)
         lay.addWidget(self.stack, 1)
         lay.addWidget(self.preview)
         lay.addWidget(self.err)
+        lay.addWidget(self.overwrite_hint)
         nav = QHBoxLayout()
         nav.addWidget(self.back_btn)
         nav.addStretch(1)
+        nav.addWidget(self.overwrite_btn)
         nav.addWidget(self.rollback_btn)
         nav.addWidget(self.next_btn)
         lay.addLayout(nav)
+
+        self._close_timer = QTimer(self)
+        self._close_timer.timeout.connect(self._on_close_tick)
 
         self._build_pages()
         self._go(0)
@@ -233,8 +248,11 @@ class TunnelWizard(QDialog):
             self._next_mode = "nav"
             self.next_btn.setEnabled(True)
             self.rollback_btn.setVisible(False)
+            self.overwrite_btn.setVisible(False)
+            self.overwrite_hint.setVisible(False)
             self.status_label.setText("")
             self._tunnel_created = False
+            self._close_timer.stop()
 
     def _back(self):
         i = self.stack.currentIndex()
@@ -270,7 +288,10 @@ class TunnelWizard(QDialog):
         self.next_btn.setEnabled(False)
         self.back_btn.hide()
         self.rollback_btn.setVisible(False)
+        self.overwrite_btn.setVisible(False)
+        self.overwrite_hint.setVisible(False)
         self._tunnel_created = False
+        self._created = {}
         name = self.name_edit.text().strip()
         hostname = self._hostname()
         service = self.service_edit.text().strip()
@@ -285,10 +306,40 @@ class TunnelWizard(QDialog):
 
         def work():
             try:
-                execute_creation(client, name, hostname, service, progress)
+                execute_creation(client, name, hostname, service, progress,
+                                 created=self._created)
                 self._events.append(("done", name, hostname, service))
             except Exception as ex:  # CloudflaredError 포함
-                self._events.append(("fail", str(ex), self._tunnel_created, name))
+                is_dns_conflict = isinstance(ex, DnsRecordExistsError)
+                self._events.append(
+                    ("fail", str(ex), self._tunnel_created, name, is_dns_conflict))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _start_overwrite(self):
+        """DNS 레코드 충돌 후 재개: 터널은 그대로 두고 DNS 연결부터 다시 진행한다."""
+        self.overwrite_btn.setEnabled(False)
+        self.rollback_btn.setEnabled(False)
+        self.next_btn.setEnabled(False)
+        name = self.name_edit.text().strip()
+        hostname = self._hostname()
+        service = self.service_edit.text().strip()
+        client = self.ctx.client
+        tunnel_id = self._created.get("tunnel_id")
+        credentials = self._created.get("credentials")
+
+        def progress(idx, msg, ok):
+            self._events.append(("log", f"{'[성공]' if ok else '[실패]'} {msg}"))
+
+        def work():
+            try:
+                finish_creation(client, name, hostname, service, tunnel_id,
+                                credentials, progress, overwrite_dns=True)
+                self._events.append(("done", name, hostname, service))
+            except Exception as ex:
+                is_dns_conflict = isinstance(ex, DnsRecordExistsError)
+                self._events.append(
+                    ("fail", str(ex), True, name, is_dns_conflict))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -314,6 +365,34 @@ class TunnelWizard(QDialog):
 
         threading.Thread(target=work, daemon=True).start()
 
+    # ---- 성공 시 자동 닫기 ----
+    def _start_close_countdown(self):
+        self._close_countdown = 5
+        self.next_btn.setText(f"완료 ({self._close_countdown})")
+        self._close_timer.start(1000)
+
+    def _on_close_tick(self):
+        self._close_countdown -= 1
+        if self._close_countdown <= 0:
+            self._close_timer.stop()
+            self.accept()
+            return
+        self.next_btn.setText(f"완료 ({self._close_countdown})")
+
+    def closeEvent(self, event):
+        # 다이얼로그가 닫힌 뒤 타이머가 발화해 크래시하지 않도록 정지한다.
+        self._close_timer.stop()
+        self._timer.stop()
+        super().closeEvent(event)
+
+    def reject(self):
+        self._close_timer.stop()
+        super().reject()
+
+    def accept(self):
+        self._close_timer.stop()
+        super().accept()
+
     def _drain_events(self):
         while self._events:
             ev = self._events.pop(0)
@@ -334,25 +413,37 @@ class TunnelWizard(QDialog):
                 # 루트 도메인 기억
                 self.ctx.store.settings.root_domain = self.domain_edit.text().strip()
                 self._next_mode = "done"
-                self.next_btn.setText("완료")
                 self.next_btn.setEnabled(True)
+                self.overwrite_btn.setVisible(False)
+                self.overwrite_hint.setVisible(False)
+                self.rollback_btn.setVisible(False)
+                self._start_close_countdown()
             elif ev[0] == "fail":
-                _, msg, tunnel_created, name = ev
+                _, msg, tunnel_created, name, is_dns_conflict = ev
                 self.status_label.setText(
                     self.status_label.text() + f"\n[실패] {msg}")
+                # 실패 시에는 절대 자동으로 닫지 않는다 (롤백/덮어쓰기를 눌러야 함)
+                self._close_timer.stop()
                 # 터널이 생성됐으면 롤백 버튼 표시, 아니면 닫기만
                 self._next_mode = "close"
                 self.next_btn.setText("닫기")
                 self.next_btn.setEnabled(True)
+                self.overwrite_btn.setEnabled(True)
+                self.rollback_btn.setEnabled(True)
                 if tunnel_created:
                     self.rollback_btn.setVisible(True)
                     self._current_tunnel_name = name
                     # 재시도 가능하도록 뒤로가기 버튼 표시
                     self.back_btn.setVisible(True)
+                    if is_dns_conflict:
+                        self.overwrite_btn.setVisible(True)
+                        self.overwrite_hint.setVisible(True)
             elif ev[0] == "rollback_ok":
                 self.status_label.setText(
                     self.status_label.text() + "\n[성공] 터널 삭제 완료")
                 self.rollback_btn.setVisible(False)
+                self.overwrite_btn.setVisible(False)
+                self.overwrite_hint.setVisible(False)
                 self.next_btn.setText("닫기")
                 self._next_mode = "close"
             elif ev[0] == "rollback_fail":

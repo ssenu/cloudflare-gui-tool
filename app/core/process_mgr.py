@@ -21,8 +21,14 @@ POLL_TIMEOUT = 5.0
 # 왕복시키지 않기 위해 이 시간 동안은 직전 값을 재사용한다.
 DOCKER_POLL_INTERVAL = 5.0
 
-DOCKER_START_DEFAULT = ["docker", "compose", "up", "-d"]
+DOCKER_START_DEFAULT = ["docker", "compose", "up", "--build", "-d"]
 DOCKER_STOP_DEFAULT = ["docker", "compose", "down"]
+
+# 전이 상태(사용자가 방금 켜거나 껐지만 아직 실제 상태가 확인되지 않음) 타임아웃(초).
+# 이 시간이 지나면 desired와 실제 상태가 여전히 다르더라도 pending을 강제 해제한다
+# (도커 빌드 실패 등으로 영원히 스피너가 도는 것을 막기 위함).
+PENDING_TIMEOUT_DOCKER = 180.0
+PENDING_TIMEOUT_COMMAND = 20.0
 
 # PID 재사용 판정에 필요한 연속 명령 불일치 횟수. 조회 실패나 npm->node 같은
 # 래퍼 exec 한 번만으로 살아있는 프로세스를 고아로 만들지 않기 위해 1회
@@ -138,6 +144,11 @@ class ProcessManager:
         # 같은 러너 종류라도 대상 머신(홈 디렉터리)이 다르면 다른 run
         # 디렉터리를 갖기 때문이다.
         self._last_run_dir: str | None = None
+        # unit -> (desired: bool, deadline: time.monotonic() 값). "사용자가
+        # 방금 켜거나 껐지만 아직 실제 상태로 확인되지 않음" 상태(스피너
+        # 표시용). refresh()에서 실제 상태가 desired와 같아지거나 deadline이
+        # 지나면 해제된다.
+        self._pending: dict[str, tuple[bool, float]] = {}
 
     def _registry(self) -> RunRegistry:
         reg = self._registry_provider()
@@ -165,7 +176,23 @@ class ProcessManager:
         self._docker_running.clear()
         self._docker_checked_at.clear()
         self._docker_error.clear()
+        self._pending.clear()
         self._last_run_dir = run_dir
+
+    def _set_pending(self, unit: str, desired: bool, timeout: float) -> None:
+        self._pending[unit] = (desired, time.monotonic() + timeout)
+
+    def _resolve_pending(self, unit: str, actual: bool) -> None:
+        """실제 상태가 desired와 같아지거나 deadline이 지나면 pending을 해제한다."""
+        entry = self._pending.get(unit)
+        if entry is None:
+            return
+        desired, deadline = entry
+        if actual == desired or time.monotonic() >= deadline:
+            self._pending.pop(unit, None)
+
+    def _is_pending(self, unit: str) -> bool:
+        return unit in self._pending
 
     # ---- 터널 ----
     def start_tunnel(self, name: str, client: CloudflaredClient) -> None:
@@ -186,6 +213,7 @@ class ProcessManager:
         self._cmd_verified_pid.pop(unit, None)
         self._cmd_mismatch.pop(unit, None)
         self._mismatch_reason.pop(unit, None)
+        self._set_pending(unit, True, PENDING_TIMEOUT_COMMAND)
 
     def stop_tunnel(self, name: str) -> None:
         reg = self._registry()
@@ -202,6 +230,11 @@ class ProcessManager:
         self._cmd_verified_pid.pop(unit, None)
         self._cmd_mismatch.pop(unit, None)
         self._mismatch_reason.pop(unit, None)
+        self._set_pending(unit, False, PENDING_TIMEOUT_COMMAND)
+
+    def tunnel_pending(self, name: str) -> bool:
+        reg = self._registry()
+        return self._is_pending(reg.unit_tunnel(name))
 
     def tunnel_state(self, name: str) -> TunnelState:
         reg = self._registry()
@@ -232,21 +265,25 @@ class ProcessManager:
             cmd = _split_cmd(server.start_cmd) if server.start_cmd.strip() else DOCKER_START_DEFAULT
             # I5: 사용자가 켠 토글이 다음 refresh까지 꺼진 채 보이지 않도록
             # 낙관적으로 갱신하고, 캐시 만료를 리셋해 다음 refresh()가 곧바로
-            # 실제 상태로 확정하게 한다. 명령이 실패/예외면 낙관적으로도
-            # "실행 중"이라 하지 않는다 - 애초에 안 켜졌을 가능성이 높다.
+            # 실제 상태로 확정하게 한다.
+            # `docker compose up --build -d`는 이미지 빌드 때문에 몇 분씩
+            # 걸릴 수 있어, run()으로 동기 실행하면 UI가 그대로 멈춘다.
+            # spawn_detached로 백그라운드에 띄우고 출력은 서비스 로그
+            # 파일로 흘려보낸다 - 이 프로세스의 PID는 실제 서비스(컨테이너)의
+            # PID가 아니므로 PID 파일에는 쓰지 않는다. 상태 판정은 계속
+            # `docker compose ps -q` 폴링으로만 한다.
+            reg.rotate_log_if_big(unit)
+            log_path = reg.log_path(unit)
             try:
-                res = reg.runner.run(cmd, cwd=server.cwd)
-                if res.exit_code != 0:
-                    self._append_log(reg, unit,
-                                     f"[오류] docker compose up 실패: "
-                                     f"{res.stderr.strip() or res.stdout.strip()}")
-                    self._docker_running[unit] = False
-                else:
-                    self._docker_running[unit] = True
+                reg.runner.spawn_detached(cmd, server.cwd or None, log_path)
             except Exception as exc:  # 도커 미설치 등도 UI로 전파하지 않는다
                 self._append_log(reg, unit, f"[오류] docker compose up 실패: {exc}")
                 self._docker_running[unit] = False
+                self._docker_checked_at[unit] = 0.0
+                return
+            self._docker_running[unit] = True
             self._docker_checked_at[unit] = 0.0
+            self._set_pending(unit, True, PENDING_TIMEOUT_DOCKER)
             return
         reg.rotate_log_if_big(unit)
         log_path = reg.log_path(unit)
@@ -257,6 +294,7 @@ class ProcessManager:
         self._cmd_verified_pid.pop(unit, None)
         self._cmd_mismatch.pop(unit, None)
         self._mismatch_reason.pop(unit, None)
+        self._set_pending(unit, True, PENDING_TIMEOUT_COMMAND)
 
     def stop_service(self, tunnel: str, route: RouteMeta) -> None:
         reg = self._registry()
@@ -264,16 +302,15 @@ class ProcessManager:
         server = route.server
         if server.kind == "docker":
             cmd = _split_cmd(server.stop_cmd) if server.stop_cmd.strip() else DOCKER_STOP_DEFAULT
+            reg.rotate_log_if_big(unit)
+            log_path = reg.log_path(unit)
             try:
-                res = reg.runner.run(cmd, cwd=server.cwd)
-                if res.exit_code != 0:
-                    self._append_log(reg, unit,
-                                     f"[오류] docker compose down 실패: "
-                                     f"{res.stderr.strip() or res.stdout.strip()}")
+                reg.runner.spawn_detached(cmd, server.cwd or None, log_path)
             except Exception as exc:
                 self._append_log(reg, unit, f"[오류] docker compose down 실패: {exc}")
             self._docker_running[unit] = False
             self._docker_checked_at[unit] = 0.0
+            self._set_pending(unit, False, PENDING_TIMEOUT_DOCKER)
             return
         if server.stop_cmd:
             cmd = _split_cmd(server.stop_cmd)
@@ -289,6 +326,11 @@ class ProcessManager:
         self._cmd_verified_pid.pop(unit, None)
         self._cmd_mismatch.pop(unit, None)
         self._mismatch_reason.pop(unit, None)
+        self._set_pending(unit, False, PENDING_TIMEOUT_COMMAND)
+
+    def service_pending(self, tunnel: str, route: RouteMeta) -> bool:
+        reg = self._registry()
+        return self._is_pending(reg.unit_service(tunnel, route.id))
 
     def service_running(self, tunnel: str, route: RouteMeta) -> bool:
         reg = self._registry()
@@ -440,6 +482,10 @@ class ProcessManager:
                 self._cmd_mismatch.pop(unit, None)
             self._alive[unit] = (True, alive)
 
+        for unit in pid_units:
+            has_pid, alive = self._alive.get(unit, (False, False))
+            self._resolve_pending(unit, has_pid and alive)
+
         for unit in tunnel_units:
             has_pid, alive = self._alive[unit]
             if not (has_pid and alive):
@@ -470,6 +516,9 @@ class ProcessManager:
                 self._docker_error[unit] = str(exc)
             self._docker_running[unit] = running
             self._docker_checked_at[unit] = now
+
+        for unit, _cwd in docker_units:
+            self._resolve_pending(unit, self._docker_running.get(unit, False))
 
     def _append_log(self, reg: RunRegistry, unit: str, text: str) -> None:
         reg.runner.append_file(reg.log_path(unit), text + "\n")

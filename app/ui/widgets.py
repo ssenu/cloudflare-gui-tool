@@ -4,8 +4,8 @@ core 모듈에 Qt 의존성이 유입되지 않도록 이 모듈은 app/ui 안�
 """
 from __future__ import annotations
 
-from PyQt6.QtCore import QRectF, Qt
-from PyQt6.QtGui import QColor, QPainter
+from PyQt6.QtCore import QRectF, Qt, QTimer
+from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import (
     QAbstractButton,
     QHBoxLayout,
@@ -98,6 +98,65 @@ class ToggleSwitch(QAbstractButton):
     def focusOutEvent(self, event) -> None:
         super().focusOutEvent(event)
         self.update()
+
+
+class Spinner(QWidget):
+    """전이(pending) 상태를 알리는 작은 회전 스피너.
+
+    지름 16px, 12단계 회전(80ms 간격). 숨겨져 있을 때는 타이머를 돌리지
+    않는다(보이지 않는 위젯이 CPU를 쓰지 않도록) - start()/stop()이 타이머
+    수명을 관리하고, showEvent/hideEvent에서도 안전망으로 맞춰준다.
+    """
+
+    DIAMETER = 16
+    STEPS = 12
+    INTERVAL_MS = 80
+
+    def __init__(self, palette: dict, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._palette = palette
+        self._step = 0
+        self.setFixedSize(self.DIAMETER, self.DIAMETER)
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.INTERVAL_MS)
+        self._timer.timeout.connect(self._advance)
+
+    def set_palette(self, palette: dict) -> None:
+        self._palette = palette
+        self.update()
+
+    def start(self) -> None:
+        if self.isVisible():
+            self._timer.start()
+
+    def stop(self) -> None:
+        self._timer.stop()
+
+    def _advance(self) -> None:
+        self._step = (self._step + 1) % self.STEPS
+        self.update()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._timer.start()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._timer.stop()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = QColor(self._palette["accent"])
+        pen = QPen(color)
+        pen.setWidthF(2.0)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        rect = QRectF(2, 2, self.DIAMETER - 4, self.DIAMETER - 4)
+        start_angle = int(-self._step * (360 / self.STEPS) * 16)
+        span_angle = int(270 * 16)
+        painter.drawArc(rect, start_angle, span_angle)
+        painter.end()
 
 
 def danger_menu_action(menu: QMenu, text: str, palette: dict, on_trigger) -> QWidgetAction:

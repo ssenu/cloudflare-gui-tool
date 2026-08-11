@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import webbrowser
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction
@@ -15,7 +16,7 @@ from app.core.process_mgr import TunnelState
 from app.core.store import RouteMeta, SshProfile, TunnelMeta, new_route_id
 from app.ui.icons import make_icon
 from app.ui.theme import STATE_COLORS, build_qss, current_palette, ensure_qss_icons
-from app.ui.widgets import ToggleSwitch, danger_menu_action
+from app.ui.widgets import Spinner, ToggleSwitch, danger_menu_action
 from app.ui.winutil import apply_titlebar_theme
 from app.ui.wizard import TunnelWizard
 
@@ -76,6 +77,8 @@ class RouteRow(QWidget):
         self.has_service = bool(route.server.start_cmd) or route.server.kind == "docker"
         self.server_switch: ToggleSwitch | None = None
         self.register_btn: QPushButton | None = None
+        self.spinner = Spinner(palette)
+        self.spinner.hide()
         toggle_label = _toggle_label("서버", palette)
         if self.has_service:
             self.server_switch = ToggleSwitch(palette)
@@ -100,6 +103,7 @@ class RouteRow(QWidget):
         lay.setContentsMargins(0, 2, 0, 2)
         lay.addWidget(self.text_label, 1)
         lay.addWidget(toggle_label)
+        lay.addWidget(self.spinner)
         lay.addWidget(self.server_switch if self.server_switch else self.register_btn)
         lay.addWidget(self.log_btn)
         lay.addWidget(menu_btn)
@@ -137,6 +141,12 @@ class RouteRow(QWidget):
     def update_state(self):
         ctx = self.card.win.ctx
         if self.server_switch is not None:
+            pending = ctx.manager.service_pending(self.card.tunnel_name, self.route)
+            self.spinner.setVisible(pending)
+            if pending:
+                self.spinner.start()
+            else:
+                self.spinner.stop()
             running = ctx.manager.service_running(self.card.tunnel_name, self.route)
             self.server_switch.blockSignals(True)
             self.server_switch.setChecked(running)
@@ -180,6 +190,8 @@ class TunnelCard(QFrame):
 
         self.tunnel_switch = ToggleSwitch(palette)
         self.tunnel_switch.toggled.connect(self._on_tunnel_toggled)
+        self.spinner = Spinner(palette)
+        self.spinner.hide()
         log_btn = QPushButton("로그")
         log_btn.setIcon(make_icon("log", icon_color))
         log_btn.clicked.connect(lambda: win._open_log_tunnel(self.tunnel_name))
@@ -194,6 +206,7 @@ class TunnelCard(QFrame):
         header.addWidget(self.state_label)
         header.addStretch(1)
         header.addWidget(_toggle_label("터널", palette))
+        header.addWidget(self.spinner)
         header.addWidget(self.tunnel_switch)
         header.addWidget(log_btn)
         header.addWidget(menu_btn)
@@ -259,6 +272,12 @@ class TunnelCard(QFrame):
         self.dot.setStyleSheet(
             f"background: {STATE_COLORS[st]}; border-radius: 6px;")
         self.state_label.setText(STATE_LABELS[st])
+        pending = st == TunnelState.STARTING or ctx.manager.tunnel_pending(self.tunnel_name)
+        self.spinner.setVisible(pending)
+        if pending:
+            self.spinner.start()
+        else:
+            self.spinner.stop()
         running = st in (TunnelState.STARTING, TunnelState.RUNNING)
         mismatch_reason = None
         if st == TunnelState.ERROR:
@@ -549,6 +568,35 @@ class MainWindow(QWidget):
             pass
         return meta
 
+    # ---- 삭제 확인(공용) ----
+    def _confirm_delete(self, title: str, body_prefix: str,
+                        hostnames: list[str]) -> bool:
+        """삭제될 hostname 목록과 DNS 잔존 안내를 보여주는 확인 다이얼로그.
+
+        "Cloudflare 대시보드 열기" 버튼은 브라우저만 열고(다른 동작 없음)
+        같은 확인 다이얼로그를 다시 띄운다 - 사용자가 대시보드를 확인한 뒤
+        삭제 여부를 마저 결정할 수 있게 하기 위함이다.
+        """
+        names = "\n".join(f"- {h}" for h in hostnames) if hostnames \
+            else "- (hostname 미설정)"
+        msg = QMessageBox(self)
+        msg.setWindowTitle(title)
+        msg.setText(
+            f"{body_prefix}\n\n"
+            f"다음 주소의 DNS 레코드는 Cloudflare에 그대로 남습니다:\n{names}\n\n"
+            "나중에 같은 주소를 다시 쓰려면 대시보드에서 지우거나, 다시 "
+            "연결할 때 덮어쓰기를 선택하세요.")
+        yes_btn = msg.addButton("삭제", QMessageBox.ButtonRole.YesRole)
+        msg.addButton("취소", QMessageBox.ButtonRole.NoRole)
+        dash_btn = msg.addButton("Cloudflare 대시보드 열기",
+                                 QMessageBox.ButtonRole.ActionRole)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked is dash_btn:
+            webbrowser.open("https://dash.cloudflare.com")
+            return self._confirm_delete(title, body_prefix, hostnames)
+        return clicked is yes_btn
+
     # ---- 생성/삭제 ----
     def _create_tunnel(self):
         wiz = TunnelWizard(self.ctx, [c.tunnel_name for c in self.cards], self)
@@ -561,13 +609,14 @@ class MainWindow(QWidget):
 
     def _delete_tunnel(self, card: TunnelCard):
         name = card.tunnel_name
-        ok = QMessageBox.question(
-            self, "터널 삭제",
-            f"'{name}' 터널을 삭제할까요?\n\n"
+        hostnames = [r.hostname for r in card.meta.routes]
+        ok = self._confirm_delete(
+            "터널 삭제",
+            f"'{name}' 터널을 삭제할까요?\n"
             "- 실행 중인 터널과 모든 라우트의 서버가 중지됩니다\n"
-            "- config 파일이 삭제됩니다\n"
-            "- DNS CNAME 레코드는 Cloudflare 대시보드에서 직접 삭제해야 합니다")
-        if ok != QMessageBox.StandardButton.Yes:
+            "- config 파일이 삭제됩니다",
+            hostnames)
+        if not ok:
             return
 
         for route in card.meta.routes:
@@ -636,12 +685,12 @@ class MainWindow(QWidget):
             self.refresh()
 
     def _delete_route(self, card: TunnelCard, route: RouteMeta):
-        ok = QMessageBox.question(
-            self, "라우트 삭제",
-            f"'{route.hostname or route.id}' 라우트를 삭제할까요?\n\n"
-            "- 서비스가 실행 중이면 중지됩니다\n"
-            "- DNS CNAME 레코드는 Cloudflare 대시보드에서 직접 삭제해야 합니다")
-        if ok != QMessageBox.StandardButton.Yes:
+        ok = self._confirm_delete(
+            "라우트 삭제",
+            f"'{route.hostname or route.id}' 라우트를 삭제할까요?\n"
+            "- 서비스가 실행 중이면 중지됩니다",
+            [route.hostname] if route.hostname else [])
+        if not ok:
             return
 
         # I7: config.yml을 먼저 쓰고, 그것이 성공했을 때만 meta.routes와
@@ -742,6 +791,11 @@ class MainWindow(QWidget):
         icon_color = current_palette(mode)["text"]
         self.refresh_btn.setIcon(make_icon("refresh", icon_color))
         self.settings_btn.setIcon(make_icon("gear", icon_color))
+        new_palette = current_palette(mode)
+        for c in self.cards:
+            c.spinner.set_palette(new_palette)
+            for row in c.route_rows:
+                row.spinner.set_palette(new_palette)
         self._reload_targets()
         self.refresh()  # 카드를 새 팔레트로 다시 그린다 (ToggleSwitch 포함)
 

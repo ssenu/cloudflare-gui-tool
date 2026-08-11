@@ -25,6 +25,10 @@ class CloudflaredError(Exception):
                          or f"exit code {result.exit_code}")
 
 
+class DnsRecordExistsError(CloudflaredError):
+    """route dns 실패가 '이미 있는 A/AAAA/CNAME 레코드' 때문일 때(코드 1003)."""
+
+
 class CloudflaredClient:
     def __init__(self, runner: CommandRunner, binary: str = "cloudflared"):
         self.runner = runner
@@ -82,8 +86,18 @@ class CloudflaredClient:
     def delete_tunnel(self, name: str) -> None:
         self._run(["tunnel", "delete", name])
 
-    def route_dns(self, name: str, hostname: str) -> None:
-        self._run(["tunnel", "route", "dns", name, hostname])
+    def route_dns(self, name: str, hostname: str, overwrite: bool = False) -> None:
+        args = ["tunnel", "route", "dns"]
+        if overwrite:
+            args.append("--overwrite-dns")
+        args += [name, hostname]
+        try:
+            self._run(args)
+        except CloudflaredError as ex:
+            text = (ex.result.stderr + ex.result.stdout).lower()
+            if "1003" in text or "already exists" in text:
+                raise DnsRecordExistsError(ex.result) from ex
+            raise
 
     def run_args(self, name: str) -> list[str]:
         return [self.binary, "--config", self.config_path(name),

@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                              QMessageBox, QPushButton)
 
 from app.context import AppContext
-from app.core.cloudflared import CloudflaredError
+from app.core.cloudflared import CloudflaredError, DnsRecordExistsError
 from app.core.config_yml import set_routes
 from app.core.store import RouteMeta, ServiceSpec, TunnelMeta, new_route_id
 from app.core.wizard_logic import validate_service, validate_subdomain
@@ -15,7 +15,7 @@ from app.ui.winutil import apply_titlebar_theme
 
 KIND_LABELS = [("command", "명령"), ("docker", "도커 컴포즈")]
 
-DOCKER_START_DEFAULT = "docker compose up -d"
+DOCKER_START_DEFAULT = "docker compose up --build -d"
 DOCKER_STOP_DEFAULT = "docker compose down"
 
 
@@ -184,6 +184,18 @@ class RouteDialog(QDialog):
         if is_new or hostname_changed:
             try:
                 self.ctx.client.route_dns(self.tunnel.name, hostname)
+            except DnsRecordExistsError as ex:
+                ok = QMessageBox.question(
+                    self, "DNS 레코드 충돌",
+                    f"이 주소({hostname})에 이미 DNS 레코드가 있습니다.\n"
+                    "이 터널로 덮어쓸까요?")
+                if ok != QMessageBox.StandardButton.Yes:
+                    return
+                try:
+                    self.ctx.client.route_dns(self.tunnel.name, hostname, overwrite=True)
+                except Exception as ex2:
+                    QMessageBox.critical(self, "DNS 연결 실패", str(ex2))
+                    return
             except CloudflaredError as ex:
                 QMessageBox.critical(self, "DNS 연결 실패", str(ex))
                 return

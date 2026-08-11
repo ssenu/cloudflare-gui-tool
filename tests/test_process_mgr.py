@@ -188,14 +188,19 @@ def test_docker_service_command_failure_treated_as_stopped_and_kept_in_memory_on
 def test_docker_service_start_stop_invokes_compose_and_survives_failure():
     mgr, runner, reg = make_mgr()
     route = docker_route(cwd="/srv/app")
-    runner.run_raises[("docker", "compose", "up", "-d")] = RuntimeError("docker daemon down")
 
-    mgr.start_service("t1", route)  # 예외가 UI로 전파되면 안 됨
+    class BoomRunner(FakeRunner):
+        def spawn_detached(self, cmd, cwd, log_path):
+            raise RuntimeError("docker daemon down")
 
-    unit = reg.unit_service("t1", route.id)
-    # start_service의 run()은 refresh()와 달리 예외를 그대로 잡지 않을 수 있으므로
-    # 최소한 상태 조회 자체는 안전해야 한다
-    assert mgr.service_running("t1", route) is False
+    boom = BoomRunner()
+    boom.files = runner.files
+    reg2 = RunRegistry(boom)
+    mgr2 = ProcessManager(lambda: reg2)
+
+    mgr2.start_service("t1", route)  # 예외가 UI로 전파되면 안 됨
+
+    assert mgr2.service_running("t1", route) is False
 
 
 # ---- refresh() 배치 조회 ----
@@ -552,7 +557,6 @@ def test_dead_pid_file_is_auto_cleared_after_error_tick():
 def test_docker_start_service_optimistically_running_before_refresh():
     mgr, runner, reg = make_mgr()
     route = docker_route(cwd="/srv/app")
-    runner.run_results[("docker", "compose", "up", "-d")] = RunResult(0, "", "")
 
     mgr.start_service("t1", route)
 
@@ -568,10 +572,29 @@ def test_docker_stop_service_optimistically_stopped_before_refresh():
     mgr.refresh([meta("t1", [route])])
     assert mgr.service_running("t1", route) is True
 
-    runner.run_results[("docker", "compose", "down")] = RunResult(0, "", "")
     mgr.stop_service("t1", route)
 
     assert mgr.service_running("t1", route) is False
+
+
+def test_docker_start_service_uses_spawn_detached_not_run():
+    # 4-b: docker compose up --build -d는 몇 분 걸릴 수 있어 동기 run()으로
+    # 실행하면 UI가 멈춘다. spawn_detached로 백그라운드 실행해야 한다.
+    mgr, runner, reg = make_mgr()
+    route = docker_route(cwd="/srv/app")
+    route.server.start_cmd = ""  # 기본값(--build 포함) 사용
+
+    mgr.start_service("t1", route)
+
+    assert len(runner.spawn_detached_calls) == 1
+    cmd, cwd, log_path = runner.spawn_detached_calls[0]
+    assert cmd == ["docker", "compose", "up", "--build", "-d"]
+    assert cwd == "/srv/app"
+    unit = reg.unit_service("t1", route.id)
+    # 도커 프로세스의 PID는 서비스 PID가 아니므로 PID 파일에 쓰지 않는다
+    assert reg.read_pid(unit) is None
+    # run()으로는 도커 명령을 실행하지 않는다
+    assert not any(c[0][:3] == ("docker", "compose", "up") for c in runner.run_calls)
 
 
 # ---- I6: 도커 시작/정지 명령이 저장된 값을 실제로 쓰는지 ----
@@ -580,11 +603,11 @@ def test_docker_start_service_uses_custom_start_cmd():
     mgr, runner, reg = make_mgr()
     route = docker_route(cwd="/srv/app")
     route.server.start_cmd = "docker compose -f prod.yml up -d"
-    runner.run_results[("docker", "compose", "-f", "prod.yml", "up", "-d")] = RunResult(0, "", "")
 
     mgr.start_service("t1", route)
 
-    assert (("docker", "compose", "-f", "prod.yml", "up", "-d"), "/srv/app") in runner.run_calls
+    assert (["docker", "compose", "-f", "prod.yml", "up", "-d"], "/srv/app") == \
+        runner.spawn_detached_calls[0][:2]
 
 
 def test_docker_start_service_falls_back_to_default_when_start_cmd_empty():
@@ -594,7 +617,8 @@ def test_docker_start_service_falls_back_to_default_when_start_cmd_empty():
 
     mgr.start_service("t1", route)
 
-    assert (("docker", "compose", "up", "-d"), "/srv/app") in runner.run_calls
+    assert (["docker", "compose", "up", "--build", "-d"], "/srv/app") == \
+        runner.spawn_detached_calls[0][:2]
 
 
 # ---- C4: 도커 폴링 실패는 로그 파일에 안 남고 메모리(docker_error)에만 ----
@@ -626,3 +650,56 @@ def test_docker_ps_not_requeried_within_cache_window():
 
     assert len(runner.run_calls) == calls_after_first  # 추가 호출 없음
     assert mgr.service_running("t1", route) is True
+
+
+# ---- 4-c: 전이(pending) 상태 ----
+
+def test_tunnel_pending_clears_when_desired_state_reached():
+    mgr, runner, reg = make_mgr()
+    client = CloudflaredClient(runner)
+
+    mgr.start_tunnel("t1", client)
+    assert mgr.tunnel_pending("t1") is True
+
+    mgr.refresh([meta("t1")])  # 실제로도 살아있음 -> desired(True)와 일치
+
+    assert mgr.tunnel_pending("t1") is False
+
+
+def test_tunnel_pending_clears_after_deadline_even_if_not_reached():
+    mgr, runner, reg = make_mgr()
+    unit = reg.unit_tunnel("t1")
+    # STOPPED에서 정지 요청: desired=False이지만 PID가 여전히 남아있어
+    # actual이 True인 상황을 흉내낸다(비정상 지연 시나리오).
+    reg.write_pid(unit, 111)
+    runner.live_pids.add(111)
+    mgr._set_pending(unit, False, -1.0)  # 이미 지난 데드라인
+
+    mgr.refresh([meta("t1")])
+
+    assert mgr.tunnel_pending("t1") is False
+
+
+def test_service_pending_clears_when_docker_actual_matches_desired():
+    mgr, runner, reg = make_mgr()
+    route = docker_route(cwd="/srv/app")
+
+    mgr.start_service("t1", route)
+    assert mgr.service_pending("t1", route) is True
+
+    runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(0, "abc\n", "")
+    mgr.refresh([meta("t1", [route])])
+
+    assert mgr.service_pending("t1", route) is False
+
+
+def test_service_pending_command_kind_clears_on_match():
+    mgr, runner, reg = make_mgr()
+    route = command_route(start_cmd="myserver")
+
+    mgr.start_service("t1", route)
+    assert mgr.service_pending("t1", route) is True
+
+    mgr.refresh([meta("t1", [route])])
+
+    assert mgr.service_pending("t1", route) is False
