@@ -6,7 +6,7 @@ import threading
 
 import paramiko
 
-from app.core.runner import CommandRunner, ManagedProcess, OnExit, OnLine, RunResult
+from app.core.runner import CommandRunner, ManagedProcess, OnExit, OnLine, RunResult, decode_tail
 from app.core.store import SshProfile
 
 
@@ -193,13 +193,11 @@ class SshRunner(CommandRunner):
     def spawn_detached(self, cmd: list[str], cwd: str | None, log_path: str) -> int:
         line = build_spawn_detached_command(cmd, cwd, log_path)
         res = self.run(["sh", "-c", line])
-        lines = [ln for ln in res.stdout.splitlines() if ln.strip()]
-        if not lines:
-            raise RuntimeError(f"원격 프로세스 시작 실패: PID를 읽을 수 없습니다 ({res.stderr!r})")
-        try:
-            return int(lines[-1].strip())
-        except ValueError:
-            raise RuntimeError(f"원격 프로세스 시작 실패: PID 파싱 불가 ({lines[-1]!r})")
+        # 셸 배너 등이 섞일 수 있으므로 숫자로만 이루어진 마지막 줄만 PID로 인정
+        digit_lines = [ln.strip() for ln in res.stdout.splitlines() if ln.strip().isdigit()]
+        if not digit_lines:
+            raise RuntimeError(f"원격 프로세스 시작 실패: PID를 읽을 수 없습니다 ({res.stdout!r}, {res.stderr!r})")
+        return int(digit_lines[-1])
 
     def pids_alive(self, pids: list[int]) -> set[int]:
         cmd = build_pids_alive_command(pids)
@@ -225,8 +223,8 @@ class SshRunner(CommandRunner):
         with self._sftp.open(remote_path, "rb") as f:
             f.seek(offset)
             data = f.read()
-        new_offset = offset + len(data)
-        return new_offset, data.decode("utf-8", errors="replace")
+        text, consumed = decode_tail(data)
+        return offset + consumed, text
 
     def ensure_dir(self, path: str) -> None:
         self.run(["mkdir", "-p", self._expand(path)])

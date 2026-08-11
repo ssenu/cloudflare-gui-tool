@@ -1,11 +1,15 @@
+import os
+import subprocess
 import sys
 import time
 
 import pytest
 
-from app.core.runner import LocalRunner
+from app.core.runner import LocalRunner, decode_tail
 from app.core.ssh_runner import build_spawn_detached_command, build_pids_alive_command, \
     build_kill_pid_command
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _wait_until(pred, timeout=5.0, interval=0.05):
@@ -32,6 +36,40 @@ class TestLocalRunnerDetached:
         r.kill_pid(pid)
 
         assert _wait_until(lambda: pid not in r.pids_alive([pid]))
+
+    def test_spawn_detached_survives_parent_process_exit(self, tmp_path):
+        """부모(이 테스트를 실행하는 헬퍼 프로세스)가 죽어도 자식이 살아있는지 검증.
+
+        헬퍼 스크립트를 별도 프로세스로 실행해 LocalRunner().spawn_detached로
+        30초 sleep 자식을 띄우고 PID를 출력한 뒤 즉시 종료한다. 헬퍼 프로세스가
+        완전히 끝난 후에도(=부모 소멸) 자식 PID가 살아있어야 진짜 분리 실행이다.
+        """
+        log_path = str(tmp_path / "detached.log")
+        helper = tmp_path / "spawn_helper.py"
+        helper.write_text(
+            "import sys\n"
+            f"sys.path.insert(0, {REPO_ROOT!r})\n"
+            "from app.core.runner import LocalRunner\n"
+            "r = LocalRunner()\n"
+            "pid = r.spawn_detached(\n"
+            f"    [sys.executable, '-c', 'import time; time.sleep(30)'],\n"
+            f"    cwd=None, log_path={log_path!r})\n"
+            "print(pid)\n",
+            encoding="utf-8")
+
+        result = subprocess.run(
+            [sys.executable, str(helper)],
+            capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stderr
+        pid = int(result.stdout.strip())
+
+        # 헬퍼 프로세스(부모)는 이미 종료됐다. 자식이 여전히 살아있어야 한다.
+        r = LocalRunner()
+        try:
+            assert _wait_until(lambda: pid in r.pids_alive([pid]))
+        finally:
+            r.kill_pid(pid)
+            assert _wait_until(lambda: pid not in r.pids_alive([pid]))
 
     def test_pids_alive_empty_list_returns_empty_set(self):
         r = LocalRunner()
@@ -99,6 +137,41 @@ class TestLocalRunnerDetached:
         offset, text = r.tail_file(str(log_path), 9999)
         assert text == "hello"
         assert offset == len("hello")
+
+    def test_tail_file_does_not_corrupt_multibyte_char_at_boundary(self, tmp_path):
+        """읽기 경계가 한글(3바이트 UTF-8) 문자 중간에 걸려도 손상 없이 이어붙일 수 있어야 한다."""
+        r = LocalRunner()
+        log_path = tmp_path / "korean.log"
+        text = "안녕하세요"
+        data = text.encode("utf-8")
+        log_path.write_bytes(data)
+
+        # 첫 글자('안', 3바이트) 중간에서 끊기는 offset을 골라 두 번에 나눠 읽는다
+        split = 2  # '안'의 3바이트 중 2바이트만 포함
+        first_bytes = data[:split]
+        with open(log_path, "wb") as f:
+            f.write(first_bytes)
+
+        offset1, text1 = r.tail_file(str(log_path), 0)
+        # 잘린 시퀀스는 소비하지 않아야 하므로 아직 아무것도 디코드되지 않음
+        assert text1 == ""
+        assert offset1 == 0
+
+        # 나머지 바이트를 파일에 추가
+        with open(log_path, "ab") as f:
+            f.write(data[split:])
+
+        offset2, text2 = r.tail_file(str(log_path), offset1)
+        assert offset2 == len(data)
+        assert text1 + text2 == text
+
+    def test_decode_tail_leaves_truncated_multibyte_suffix(self):
+        data = "안녕".encode("utf-8")
+        # 마지막 문자의 첫 바이트만 남기고 자른다
+        truncated = data[:-2]
+        text, consumed = decode_tail(truncated)
+        assert text == "안"
+        assert consumed == len(truncated) - 1  # 마지막 1바이트는 보류
 
     def test_ensure_dir_creates_nested_directory(self, tmp_path):
         r = LocalRunner()

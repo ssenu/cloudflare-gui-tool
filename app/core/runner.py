@@ -96,6 +96,22 @@ class CommandRunner(ABC):
         ...
 
 
+def decode_tail(data: bytes) -> tuple[str, int]:
+    """말미에 잘린 UTF-8 시퀀스는 남겨두고 (텍스트, 소비한 바이트 수)를 반환한다.
+
+    다음 tail_file 호출에서 이어서 디코드할 수 있도록, 멀티바이트 문자
+    중간에서 끊긴 꼬리 바이트는 소비하지 않고 offset에 남겨둔다.
+    """
+    for back in range(0, min(3, len(data)) + 1):
+        chunk = data[:len(data) - back] if back else data
+        try:
+            return chunk.decode("utf-8"), len(chunk)
+        except UnicodeDecodeError:
+            continue
+    # 중간에 깨진 바이트열이면 되돌릴 수 없으므로 치환하며 전부 소비
+    return data.decode("utf-8", errors="replace"), len(data)
+
+
 class LocalProcess(ManagedProcess):
     def __init__(self, popen: subprocess.Popen,
                  on_line: OnLine | None, on_exit: OnExit | None):
@@ -236,10 +252,17 @@ class LocalRunner(CommandRunner):
                 capture_output=True, creationflags=CREATE_NO_WINDOW)
         else:
             import signal
+            # spawn_detached가 start_new_session=True로 새 프로세스 그룹을
+            # 만들었으므로 그룹 전체에 먼저 시도하고, 실패하면 단일 PID로 폴백
             try:
-                os.kill(pid, signal.SIGTERM)
-            except OSError:
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+            except ProcessLookupError:
                 pass
+            except OSError:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except (OSError, ProcessLookupError):
+                    pass
 
     def tail_file(self, path: str, offset: int) -> tuple[int, str]:
         path = os.path.expanduser(path)
@@ -251,8 +274,8 @@ class LocalRunner(CommandRunner):
         with open(path, "rb") as f:
             f.seek(offset)
             data = f.read()
-        new_offset = offset + len(data)
-        return new_offset, data.decode("utf-8", errors="replace")
+        text, consumed = decode_tail(data)
+        return offset + consumed, text
 
     def ensure_dir(self, path: str) -> None:
         os.makedirs(os.path.expanduser(path), exist_ok=True)
