@@ -5,16 +5,17 @@ import time
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QMenu,
-                             QMessageBox, QPushButton, QScrollArea, QVBoxLayout,
-                             QWidget)
+                             QMessageBox, QPushButton, QScrollArea, QSizePolicy,
+                             QVBoxLayout, QWidget)
 
 from app.context import AppContext
-from app.core.cloudflared import CloudflaredError, TunnelInfo
-from app.core.config_yml import get_main_ingress, parse_config
+from app.core.cloudflared import CloudflaredError
+from app.core.config_yml import get_routes, parse_config, set_routes
 from app.core.process_mgr import TunnelState
-from app.core.store import TunnelMeta
+from app.core.store import RouteMeta, TunnelMeta, new_route_id
 from app.ui.icons import make_icon
 from app.ui.theme import STATE_COLORS, build_qss, current_palette, ensure_qss_icons
+from app.ui.widgets import ToggleSwitch, danger_menu_action
 from app.ui.winutil import apply_titlebar_theme
 from app.ui.wizard import TunnelWizard
 
@@ -28,8 +29,99 @@ STATE_LABELS = {
 }
 
 
+def _elide(text: str, metrics, width: int) -> str:
+    return metrics.elidedText(text, Qt.TextElideMode.ElideMiddle, width)
+
+
+class RouteRow(QWidget):
+    """라우트 한 줄: hostname → 서비스 주소, 서버 토글(또는 등록 버튼), 로그, 메뉴."""
+
+    def __init__(self, card: "TunnelCard", route: RouteMeta):
+        super().__init__(card)
+        self.card = card
+        self.route = route
+        win = card.win
+        palette = current_palette(win.ctx.store.settings.theme)
+        icon_color = palette["text"]
+
+        hostname = route.hostname or "(hostname 미설정)"
+        service = route.service or "(서비스 미설정)"
+        full_text = f"{hostname}  →  {service}"
+        self.text_label = QLabel()
+        metrics = self.text_label.fontMetrics()
+        self.text_label.setText(_elide(full_text, metrics, 340))
+        self.text_label.setToolTip(full_text)
+        self.text_label.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                      QSizePolicy.Policy.Preferred)
+
+        self.has_service = bool(route.server.start_cmd)
+        self.server_switch: ToggleSwitch | None = None
+        self.register_btn: QPushButton | None = None
+        if self.has_service:
+            self.server_switch = ToggleSwitch(palette)
+            self.server_switch.toggled.connect(self._on_server_toggled)
+        else:
+            self.register_btn = QPushButton("서버 등록")
+            self.register_btn.clicked.connect(self._edit_route)
+
+        self.log_btn = QPushButton("로그")
+        self.log_btn.setIcon(make_icon("log", icon_color))
+        self.log_btn.setVisible(self.has_service)
+        self.log_btn.clicked.connect(
+            lambda: win._open_log_service(card.tunnel_name, self.route))
+
+        menu_btn = QPushButton()
+        menu_btn.setIcon(make_icon("dots", icon_color))
+        menu_btn.setFixedWidth(34)
+        menu_btn.clicked.connect(lambda: self._menu(menu_btn))
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 2, 0, 2)
+        lay.addWidget(self.text_label, 1)
+        lay.addWidget(self.server_switch if self.server_switch else self.register_btn)
+        lay.addWidget(self.log_btn)
+        lay.addWidget(menu_btn)
+
+        self.update_state()
+
+    def _on_server_toggled(self, checked: bool):
+        ctx = self.card.win.ctx
+        try:
+            if checked:
+                ctx.manager.start_service(self.card.tunnel_name, self.route)
+            else:
+                ctx.manager.stop_service(self.card.tunnel_name, self.route)
+        except Exception as ex:
+            QMessageBox.critical(self, "서버 오류", str(ex))
+        self.update_state()
+
+    def _menu(self, anchor: QPushButton):
+        win = self.card.win
+        palette = current_palette(win.ctx.store.settings.theme)
+        m = QMenu(self)
+        edit_action = QAction("편집", m)
+        edit_action.triggered.connect(self._edit_route)
+        m.addAction(edit_action)
+        danger_menu_action(m, "삭제", palette, self._delete_route)
+        m.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+    def _edit_route(self):
+        self.card.win._edit_route(self.card, self.route)
+
+    def _delete_route(self):
+        self.card.win._delete_route(self.card, self.route)
+
+    def update_state(self):
+        ctx = self.card.win.ctx
+        if self.server_switch is not None:
+            running = ctx.manager.service_running(self.card.tunnel_name, self.route)
+            self.server_switch.blockSignals(True)
+            self.server_switch.setChecked(running)
+            self.server_switch.blockSignals(False)
+
+
 class TunnelCard(QFrame):
-    def __init__(self, win: "MainWindow", info: TunnelInfo, meta: TunnelMeta):
+    def __init__(self, win: "MainWindow", info, meta: TunnelMeta):
         super().__init__()
         self.setObjectName("card")
         self.win = win
@@ -37,104 +129,101 @@ class TunnelCard(QFrame):
         self.meta = meta
         self.tunnel_name = info.name
 
+        palette = current_palette(win.ctx.store.settings.theme)
+        icon_color = palette["text"]
+
         self.dot = QLabel()
         self.dot.setFixedSize(12, 12)
         title = QLabel(info.name)
         title.setObjectName("cardTitle")
-        sub = QLabel(f"{meta.hostname or '(도메인 미설정)'}  ·  "
-                     f"{meta.service or '(서비스 미설정)'}")
-        sub.setObjectName("cardSub")
         self.state_label = QLabel()
         self.state_label.setObjectName("cardSub")
 
-        icon_color = current_palette(win.ctx.store.settings.theme)["text"]
-        self.toggle_btn = QPushButton()
-        self.server_btn = QPushButton("서버")
-        self.server_btn.setVisible(bool(meta.server_cmd))
+        self.tunnel_switch = ToggleSwitch(palette)
+        self.tunnel_switch.toggled.connect(self._on_tunnel_toggled)
         log_btn = QPushButton("로그")
         log_btn.setIcon(make_icon("log", icon_color))
+        log_btn.clicked.connect(lambda: win._open_log_tunnel(self.tunnel_name))
         menu_btn = QPushButton()
         menu_btn.setIcon(make_icon("dots", icon_color))
         menu_btn.setFixedWidth(34)
+        menu_btn.clicked.connect(lambda: self._tunnel_menu(menu_btn))
 
-        self.toggle_btn.clicked.connect(self.toggle_tunnel)
-        self.server_btn.clicked.connect(self.toggle_server)
-        log_btn.clicked.connect(lambda: win._open_log(self.tunnel_name))
-        menu_btn.clicked.connect(lambda: self._menu(menu_btn))
+        header = QHBoxLayout()
+        header.addWidget(self.dot)
+        header.addWidget(title)
+        header.addWidget(self.state_label)
+        header.addStretch(1)
+        header.addWidget(self.tunnel_switch)
+        header.addWidget(log_btn)
+        header.addWidget(menu_btn)
 
-        left = QVBoxLayout()
-        top = QHBoxLayout()
-        top.addWidget(self.dot)
-        top.addWidget(title)
-        top.addWidget(self.state_label)
-        top.addStretch(1)
-        left.addLayout(top)
-        left.addWidget(sub)
+        self.route_rows: list[RouteRow] = []
+        routes_lay = QVBoxLayout()
+        routes_lay.setContentsMargins(24, 4, 0, 0)
+        for route in meta.routes:
+            row = RouteRow(self, route)
+            self.route_rows.append(row)
+            routes_lay.addWidget(row)
 
-        lay = QHBoxLayout(self)
-        lay.addLayout(left, 1)
-        lay.addWidget(self.toggle_btn)
-        lay.addWidget(self.server_btn)
-        lay.addWidget(log_btn)
-        lay.addWidget(menu_btn)
+        add_route_btn = QPushButton("+ 라우트 추가")
+        add_route_btn.setIcon(make_icon("plus", icon_color))
+        add_route_btn.clicked.connect(lambda: win._add_route(self))
+        add_row = QHBoxLayout()
+        add_row.setContentsMargins(24, 4, 0, 0)
+        add_row.addWidget(add_route_btn)
+        add_row.addStretch(1)
+
+        lay = QVBoxLayout(self)
+        lay.addLayout(header)
+        lay.addLayout(routes_lay)
+        lay.addLayout(add_row)
+
         self.update_state()
 
     # ---- 동작 ----
-    def toggle_tunnel(self):
+    def _on_tunnel_toggled(self, checked: bool):
         ctx = self.win.ctx
-        st = ctx.manager.tunnel_state(self.tunnel_name, ctx.runner.name)
         try:
-            if st in (TunnelState.STOPPED, TunnelState.ERROR):
+            if checked:
                 if not ctx.runner.file_exists(ctx.client.config_path(self.tunnel_name)):
                     QMessageBox.warning(self, "설정 없음",
                                         f"config-{self.tunnel_name}.yml 이 없습니다.\n"
-                                        "카드의 메뉴 버튼에서 설정을 편집하세요.")
+                                        "라우트를 먼저 추가하세요.")
+                    self.tunnel_switch.blockSignals(True)
+                    self.tunnel_switch.setChecked(False)
+                    self.tunnel_switch.blockSignals(False)
                     return
-                ctx.manager.start_tunnel(self.tunnel_name, ctx.runner, ctx.client)
-                if self.meta.start_together and self.meta.server_cmd \
-                        and not ctx.manager.server_running(self.tunnel_name, ctx.runner.name):
-                    ctx.manager.start_server(self.meta, ctx.runner)
+                ctx.manager.start_tunnel(self.tunnel_name, ctx.client)
+                for route in self.meta.routes:
+                    if route.server.autostart and route.server.start_cmd \
+                            and not ctx.manager.service_running(self.tunnel_name, route):
+                        ctx.manager.start_service(self.tunnel_name, route)
             else:
-                ctx.manager.stop_tunnel(self.tunnel_name, ctx.runner.name)
+                ctx.manager.stop_tunnel(self.tunnel_name)
         except Exception as ex:
             QMessageBox.critical(self, "오류", str(ex))
         self.update_state()
 
-    def toggle_server(self):
-        ctx = self.win.ctx
-        try:
-            if ctx.manager.server_running(self.tunnel_name, ctx.runner.name):
-                ctx.manager.stop_server(self.tunnel_name, ctx.runner.name)
-            else:
-                ctx.manager.start_server(self.meta, ctx.runner)
-        except Exception as ex:
-            QMessageBox.critical(self, "서버 오류", str(ex))
-        self.update_state()
-
-    def _menu(self, anchor: QPushButton):
+    def _tunnel_menu(self, anchor: QPushButton):
+        palette = current_palette(self.win.ctx.store.settings.theme)
         m = QMenu(self)
-        edit = QAction("편집", m)
-        delete = QAction("삭제", m)
-        edit.triggered.connect(lambda: self.win._edit_tunnel(self))
-        delete.triggered.connect(lambda: self.win._delete_tunnel(self))
-        m.addAction(edit)
-        m.addAction(delete)
+        danger_menu_action(m, "삭제", palette, lambda: self.win._delete_tunnel(self))
         m.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
     # ---- 표시 갱신 ----
     def update_state(self):
         ctx = self.win.ctx
-        icon_color = current_palette(ctx.store.settings.theme)["text"]
-        st = ctx.manager.tunnel_state(self.tunnel_name, ctx.runner.name)
+        st = ctx.manager.tunnel_state(self.tunnel_name)
         self.dot.setStyleSheet(
             f"background: {STATE_COLORS[st]}; border-radius: 6px;")
         self.state_label.setText(STATE_LABELS[st])
         running = st in (TunnelState.STARTING, TunnelState.RUNNING)
-        self.toggle_btn.setText("끄기" if running else "켜기")
-        self.toggle_btn.setIcon(make_icon("stop" if running else "play", icon_color))
-        if self.meta.server_cmd:
-            s_run = ctx.manager.server_running(self.tunnel_name, ctx.runner.name)
-            self.server_btn.setIcon(make_icon("stop" if s_run else "play", icon_color))
+        self.tunnel_switch.blockSignals(True)
+        self.tunnel_switch.setChecked(running)
+        self.tunnel_switch.blockSignals(False)
+        for row in self.route_rows:
+            row.update_state()
 
 
 class MainWindow(QWidget):
@@ -145,7 +234,7 @@ class MainWindow(QWidget):
         self._log_viewers: dict[str, "LogViewer"] = {}
         self._current_target_index = 0
         self.setWindowTitle("Cloudflare Tunnel GUI")
-        self.resize(780, 580)
+        self.resize(820, 620)
 
         # 상단 바
         self.target_combo = QComboBox()
@@ -189,9 +278,14 @@ class MainWindow(QWidget):
         self._style_banner()
         self.banner.hide()
 
+        self.info_banner = QLabel()
+        self._style_info_banner()
+        self.info_banner.hide()
+
         root = QVBoxLayout(self)
         root.addLayout(top)
         root.addWidget(self.banner)
+        root.addWidget(self.info_banner)
         root.addWidget(scroll, 1)
 
         self._reload_targets()
@@ -215,6 +309,26 @@ class MainWindow(QWidget):
         self.banner.setStyleSheet(
             f"background:{p['danger_bg']};color:{p['danger']};"
             "padding:6px;border-radius:6px;")
+
+    def _style_info_banner(self):
+        p = current_palette(self.ctx.store.settings.theme)
+        self.info_banner.setStyleSheet(
+            f"background:{p['panel2']};color:{p['accent2']};"
+            f"padding:6px;border-radius:6px;border:1px solid {p['border']};")
+
+    # ---- 실행 여부 확인 ----
+    def _any_running(self) -> bool:
+        if not self.cards:
+            return False
+        self.ctx.manager.refresh([c.meta for c in self.cards])
+        for c in self.cards:
+            if self.ctx.manager.tunnel_state(c.tunnel_name) in (
+                    TunnelState.RUNNING, TunnelState.STARTING):
+                return True
+            for r in c.meta.routes:
+                if self.ctx.manager.service_running(c.tunnel_name, r):
+                    return True
+        return False
 
     # ---- 대상 전환 ----
     def _reload_targets(self):
@@ -243,16 +357,17 @@ class MainWindow(QWidget):
             self._reload_targets()
             return
 
-        if self.ctx.manager.any_running():
+        if self._any_running():
             ok = QMessageBox.question(
                 self, "대상 전환",
-                "대상 전환 시 현재 대상에서 실행 중인 터널/서버가 모두 중지됩니다. 계속할까요?")
+                "현재 대상에서 실행 중인 터널/서버가 있습니다.\n"
+                "전환해도 계속 실행되며, 전환하는 동안 화면에서만 보이지 않게 됩니다. "
+                "계속할까요?")
             if ok != QMessageBox.StandardButton.Yes:
                 self.target_combo.blockSignals(True)
                 self.target_combo.setCurrentIndex(self._current_target_index)
                 self.target_combo.blockSignals(False)
                 return
-            self.ctx.manager.stop_all()
 
         profile = self.target_combo.currentData()
         self.banner.hide()
@@ -292,44 +407,44 @@ class MainWindow(QWidget):
             c.setParent(None)
         self.cards.clear()
 
-        # tunnels dict는 local/remote 대상 간에 공유된다 (v1 한계: 이름 충돌 시 메타가 섞일 수 있음)
+        # tunnels dict는 local/remote 대상 간에 공유된다 (v1부터의 한계: 이름
+        # 충돌 시 메타가 섞일 수 있음)
         metas = self.ctx.store.settings.tunnels
-        self._meta_restored = False
+        restored = False
         for info in infos:
-            meta = metas.get(info.name) or self._meta_from_config(info.name)
+            meta = metas.get(info.name)
+            if meta is None:
+                meta = self._meta_from_config(info.name)
+                metas[info.name] = meta
+                restored = True
             card = TunnelCard(self, info, meta)
             self.list_lay.insertWidget(self.list_lay.count() - 1, card)
             self.cards.append(card)
-        if self._meta_restored:
+        if restored:
             self.ctx.store.save()
 
     def _meta_from_config(self, name: str) -> TunnelMeta:
-        """settings.json에 없는 터널: config yml에서 hostname/service 복원."""
+        """settings.json에 없는 터널: config yml에서 라우트 목록을 복원."""
         meta = TunnelMeta(name=name)
         try:
             path = self.ctx.client.config_path(name)
             if self.ctx.runner.file_exists(path):
                 cfg = parse_config(self.ctx.runner.read_file(path))
-                meta.hostname, meta.service = get_main_ingress(cfg)
+                for hostname, service in get_routes(cfg):
+                    meta.routes.append(
+                        RouteMeta(id=new_route_id(), hostname=hostname, service=service))
         except Exception:
             pass
-        self.ctx.store.settings.tunnels[name] = meta
-        self._meta_restored = True
         return meta
 
-    # ---- 생성/편집/삭제 ----
+    # ---- 생성/삭제 ----
     def _create_tunnel(self):
         wiz = TunnelWizard(self.ctx, [c.tunnel_name for c in self.cards], self)
         if wiz.exec() == wiz.DialogCode.Accepted and wiz.created_meta:
-            self.ctx.store.settings.tunnels[wiz.created_meta.name] = wiz.created_meta
-            self.ctx.store.save()
-            self.refresh()
-
-    def _edit_tunnel(self, card: TunnelCard):
-        from app.ui.edit_dialog import EditTunnelDialog  # Task 12
-        dlg = EditTunnelDialog(self.ctx, card.meta, self)
-        if dlg.exec() == dlg.DialogCode.Accepted:
-            self.ctx.store.save()
+            meta = wiz.created_meta
+            if isinstance(meta, TunnelMeta):
+                self.ctx.store.settings.tunnels[meta.name] = meta
+                self.ctx.store.save()
             self.refresh()
 
     def _delete_tunnel(self, card: TunnelCard):
@@ -337,20 +452,24 @@ class MainWindow(QWidget):
         ok = QMessageBox.question(
             self, "터널 삭제",
             f"'{name}' 터널을 삭제할까요?\n\n"
-            "- 실행 중이면 중지됩니다\n"
+            "- 실행 중인 터널과 모든 라우트의 서버가 중지됩니다\n"
             "- config 파일이 삭제됩니다\n"
             "- DNS CNAME 레코드는 Cloudflare 대시보드에서 직접 삭제해야 합니다")
         if ok != QMessageBox.StandardButton.Yes:
             return
-        runner_name = self.ctx.runner.name
-        self.ctx.manager.stop_tunnel(name, runner_name)
-        self.ctx.manager.stop_server(name, runner_name)
-        # 프로세스가 완전히 종료될 때까지 잠시 대기 (cloudflared가 연결을 정리할 시간)
-        for _ in range(10):
-            if self.ctx.manager.tunnel_state(name, runner_name) in (
-                    TunnelState.STOPPED, TunnelState.ERROR):
-                break
-            time.sleep(0.2)
+
+        for route in card.meta.routes:
+            try:
+                self.ctx.manager.stop_service(name, route)
+            except Exception:
+                pass
+        try:
+            self.ctx.manager.stop_tunnel(name)
+        except Exception:
+            pass
+        # cloudflared가 연결을 정리할 시간을 준다 (곧바로 delete하면 "active
+        # connection" 오류가 날 수 있다).
+        time.sleep(1.0)
 
         deleted = False
         try:
@@ -376,19 +495,75 @@ class MainWindow(QWidget):
                                     f"터널은 삭제되었지만 config 파일 삭제에 실패했습니다.\n{ex}")
         self.refresh()
 
-    # ---- 이후 태스크에서 연결 ----
-    def _open_log(self, name: str):
+    # ---- 라우트 추가/편집/삭제 ----
+    def _add_route(self, card: TunnelCard):
+        from app.ui.route_dialog import RouteDialog
+        dlg = RouteDialog(self.ctx, card.meta, None, self)
+        if dlg.exec() == dlg.DialogCode.Accepted:
+            self._notify_restart_needed(card.tunnel_name)
+            self.refresh()
+
+    def _edit_route(self, card: TunnelCard, route: RouteMeta):
+        from app.ui.route_dialog import RouteDialog
+        dlg = RouteDialog(self.ctx, card.meta, route, self)
+        if dlg.exec() == dlg.DialogCode.Accepted:
+            self._notify_restart_needed(card.tunnel_name)
+            self.refresh()
+
+    def _delete_route(self, card: TunnelCard, route: RouteMeta):
+        ok = QMessageBox.question(
+            self, "라우트 삭제",
+            f"'{route.hostname or route.id}' 라우트를 삭제할까요?\n\n"
+            "- 서비스가 실행 중이면 중지됩니다\n"
+            "- DNS CNAME 레코드는 Cloudflare 대시보드에서 직접 삭제해야 합니다")
+        if ok != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.ctx.manager.stop_service(card.tunnel_name, route)
+        except Exception:
+            pass
+        card.meta.routes = [r for r in card.meta.routes if r.id != route.id]
+        try:
+            path = self.ctx.client.config_path(card.tunnel_name)
+            if self.ctx.runner.file_exists(path):
+                text = self.ctx.runner.read_file(path)
+                routes = [(r.hostname, r.service) for r in card.meta.routes]
+                self.ctx.runner.write_file(path, set_routes(text, routes))
+        except Exception as ex:
+            QMessageBox.warning(self, "config 갱신 실패", str(ex))
+        self.ctx.store.settings.tunnels[card.tunnel_name] = card.meta
+        self.ctx.store.save()
+        self._notify_restart_needed(card.tunnel_name)
+        self.refresh()
+
+    def _notify_restart_needed(self, tunnel_name: str):
+        if self.ctx.manager.tunnel_state(tunnel_name) in (
+                TunnelState.RUNNING, TunnelState.STARTING):
+            self.info_banner.setText("변경을 적용하려면 터널을 껐다 켜야 합니다.")
+            self.info_banner.show()
+
+    # ---- 로그 ----
+    def _open_log_tunnel(self, name: str):
+        self._open_log_viewer(
+            f"tunnel:{name}", name, {"터널": self.ctx.manager.log_path_for_tunnel(name)})
+
+    def _open_log_service(self, tunnel_name: str, route: RouteMeta):
+        title = f"{tunnel_name} · {route.hostname or route.id}"
+        self._open_log_viewer(
+            f"svc:{tunnel_name}:{route.id}", title,
+            {"서버": self.ctx.manager.log_path_for_service(tunnel_name, route)})
+
+    def _open_log_viewer(self, key: str, title: str, log_paths: dict[str, str]):
         from app.ui.log_viewer import LogViewer
-        if name in self._log_viewers:
-            viewer = self._log_viewers[name]
+        if key in self._log_viewers:
+            viewer = self._log_viewers[key]
             if viewer.isVisible():
                 viewer.raise_()
                 viewer.activateWindow()
                 return
-        log_paths = {"터널": self.ctx.manager.log_path_for_tunnel(name)}
-        viewer = LogViewer(self.ctx, name, log_paths, self)
-        self._log_viewers[name] = viewer
-        viewer.destroyed.connect(lambda *_, n=name: self._log_viewers.pop(n, None))
+        viewer = LogViewer(self.ctx, title, log_paths, self)
+        self._log_viewers[key] = viewer
+        viewer.destroyed.connect(lambda *_, k=key: self._log_viewers.pop(k, None))
         viewer.show()
 
     def _open_settings(self):
@@ -413,34 +588,37 @@ class MainWindow(QWidget):
         for viewer in list(self._log_viewers.values()):
             apply_titlebar_theme(viewer, mode == "dark")
         self._style_banner()
+        self._style_info_banner()
         icon_color = current_palette(mode)["text"]
         self.refresh_btn.setIcon(make_icon("refresh", icon_color))
         self.settings_btn.setIcon(make_icon("gear", icon_color))
         self._reload_targets()
-        self.refresh()
+        self.refresh()  # 카드를 새 팔레트로 다시 그린다 (ToggleSwitch 포함)
 
     def _tick(self):
+        self.ctx.manager.refresh([c.meta for c in self.cards])
         for c in self.cards:
             c.update_state()
 
     # ---- 단축키 ----
     def _shortcut_tunnel(self, idx: int):
         if idx < len(self.cards):
-            self.cards[idx].toggle_tunnel()
+            self.cards[idx].tunnel_switch.toggle()
 
     def _shortcut_server(self, idx: int):
         if idx < len(self.cards):
-            self.cards[idx].toggle_server()
+            card = self.cards[idx]
+            if card.route_rows and card.route_rows[0].server_switch is not None:
+                card.route_rows[0].server_switch.toggle()
 
     # ---- 종료 정리 ----
     def closeEvent(self, event):
-        if self.ctx.manager.any_running():
-            ok = QMessageBox.question(
-                self, "종료", "실행 중인 터널/서버가 있습니다.\n"
-                              "종료하면 모두 중지됩니다. 종료할까요?")
-            if ok != QMessageBox.StandardButton.Yes:
-                event.ignore()
-                return
-        self.ctx.manager.stop_all()
-        self.ctx.set_local()  # SSH 연결 정리
+        # v2: GUI는 실행 주체가 아니라 관찰자다. 종료 시 아무것도 중지하지
+        # 않는다 - 터널/서버는 대상 머신에서 계속 실행되고, 다음 실행 때
+        # run 디렉터리를 읽어 상태를 복원한다.
+        if self._any_running():
+            QMessageBox.information(
+                self, "종료",
+                "터널과 서버는 계속 실행됩니다.\n다시 실행하면 상태를 이어서 표시합니다.")
+        self.ctx.set_local()  # SSH 연결 정리 (원격 프로세스는 그대로 유지됨)
         event.accept()
