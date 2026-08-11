@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QMessageBox,
                              QPushButton, QVBoxLayout)
 
 from app.context import AppContext
+from app.ui.winutil import apply_titlebar_theme
 
 
 def needs_onboarding(ctx: AppContext) -> bool:
@@ -22,7 +23,7 @@ class OnboardingDialog(QDialog):
         self.setMinimumWidth(460)
 
         lay = QVBoxLayout(self)
-        title = QLabel("🌩️ Cloudflare Tunnel GUI 초기 설정")
+        title = QLabel("Cloudflare Tunnel GUI 초기 설정")
         title.setStyleSheet("font-size: 18px; font-weight: 700;")
         lay.addWidget(title)
 
@@ -58,6 +59,8 @@ class OnboardingDialog(QDialog):
         self._timer.start(2000)
         self._refresh()
 
+        apply_titlebar_theme(self, ctx.store.settings.theme == "dark")
+
     def _poll_worker(self):
         try:
             client = self.ctx.client
@@ -76,14 +79,14 @@ class OnboardingDialog(QDialog):
         cert = status is not None and installed and cert_exists
 
         if status is None:
-            install_text = "① cloudflared 설치: 확인 중..."
+            install_text = "1. cloudflared 설치: 확인 중..."
         elif installed:
-            install_text = f"① cloudflared 설치: ✅ {ver}"
+            install_text = f"1. cloudflared 설치: [완료] {ver}"
         else:
-            install_text = "① cloudflared 설치: ❌ 미설치"
+            install_text = "1. cloudflared 설치: [필요] 미설치"
 
         if self._install_exit not in (None, 0) and not installed:
-            install_text += " ❌ 설치 실패 — 다시 시도하세요"
+            install_text += " [실패] 설치 실패 — 다시 시도하세요"
             self.install_btn.setEnabled(True)
             self.install_btn.setVisible(True)
             self._install_exit = None
@@ -92,8 +95,8 @@ class OnboardingDialog(QDialog):
         if status is not None:
             self.install_btn.setVisible(not installed)
         self.login_label.setText(
-            f"② Cloudflare 로그인 (cert.pem): {'✅ 완료' if cert else '❌ 필요'}"
-            if status is not None else "② Cloudflare 로그인 (cert.pem): 확인 중...")
+            f"2. Cloudflare 로그인 (cert.pem): {'[완료]' if cert else '[필요]'}"
+            if status is not None else "2. Cloudflare 로그인 (cert.pem): 확인 중...")
         self.login_btn.setVisible(installed and not cert)
         self.done_btn.setEnabled(installed and cert)
 

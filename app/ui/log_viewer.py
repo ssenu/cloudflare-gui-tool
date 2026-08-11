@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QPlainTextEdit,
 
 from app.context import AppContext
 from app.core.process_mgr import LogBuffer
+from app.ui.winutil import apply_titlebar_theme
 
 ERROR_RE = re.compile(r"\b(ERR|error|failed|Failed)\b")
 
@@ -73,6 +74,8 @@ class LogViewer(QDialog):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll)
         self._timer.start(200)
+
+        apply_titlebar_theme(self, ctx.store.settings.theme == "dark")
 
     def _poll(self):
         self.t_tab.poll()

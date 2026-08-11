@@ -13,8 +13,12 @@ from app.core.cloudflared import CloudflaredError, TunnelInfo
 from app.core.config_yml import get_main_ingress, parse_config
 from app.core.process_mgr import TunnelState
 from app.core.store import TunnelMeta
-from app.ui.theme import STATE_COLORS
+from app.ui.icons import make_icon
+from app.ui.theme import STATE_COLORS, build_qss, current_palette
+from app.ui.winutil import apply_titlebar_theme
 from app.ui.wizard import TunnelWizard
+
+ADD_SSH_TARGET = "__add__"
 
 STATE_LABELS = {
     TunnelState.STOPPED: "중지됨",
@@ -33,7 +37,8 @@ class TunnelCard(QFrame):
         self.meta = meta
         self.tunnel_name = info.name
 
-        self.dot = QLabel("●")
+        self.dot = QLabel()
+        self.dot.setFixedSize(12, 12)
         title = QLabel(info.name)
         title.setObjectName("cardTitle")
         sub = QLabel(f"{meta.hostname or '(도메인 미설정)'}  ·  "
@@ -42,11 +47,14 @@ class TunnelCard(QFrame):
         self.state_label = QLabel()
         self.state_label.setObjectName("cardSub")
 
+        icon_color = current_palette(win.ctx.store.settings.theme)["text"]
         self.toggle_btn = QPushButton()
-        self.server_btn = QPushButton("▶ 서버")
+        self.server_btn = QPushButton("서버")
         self.server_btn.setVisible(bool(meta.server_cmd))
-        log_btn = QPushButton("📜 로그")
-        menu_btn = QPushButton("⋮")
+        log_btn = QPushButton("로그")
+        log_btn.setIcon(make_icon("log", icon_color))
+        menu_btn = QPushButton()
+        menu_btn.setIcon(make_icon("dots", icon_color))
         menu_btn.setFixedWidth(34)
 
         self.toggle_btn.clicked.connect(self.toggle_tunnel)
@@ -80,7 +88,7 @@ class TunnelCard(QFrame):
                 if not ctx.runner.file_exists(ctx.client.config_path(self.tunnel_name)):
                     QMessageBox.warning(self, "설정 없음",
                                         f"config-{self.tunnel_name}.yml 이 없습니다.\n"
-                                        "⋮ 메뉴에서 설정을 편집하세요.")
+                                        "카드의 메뉴 버튼에서 설정을 편집하세요.")
                     return
                 ctx.manager.start_tunnel(self.tunnel_name, ctx.runner, ctx.client)
                 if self.meta.start_together and self.meta.server_cmd \
@@ -116,14 +124,17 @@ class TunnelCard(QFrame):
     # ---- 표시 갱신 ----
     def update_state(self):
         ctx = self.win.ctx
+        icon_color = current_palette(ctx.store.settings.theme)["text"]
         st = ctx.manager.tunnel_state(self.tunnel_name, ctx.runner.name)
-        self.dot.setStyleSheet(f"color: {STATE_COLORS[st]}; font-size: 16px;")
+        self.dot.setStyleSheet(
+            f"background: {STATE_COLORS[st]}; border-radius: 6px;")
         self.state_label.setText(STATE_LABELS[st])
         running = st in (TunnelState.STARTING, TunnelState.RUNNING)
-        self.toggle_btn.setText("■ 끄기" if running else "▶ 켜기")
+        self.toggle_btn.setText("끄기" if running else "켜기")
+        self.toggle_btn.setIcon(make_icon("stop" if running else "play", icon_color))
         if self.meta.server_cmd:
             s_run = ctx.manager.server_running(self.tunnel_name, ctx.runner.name)
-            self.server_btn.setText("■ 서버" if s_run else "▶ 서버")
+            self.server_btn.setIcon(make_icon("stop" if s_run else "play", icon_color))
 
 
 class MainWindow(QWidget):
@@ -138,21 +149,27 @@ class MainWindow(QWidget):
 
         # 상단 바
         self.target_combo = QComboBox()
-        refresh_btn = QPushButton("🔄 새로고침")
-        add_btn = QPushButton("＋ 터널 생성")
-        add_btn.setObjectName("primary")
-        settings_btn = QPushButton("⚙ 설정")
-        refresh_btn.clicked.connect(self.refresh)
-        add_btn.clicked.connect(self._create_tunnel)
-        settings_btn.clicked.connect(self._open_settings)
+        icon_color = current_palette(ctx.store.settings.theme)["text"]
+        self.refresh_btn = QPushButton()
+        self.refresh_btn.setIcon(make_icon("refresh", icon_color))
+        self.refresh_btn.setFixedWidth(40)
+        self.refresh_btn.setToolTip("새로고침")
+        self.add_btn = QPushButton("터널 생성")
+        self.add_btn.setIcon(make_icon("plus", "#ffffff"))
+        self.add_btn.setObjectName("primary")
+        self.settings_btn = QPushButton("설정")
+        self.settings_btn.setIcon(make_icon("gear", icon_color))
+        self.refresh_btn.clicked.connect(self.refresh)
+        self.add_btn.clicked.connect(self._create_tunnel)
+        self.settings_btn.clicked.connect(self._open_settings)
         self.target_combo.currentIndexChanged.connect(self._switch_target)
 
         top = QHBoxLayout()
         top.addWidget(QLabel("대상:"))
         top.addWidget(self.target_combo, 1)
-        top.addWidget(refresh_btn)
-        top.addWidget(add_btn)
-        top.addWidget(settings_btn)
+        top.addWidget(self.refresh_btn)
+        top.addWidget(self.add_btn)
+        top.addWidget(self.settings_btn)
 
         # 카드 목록
         self.list_lay = QVBoxLayout()
@@ -175,6 +192,7 @@ class MainWindow(QWidget):
 
         self._reload_targets()
         self.refresh()
+        apply_titlebar_theme(self, ctx.store.settings.theme == "dark")
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -190,14 +208,31 @@ class MainWindow(QWidget):
 
     # ---- 대상 전환 ----
     def _reload_targets(self):
+        icon_color = current_palette(self.ctx.store.settings.theme)["text"]
         self.target_combo.blockSignals(True)
         self.target_combo.clear()
-        self.target_combo.addItem("🖥️ 이 PC", None)
+        self.target_combo.addItem(make_icon("monitor", icon_color), "이 PC", None)
         for p in self.ctx.store.settings.ssh_profiles:
-            self.target_combo.addItem(f"🍓 {p.name} ({p.host})", p)
+            self.target_combo.addItem(
+                make_icon("server", icon_color), f"{p.name} ({p.host})", p)
+        self.target_combo.addItem(
+            make_icon("plus", icon_color), "SSH 대상 추가...", ADD_SSH_TARGET)
+        idx = self._current_target_index
+        if idx >= self.target_combo.count():
+            idx = 0
+        self.target_combo.setCurrentIndex(idx)
         self.target_combo.blockSignals(False)
 
     def _switch_target(self):
+        if self.target_combo.currentData() == ADD_SSH_TARGET:
+            self.target_combo.blockSignals(True)
+            self.target_combo.setCurrentIndex(self._current_target_index)
+            self.target_combo.blockSignals(False)
+            from app.ui.ssh_manager import SshManagerDialog
+            SshManagerDialog(self.ctx, self).exec()
+            self._reload_targets()
+            return
+
         if self.ctx.manager.any_running():
             ok = QMessageBox.question(
                 self, "대상 전환",
@@ -347,8 +382,26 @@ class MainWindow(QWidget):
 
     def _open_settings(self):
         from app.ui.settings import SettingsDialog
+        prev_theme = self.ctx.store.settings.theme
         SettingsDialog(self.ctx, self).exec()
         self._reload_targets()
+        if self.ctx.store.settings.theme != prev_theme:
+            self._apply_theme()
+
+    def _apply_theme(self):
+        from PyQt6.QtWidgets import QApplication
+        mode = self.ctx.store.settings.theme
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(build_qss(mode))
+        apply_titlebar_theme(self, mode == "dark")
+        for viewer in list(self._log_viewers.values()):
+            apply_titlebar_theme(viewer, mode == "dark")
+        icon_color = current_palette(mode)["text"]
+        self.refresh_btn.setIcon(make_icon("refresh", icon_color))
+        self.settings_btn.setIcon(make_icon("gear", icon_color))
+        self._reload_targets()
+        self.refresh()
 
     def _tick(self):
         for c in self.cards:

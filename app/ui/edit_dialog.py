@@ -7,6 +7,7 @@ from app.context import AppContext
 from app.core.config_yml import update_service
 from app.core.store import TunnelMeta
 from app.core.wizard_logic import validate_service
+from app.ui.winutil import apply_titlebar_theme
 
 
 class EditTunnelDialog(QDialog):
@@ -38,6 +39,8 @@ class EditTunnelDialog(QDialog):
         btns.accepted.connect(self._save)
         btns.rejected.connect(self.reject)
         form.addRow(btns)
+
+        apply_titlebar_theme(self, ctx.store.settings.theme == "dark")
 
     def _save(self):
         service = self.service_edit.text().strip()

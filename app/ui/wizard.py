@@ -11,6 +11,9 @@ from app.context import AppContext
 from app.core.store import TunnelMeta
 from app.core.wizard_logic import (execute_creation, plan_steps, validate_name,
                                    validate_service, validate_subdomain)
+from app.ui.icons import make_icon
+from app.ui.theme import current_palette
+from app.ui.winutil import apply_titlebar_theme
 
 
 class TunnelWizard(QDialog):
@@ -35,10 +38,12 @@ class TunnelWizard(QDialog):
             "padding: 8px; border-radius: 6px;")
         self.preview.setWordWrap(True)
 
+        icon_color = current_palette(ctx.store.settings.theme)["text"]
         self.back_btn = QPushButton("← 이전")
         self.next_btn = QPushButton("다음 →")
         self.next_btn.setObjectName("primary")
-        self.rollback_btn = QPushButton("🗑 터널 롤백(삭제)")
+        self.rollback_btn = QPushButton("터널 롤백(삭제)")
+        self.rollback_btn.setIcon(make_icon("trash", icon_color))
         self.rollback_btn.setVisible(False)
         self.back_btn.clicked.connect(self._back)
         self.next_btn.clicked.connect(self._on_next_clicked)  # 상태 기반 디스패처
@@ -61,6 +66,8 @@ class TunnelWizard(QDialog):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._drain_events)
         self._timer.start(150)
+
+        apply_titlebar_theme(self, ctx.store.settings.theme == "dark")
 
     # ---- 페이지 구성 ----
     def _page(self, title: str, *widgets) -> QWidget:
@@ -95,18 +102,18 @@ class TunnelWizard(QDialog):
         self.status_label = QLabel()
         self.status_label.setWordWrap(True)
 
-        self.stack.addWidget(self._page("① 터널 이름",
+        self.stack.addWidget(self._page("1. 터널 이름",
                                         QLabel("터널을 구분할 이름입니다."), self.name_edit))
-        self.stack.addWidget(self._page("② 연결할 도메인",
+        self.stack.addWidget(self._page("2. 연결할 도메인",
                                         QLabel("서브도메인"), self.sub_edit,
                                         QLabel("루트 도메인"), self.domain_edit))
-        self.stack.addWidget(self._page("③ 로컬 서비스 주소",
+        self.stack.addWidget(self._page("3. 로컬 서비스 주소",
                                         QLabel("터널이 전달할 로컬 서비스입니다."),
                                         self.service_edit))
-        self.stack.addWidget(self._page("④ 웹서버 명령 (선택)",
+        self.stack.addWidget(self._page("4. 웹서버 명령 (선택)",
                                         self.cmd_edit, self.cwd_edit, browse,
                                         self.together_chk))
-        self.stack.addWidget(self._page("⑤ 실행", self.status_label))
+        self.stack.addWidget(self._page("5. 실행", self.status_label))
 
         for e in (self.name_edit, self.sub_edit, self.domain_edit,
                   self.service_edit):
@@ -195,7 +202,7 @@ class TunnelWizard(QDialog):
         client = self.ctx.client
 
         def progress(idx, msg, ok):
-            self._events.append(("log", f"{'✅' if ok else '❌'} {msg}"))
+            self._events.append(("log", f"{'[성공]' if ok else '[실패]'} {msg}"))
             # idx >= 1이면 create_tunnel(idx==0)이 성공했다는 뜻
             # 워커 스레드에서 동기 설정 (이벤트 드레인 대기 불필요)
             if idx >= 1:
@@ -253,7 +260,7 @@ class TunnelWizard(QDialog):
             elif ev[0] == "fail":
                 _, msg, tunnel_created, name = ev
                 self.status_label.setText(
-                    self.status_label.text() + f"\n❌ 실패: {msg}")
+                    self.status_label.text() + f"\n[실패] {msg}")
                 # 터널이 생성됐으면 롤백 버튼 표시, 아니면 닫기만
                 self._next_mode = "close"
                 self.next_btn.setText("닫기")
@@ -265,12 +272,12 @@ class TunnelWizard(QDialog):
                     self.back_btn.setVisible(True)
             elif ev[0] == "rollback_ok":
                 self.status_label.setText(
-                    self.status_label.text() + "\n✅ 터널 삭제 완료")
+                    self.status_label.text() + "\n[성공] 터널 삭제 완료")
                 self.rollback_btn.setVisible(False)
                 self.next_btn.setText("닫기")
                 self._next_mode = "close"
             elif ev[0] == "rollback_fail":
                 self.status_label.setText(
-                    self.status_label.text() + f"\n❌ 롤백 실패: {ev[1]}")
+                    self.status_label.text() + f"\n[실패] 롤백 실패: {ev[1]}")
                 self.next_btn.setText("닫기")
                 self._next_mode = "close"
