@@ -12,7 +12,8 @@ from app.context import AppContext
 from app.core.cloudflared import CloudflaredError
 from app.core.config_yml import get_routes, parse_config, set_routes
 from app.core.process_mgr import TunnelState
-from app.core.confirm import owner_label, route_display_label
+from app.core.confirm import (group_by_owner, owner_group_label, owner_label,
+                              route_display_label)
 from app.core.store import RouteMeta, SshProfile, TunnelMeta, new_route_id
 from app.ui.icons import make_icon
 from app.ui.theme import STATE_COLORS, build_qss, current_palette, ensure_qss_icons
@@ -233,6 +234,49 @@ class RouteRow(QWidget):
             f"background: {dot_color}; border-radius: {ROUTE_DOT_SIZE // 2}px;")
 
 
+class OwnerGroupHeader(QWidget):
+    """터널 목록을 기기별로 나누는 카테고리 머리글 (좌측 정렬).
+
+    아래에 붙는 카드들이 "이 기기에서 만든 터널"임을 한 줄로 알려준다.
+    카드마다 '만든 곳' 배지를 반복하는 대신 이 머리글 하나로 묶는다.
+    """
+
+    def __init__(self, owner_key: str, palette: dict, is_current: bool):
+        super().__init__()
+        self.owner_key = owner_key
+        self.label_text = owner_group_label(owner_key)
+
+        icon_name = "monitor" if owner_key == "local" else "server"
+        if not owner_label(owner_key):
+            icon_name = "server"
+        icon_label = QLabel()
+        icon_label.setPixmap(make_icon(icon_name, palette["muted"]).pixmap(14, 14))
+
+        self.name_label = QLabel(self.label_text)
+        self.name_label.setStyleSheet(
+            f"color: {palette['muted']}; font-size: 12px; font-weight: 600;")
+
+        # 지금 보고 있는 대상이 어느 그룹인지 표시해, 실행 가능한 터널이 어디
+        # 모여 있는지 한눈에 알 수 있게 한다.
+        self.current_label = QLabel("현재 대상")
+        self.current_label.setStyleSheet(
+            f"color: {palette['accent']}; font-size: 11px;")
+        self.current_label.setVisible(is_current)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFixedHeight(1)
+        line.setStyleSheet(f"background: {palette['border']}; border: none;")
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(2, 8, 2, 0)
+        lay.setSpacing(6)
+        lay.addWidget(icon_label)
+        lay.addWidget(self.name_label)
+        lay.addWidget(self.current_label)
+        lay.addWidget(line, 1)
+
+
 class TunnelCard(QFrame):
     def __init__(self, win: "MainWindow", info, meta: TunnelMeta,
                 has_credentials: bool = True, owner_key: str = ""):
@@ -256,17 +300,10 @@ class TunnelCard(QFrame):
         self.state_label = QLabel()
         self.state_label.setObjectName("cardSub")
 
-        # O1/C1: 이 터널을 만든(또는 옮겨온) 대상. owner_key는 계정 단위
-        # (Settings.tunnel_owners[tunnel_id])에서 조회한 값을 refresh()가
-        # 넘겨준다 - meta(대상별로 나뉘어 있음)에서 읽지 않는다. 비어 있으면
-        # 표시하지 않는다.
-        self.owner_badge = QLabel()
-        self.owner_badge.setStyleSheet(f"color: {palette['muted']}; font-size: 11px;")
-        owner_text = owner_label(owner_key)
-        if owner_text:
-            self.owner_badge.setText(f"만든 곳: {owner_text}")
-        else:
-            self.owner_badge.setVisible(False)
+        # O1/C1: 이 터널을 만든(또는 옮겨온) 대상. 카드에 배지로 붙이지 않고
+        # refresh()가 이 값으로 카드들을 기기별 카테고리로 묶는다 - 같은 문구가
+        # 카드마다 반복되는 대신 머리글 한 줄로 모인다.
+        self.owner_key = owner_key
 
         # O2: 현재 대상에 자격증명이 없으면 실행할 수 없다는 표시 + 토글 비활성화.
         self.cannot_run_label = QLabel()
@@ -294,7 +331,6 @@ class TunnelCard(QFrame):
         header.addWidget(self.dot)
         header.addWidget(title)
         header.addWidget(self.state_label)
-        header.addWidget(self.owner_badge)
         header.addWidget(self.cannot_run_label)
         header.addStretch(1)
         header.addWidget(_toggle_label("터널", palette))
@@ -407,6 +443,7 @@ class MainWindow(QWidget):
         super().__init__()
         self.ctx = ctx
         self.cards: list[TunnelCard] = []
+        self.group_headers: list[OwnerGroupHeader] = []
         self._log_viewers: dict[str, "LogViewer"] = {}
         # B3: 인덱스가 아니라 현재 대상의 식별자로 콤보를 재선택한다. None이면
         # 로컬, 문자열이면 SSH 프로필 이름. 인덱스만 쓰면 프로필이 삭제됐을 때
@@ -658,6 +695,10 @@ class MainWindow(QWidget):
         for c in self.cards:
             c.setParent(None)
         self.cards.clear()
+        for h in self.group_headers:
+            h.setParent(None)
+        self.group_headers.clear()
+        self._update_repos_btn()
 
         # 대상(로컬/SSH 프로필)마다 독립된 터널 설정을 쓴다. 계정 단위인
         # tunnel list는 대상 간에 같아도, config-*.yml/서버 실행 명령은
@@ -666,6 +707,7 @@ class MainWindow(QWidget):
         owners = self.ctx.store.settings.tunnel_owners
         restored = False
         owner_backfilled = False
+        pairs: list[tuple[str, TunnelCard]] = []
         for info in infos:
             meta = metas.get(info.name)
             if meta is None:
@@ -683,11 +725,44 @@ class MainWindow(QWidget):
             if info.id not in owners and has_creds:
                 owners[info.id] = self.ctx.runner.name
                 owner_backfilled = True
-            card = TunnelCard(self, info, meta, has_creds, owners.get(info.id, ""))
-            self.list_lay.insertWidget(self.list_lay.count() - 1, card)
-            self.cards.append(card)
+            owner_key = owners.get(info.id, "")
+            pairs.append((owner_key,
+                          TunnelCard(self, info, meta, has_creds, owner_key)))
+
+        # 기기(카테고리)별로 묶어 머리글 아래에 카드를 배치한다. cards는
+        # 화면에 보이는 순서와 같게 유지한다 - Ctrl+1~9 단축키가 이 순서를 쓴다.
+        palette = current_palette(self.ctx.store.settings.theme)
+        current_key = self.ctx.runner.name
+        for owner_key, cards in group_by_owner(pairs, self._owner_order()):
+            header = OwnerGroupHeader(owner_key, palette,
+                                      is_current=owner_key == current_key)
+            self.list_lay.insertWidget(self.list_lay.count() - 1, header)
+            self.group_headers.append(header)
+            for card in cards:
+                self.list_lay.insertWidget(self.list_lay.count() - 1, card)
+                self.cards.append(card)
+
         if restored or owner_backfilled:
             self.ctx.store.save()
+
+    def _owner_order(self) -> list[str]:
+        """카테고리 표시 순서: 이 PC → 설정에 등록된 SSH 프로필 순."""
+        return ["local"] + [f"ssh:{p.name}"
+                            for p in self.ctx.store.settings.ssh_profiles]
+
+    def _update_repos_btn(self):
+        """프로젝트(Git 클론)는 SSH 대상에서만 쓴다.
+
+        내 PC에서 개발하는 프로젝트는 이미 로컬에 있으므로 앱이 다시 클론할
+        이유가 없고, 클론 위치(repo_root, 기본 /srv/apps)도 리눅스 경로라
+        윈도우에서는 맞지 않는다. 그래서 로컬 대상일 땐 버튼을 비활성화한다.
+        """
+        remote = self.ctx.is_remote
+        self.repos_btn.setEnabled(remote)
+        self.repos_btn.setToolTip(
+            "" if remote else
+            "프로젝트 클론은 SSH로 연결한 원격 대상에서만 사용합니다. "
+            "상단 '대상'에서 원격 기기를 선택하세요.")
 
     def _meta_from_config(self, name: str) -> TunnelMeta:
         """settings.json에 없는 터널: config yml에서 라우트 목록을 복원."""
@@ -933,6 +1008,8 @@ class MainWindow(QWidget):
         self._open_modal(dlg)
 
     def _open_repos(self):
+        if not self.ctx.is_remote:
+            return  # 버튼이 비활성화돼 있지만 다른 경로로 불릴 때를 대비
         from app.ui.repo_manager import RepoManagerDialog
         dlg = RepoManagerDialog(self.ctx, self)
         self._open_modal(dlg)

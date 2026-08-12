@@ -87,6 +87,10 @@ class RouteDialog(QDialog):
         from_repo = QPushButton("프로젝트에서 선택")
         from_repo.setIcon(make_icon("folder", icon_color))
         from_repo.clicked.connect(self._pick_from_repo)
+        # 프로젝트(Git 클론)는 SSH 대상 전용이라 로컬에서는 고를 목록이 없다 -
+        # "폴더 선택..."과 정반대로 원격일 때만 보여준다.
+        if not ctx.is_remote:
+            from_repo.setVisible(False)
 
         self.autostart_chk = QCheckBox("터널을 켤 때 함께 시작")
         self.autostart_chk.setChecked(route.server.autostart if route else False)

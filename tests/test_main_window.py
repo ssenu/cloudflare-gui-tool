@@ -254,7 +254,7 @@ def test_reload_targets_falls_back_to_local_when_profile_deleted(qapp, tmp_path)
 # (C1). 아래 테스트들은 owner를 TunnelMeta가 아니라 tunnel_owners에 직접
 # 심어서, 실제 저장 위치를 기준으로 검증한다.
 
-def test_card_shows_owner_badge_when_owner_recorded(qapp, tmp_path):
+def test_group_header_shows_owner_device(qapp, tmp_path):
     runner = FakeRunner(home="/home/fake")
     runner.run_results[LIST_TUNNELS_CMD] = RunResult(
         0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
@@ -265,14 +265,15 @@ def test_card_shows_owner_badge_when_owner_recorded(qapp, tmp_path):
     win.ctx.store.settings.tunnel_owners["tid1"] = "local"
     win.refresh()
 
+    # 카드에는 '만든 곳' 문구가 없고, 대신 카테고리 머리글이 기기를 알려준다
+    assert [h.label_text for h in win.group_headers] == ["이 PC"]
     card = win.cards[0]
-    assert not card.owner_badge.isHidden()
-    assert "이 PC" in card.owner_badge.text()
+    assert not hasattr(card, "owner_badge")
     assert card.cannot_run_label.isHidden()
     assert card.tunnel_switch.isEnabled()
 
 
-def test_card_hides_owner_badge_when_owner_not_recorded(qapp, tmp_path):
+def test_group_header_falls_back_when_owner_not_recorded(qapp, tmp_path):
     runner = FakeRunner(home="/home/fake")
     runner.run_results[LIST_TUNNELS_CMD] = RunResult(
         0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
@@ -281,9 +282,27 @@ def test_card_hides_owner_badge_when_owner_not_recorded(qapp, tmp_path):
     win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1")
     win.refresh()
 
-    card = win.cards[0]
-    assert card.owner_badge.isHidden()
+    assert [h.label_text for h in win.group_headers] == ["기기 미확인"]
     assert win.ctx.store.settings.tunnel_owners == {}
+
+
+def test_groups_split_by_owner_and_unknown_goes_last(qapp, tmp_path):
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(0, """[
+        {"id":"tid-unknown","name":"t-unknown","created_at":"","connections":[]},
+        {"id":"tid-pi","name":"t-pi","created_at":"","connections":[]},
+        {"id":"tid-pc","name":"t-pc","created_at":"","connections":[]}]""", "")
+
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.ssh_profiles.append(SshProfile(name="webPi", host="1.2.3.4"))
+    win.ctx.store.settings.tunnel_owners["tid-pi"] = "ssh:webPi"
+    win.ctx.store.settings.tunnel_owners["tid-pc"] = "local"
+    win.refresh()
+
+    # 이 PC → 등록된 SSH 프로필 순 → 소유 기기를 모르는 것은 항상 마지막
+    assert [h.label_text for h in win.group_headers] == ["이 PC", "webPi", "기기 미확인"]
+    # cards 순서도 화면 순서와 같아야 한다 (Ctrl+1~9 단축키가 이 순서를 쓴다)
+    assert [c.tunnel_name for c in win.cards] == ["t-pc", "t-pi", "t-unknown"]
 
 
 def test_card_shows_cannot_run_and_disables_toggle_without_credentials(qapp, tmp_path):
@@ -308,7 +327,7 @@ def test_card_shows_cannot_run_and_disables_toggle_without_credentials(qapp, tmp
     assert not card.tunnel_switch.isEnabled()
 
 
-def test_owner_badge_survives_target_switch(qapp, tmp_path):
+def test_owner_group_survives_target_switch(qapp, tmp_path):
     """C1의 핵심 증거: 대상 A에서 기록된 owner가 대상 B로 전환해도 그대로 보여야 한다.
 
     targets는 대상별로 나뉘어 있지만 tunnel_owners는 계정 단위 단일 맵이므로,
@@ -325,7 +344,7 @@ def test_owner_badge_survives_target_switch(qapp, tmp_path):
     win.refresh()  # backfill: tunnel_owners["tid-shared"] = "local"
 
     assert win.ctx.store.settings.tunnel_owners["tid-shared"] == "local"
-    assert "이 PC" in win.cards[0].owner_badge.text()
+    assert [h.label_text for h in win.group_headers] == ["이 PC"]
 
     # 대상을 SSH 프로필(webPi)로 전환한다 - 실제 연결 없이 러너만 교체
     runner_b = FakeRunner(home="/home/b")
@@ -337,9 +356,10 @@ def test_owner_badge_survives_target_switch(qapp, tmp_path):
     win.ctx.runner = runner_b
     win.refresh()
 
+    # 여전히 대상 A(local)가 만든 것으로 분류된다 - 지금 보고 있는 대상이 B라도
+    assert [h.label_text for h in win.group_headers] == ["이 PC"]
+    assert not win.group_headers[0].current_label.isVisible()  # 현재 대상은 B
     card = win.cards[0]
-    assert not card.owner_badge.isHidden()
-    assert "이 PC" in card.owner_badge.text()  # 여전히 대상 A(local)로 표시됨
     assert not card.cannot_run_label.isHidden()  # B에는 자격증명이 없으므로 실행 불가
 
 
@@ -357,7 +377,7 @@ def test_backfill_never_overwrites_existing_owner(qapp, tmp_path):
 
     # backfill 조건("id가 없을 때만")에 해당하지 않으므로 덮어쓰지 않는다
     assert win.ctx.store.settings.tunnel_owners["tid1"] == "ssh:webPi"
-    assert "webPi" in win.cards[0].owner_badge.text()
+    assert [h.label_text for h in win.group_headers] == ["webPi"]
 
 
 def test_refresh_backfills_owner_when_credentials_present(qapp, tmp_path):
@@ -403,6 +423,35 @@ def test_credentials_check_happens_once_per_refresh_not_on_tick(qapp, tmp_path):
 
     # _tick()(1초 폴링)에서는 자격증명 파일을 다시 조회하지 않아야 한다
     assert calls["n"] == after_refresh
+
+
+# ---- 프로젝트(Git 클론) 버튼은 SSH 대상에서만 활성화 ----
+
+def test_repos_button_disabled_on_local_target(qapp, tmp_path):
+    win = make_window(qapp, tmp_path)
+    assert not win.ctx.is_remote
+
+    assert not win.repos_btn.isEnabled()
+    assert "원격" in win.repos_btn.toolTip()
+
+    # 비활성 버튼을 우회해 호출해도 다이얼로그가 열리면 안 된다
+    opened = []
+    win._open_modal = lambda dlg: opened.append(dlg)
+    win._open_repos()
+    assert opened == []
+
+
+def test_repos_button_enabled_on_remote_target(qapp, tmp_path):
+    win = make_window(qapp, tmp_path)
+    remote = FakeRunner(home="/home/remote")
+    remote.name = "ssh:webPi"
+    remote.run_results[LIST_TUNNELS_CMD] = RunResult(0, "[]", "")
+    win.ctx.runner = remote
+    assert win.ctx.is_remote
+    win.refresh()
+
+    assert win.repos_btn.isEnabled()
+    assert win.repos_btn.toolTip() == ""
 
 
 # ---- I3: 단축키가 비활성화된(자격증명 없는) 토글을 우회하면 안 된다 ----

@@ -1,5 +1,28 @@
-from app.core.confirm import (default_label_from_hostname, owner_label,
+from app.core.confirm import (default_label_from_hostname, group_by_owner,
+                              owner_group_label, owner_label,
                               route_display_label, tunnel_name_matches)
+
+
+def test_owner_group_label_falls_back_for_unknown():
+    assert owner_group_label("local") == "이 PC"
+    assert owner_group_label("ssh:webPi") == "webPi"
+    assert owner_group_label("") == "기기 미확인"
+    assert owner_group_label("garbage") == "기기 미확인"
+
+
+def test_group_by_owner_orders_preferred_first_then_appearance():
+    pairs = [("ssh:b", "b1"), ("", "x"), ("local", "l1"),
+             ("ssh:b", "b2"), ("ssh:z", "z1")]
+    assert group_by_owner(pairs, ["local", "ssh:b"]) == [
+        ("local", ["l1"]),
+        ("ssh:b", ["b1", "b2"]),   # 그룹 안에서는 입력 순서 유지
+        ("ssh:z", ["z1"]),         # 순서 목록에 없는 키는 처음 나온 순서대로
+        ("", ["x"]),               # 소유 기기 미확인은 항상 마지막
+    ]
+
+
+def test_group_by_owner_empty():
+    assert group_by_owner([], ["local"]) == []
 
 
 def test_tunnel_name_matches_exact():

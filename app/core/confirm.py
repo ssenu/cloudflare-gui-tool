@@ -37,6 +37,38 @@ def owner_label(owner_key: str) -> str:
     return ""
 
 
+UNKNOWN_OWNER_LABEL = "기기 미확인"
+
+
+def owner_group_label(owner_key: str) -> str:
+    """터널 목록의 카테고리(기기) 머리글에 쓸 이름.
+
+    owner_label()과 달리 절대 빈 문자열을 돌려주지 않는다 - 머리글은 그 아래
+    터널들을 담는 상자라서 이름이 비면 정체 불명의 빈 줄이 된다. 소유 기기를
+    아직 모르는 터널들은 UNKNOWN_OWNER_LABEL 아래로 모은다.
+    """
+    return owner_label(owner_key) or UNKNOWN_OWNER_LABEL
+
+
+def group_by_owner(pairs, preferred_order):
+    """(owner_key, 값) 목록을 owner_key별로 묶어 표시 순서대로 돌려준다.
+
+    - preferred_order(예: ["local", "ssh:webPi"])에 있는 키를 그 순서대로 먼저,
+    - 그 외 키는 처음 나타난 순서대로,
+    - 소유 기기를 모르는 항목("")은 항상 마지막에 둔다.
+
+    반환: [(owner_key, [값, ...]), ...]. 그룹 안의 순서는 입력 순서를 지킨다.
+    """
+    groups: dict[str, list] = {}
+    for key, value in pairs:
+        groups.setdefault(key, []).append(value)
+    ordered = [k for k in preferred_order if k in groups]
+    ordered += [k for k in groups if k not in ordered and k != ""]
+    if "" in groups:
+        ordered.append("")
+    return [(k, groups[k]) for k in ordered]
+
+
 def route_display_label(label: str, hostname: str) -> tuple[str, bool]:
     """라우트 행에 보여줄 이름과, 그것이 사용자가 직접 입력한 것인지 여부.
 
