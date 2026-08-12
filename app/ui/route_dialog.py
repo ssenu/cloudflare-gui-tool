@@ -80,6 +80,10 @@ class RouteDialog(QDialog):
         browse.setIcon(make_icon("folder", icon_color))
         browse.clicked.connect(lambda: self.cwd_edit.setText(
             QFileDialog.getExistingDirectory(self, "작업 폴더") or self.cwd_edit.text()))
+        # 버그 수정: "폴더 선택..."은 QFileDialog로 내 PC의 폴더만 고를 수 있어
+        # SSH 대상일 때는 원격 경로를 고를 수 없다 - 의미가 없으므로 숨긴다.
+        if ctx.is_remote:
+            browse.setVisible(False)
         from_repo = QPushButton("프로젝트에서 선택")
         from_repo.setIcon(make_icon("folder", icon_color))
         from_repo.clicked.connect(self._pick_from_repo)
