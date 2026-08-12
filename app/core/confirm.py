@@ -24,6 +24,19 @@ def default_label_from_hostname(hostname: str) -> str:
     return hostname.split(".", 1)[0]
 
 
+def owner_label(owner_key: str) -> str:
+    """터널을 만든 대상 키를 카드에 보여줄 사람이 읽는 이름으로 바꾼다.
+
+    "local" -> "이 PC", "ssh:webPi" -> "webPi"(접두사 제거). 빈 값이거나
+    알 수 없는 형태면 빈 문자열을 돌려준다 - 호출부는 이 경우 표시를 생략해야 한다.
+    """
+    if owner_key == "local":
+        return "이 PC"
+    if owner_key.startswith("ssh:"):
+        return owner_key[len("ssh:"):]
+    return ""
+
+
 def route_display_label(label: str, hostname: str) -> tuple[str, bool]:
     """라우트 행에 보여줄 이름과, 그것이 사용자가 직접 입력한 것인지 여부.
 

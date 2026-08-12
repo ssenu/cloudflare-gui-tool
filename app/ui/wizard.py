@@ -469,7 +469,8 @@ class TunnelWizard(QDialog):
                         stop_cmd=self.stop_cmd_edit.text().strip(),
                         cwd=self.cwd_edit.text().strip(),
                         autostart=self.together_chk.isChecked()))
-                self.created_meta = TunnelMeta(name=name, routes=[route])
+                self.created_meta = TunnelMeta(name=name, routes=[route],
+                                               owner=self.ctx.runner.name)
                 # 루트 도메인 기억
                 self.ctx.store.settings.root_domain = self.domain_edit.text().strip()
                 self._next_mode = "done"

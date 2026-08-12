@@ -245,3 +245,103 @@ def test_reload_targets_falls_back_to_local_when_profile_deleted(qapp, tmp_path)
     assert win.target_combo.currentIndex() == 0
     assert win.target_combo.currentData() is None
     assert win.ctx.runner is win.ctx.local_runner
+
+
+# ---- O: 터널 카드의 "만든 곳" 배지 / 자격증명 없을 때 실행 불가 표시 ----
+
+def test_card_shows_owner_badge_when_owner_set(qapp, tmp_path):
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    runner.files["/home/fake/.cloudflared/tid1.json"] = "{}"  # 자격증명 있음
+
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
+        name="t1", owner="local")
+    win.refresh()
+
+    card = win.cards[0]
+    assert not card.owner_badge.isHidden()
+    assert "이 PC" in card.owner_badge.text()
+    assert card.cannot_run_label.isHidden()
+    assert card.tunnel_switch.isEnabled()
+
+
+def test_card_hides_owner_badge_when_owner_empty(qapp, tmp_path):
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    # 자격증명이 없어야 backfill이 일어나지 않고 owner가 빈 채로 남는다
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1", owner="")
+    win.refresh()
+
+    card = win.cards[0]
+    assert card.owner_badge.isHidden()
+
+
+def test_card_shows_cannot_run_and_disables_toggle_without_credentials(qapp, tmp_path):
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    # 자격증명 파일을 만들지 않는다 -> has_credentials False
+
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
+        name="t1", owner="ssh:webPi")
+    win.refresh()
+
+    card = win.cards[0]
+    assert not card.cannot_run_label.isHidden()
+    assert "실행 불가" in card.cannot_run_label.text()
+    assert not card.tunnel_switch.isEnabled()
+    assert "자격증명" in card.tunnel_switch.toolTip()
+
+    # _tick()으로 update_state()가 다시 돌아도 비활성 상태가 유지되어야 한다
+    win._tick()
+    assert not card.tunnel_switch.isEnabled()
+
+
+def test_refresh_backfills_owner_when_credentials_present(qapp, tmp_path):
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    runner.files["/home/fake/.cloudflared/tid1.json"] = "{}"
+
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1", owner="")
+    win.refresh()
+
+    meta = win.ctx.store.settings.tunnels_for("fake")["t1"]
+    assert meta.owner == "fake"  # 현재 대상(runner.name)으로 채워졌어야 함
+
+    # 저장까지 반영됐는지 재로드로 확인
+    reloaded = SettingsStore(path=win.ctx.store.path).load()
+    assert reloaded.tunnels_for("fake")["t1"].owner == "fake"
+
+
+def test_credentials_check_happens_once_per_refresh_not_on_tick(qapp, tmp_path):
+    calls = {"n": 0}
+
+    class CountingRunner(FakeRunner):
+        def file_exists(self, path):
+            if path.endswith(".json") and "/.cloudflared/" in path and "config-" not in path:
+                calls["n"] += 1
+            return super().file_exists(path)
+
+    runner = CountingRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    runner.files["/home/fake/.cloudflared/tid1.json"] = "{}"
+
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1", owner="local")
+    win.refresh()
+    after_refresh = calls["n"]
+    assert after_refresh >= 1
+
+    for _ in range(5):
+        win._tick()
+
+    # _tick()(1초 폴링)에서는 자격증명 파일을 다시 조회하지 않아야 한다
+    assert calls["n"] == after_refresh

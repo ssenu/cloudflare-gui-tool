@@ -70,6 +70,11 @@ class ToggleSwitch(QAbstractButton):
 
         checked = self.isChecked()
         track_color = QColor(p["accent"] if checked else p["border"])
+        if not self.isEnabled():
+            # O2: 자격증명이 없어 토글이 비활성화된 경우, 켜짐/꺼짐과 무관하게
+            # muted 색으로 눌러 "지금은 조작할 수 없다"는 것을 시각적으로 드러낸다.
+            track_color = QColor(p["muted"])
+            track_color.setAlpha(120)
         painter.setBrush(track_color)
 
         if self.hasFocus():

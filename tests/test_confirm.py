@@ -1,5 +1,5 @@
-from app.core.confirm import (default_label_from_hostname, route_display_label,
-                              tunnel_name_matches)
+from app.core.confirm import (default_label_from_hostname, owner_label,
+                              route_display_label, tunnel_name_matches)
 
 
 def test_tunnel_name_matches_exact():
@@ -45,3 +45,23 @@ def test_route_display_label_strips_whitespace_label():
     text, is_placeholder = route_display_label("   ", "app.example.com")
     assert text == "app"
     assert is_placeholder is True
+
+
+def test_owner_label_local():
+    assert owner_label("local") == "이 PC"
+
+
+def test_owner_label_ssh_strips_prefix():
+    assert owner_label("ssh:webPi") == "webPi"
+
+
+def test_owner_label_empty_is_empty():
+    assert owner_label("") == ""
+
+
+def test_owner_label_unknown_is_empty():
+    assert owner_label("something-else") == ""
+
+
+def test_owner_label_ssh_prefix_only_is_empty():
+    assert owner_label("ssh:") == ""

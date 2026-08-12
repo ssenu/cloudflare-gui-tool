@@ -60,6 +60,17 @@ class CloudflaredClient:
     def config_path(self, name: str) -> str:
         return self.config_dir() + f"/config-{name}.yml"
 
+    def credentials_path(self, tunnel_id: str) -> str:
+        return self.config_dir() + f"/{tunnel_id}.json"
+
+    def has_credentials(self, tunnel_id: str) -> bool:
+        """이 대상(runner)에 터널 자격증명 파일이 있는지 확인한다.
+
+        cloudflared tunnel list는 계정 단위라 대상이 바뀌어도 같은 터널이
+        보이지만, 실제로 그 대상에서 실행하려면 이 파일이 있어야 한다.
+        """
+        return self.runner.file_exists(self.credentials_path(tunnel_id))
+
     def list_tunnels(self) -> list[TunnelInfo]:
         res = self._run(["tunnel", "list", "--output", "json"])
         try:

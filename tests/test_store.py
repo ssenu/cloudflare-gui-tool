@@ -50,6 +50,41 @@ def test_save_and_load_roundtrip(tmp_path):
     assert "local" in raw["targets"]
 
 
+def test_owner_roundtrip(tmp_path):
+    path = str(tmp_path / "settings.json")
+    store = SettingsStore(path=path)
+    store.load()
+    store.settings.tunnels_for("local")["mysite"] = TunnelMeta(
+        name="mysite", owner="ssh:webPi")
+    store.save()
+
+    loaded = SettingsStore(path=path).load()
+    assert loaded.tunnels_for("local")["mysite"].owner == "ssh:webPi"
+
+
+def test_owner_defaults_to_empty_when_absent_from_old_config(tmp_path):
+    """owner 필드가 없던 구버전 설정 파일도 문제없이 로드되어야 함"""
+    path = str(tmp_path / "settings.json")
+    old_format = {
+        "root_domain": "example.com",
+        "targets": {
+            "local": {
+                "mysite": {
+                    "name": "mysite",
+                    "routes": [],
+                    # owner 키 자체가 없음 (구버전)
+                }
+            }
+        },
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(old_format, f)
+
+    store = SettingsStore(path=path)
+    s = store.load()
+    assert s.tunnels_for("local")["mysite"].owner == ""
+
+
 def test_theme_roundtrip(tmp_path):
     path = str(tmp_path / "settings.json")
     store = SettingsStore(path=path)

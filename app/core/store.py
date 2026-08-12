@@ -28,6 +28,10 @@ class RouteMeta:
 class TunnelMeta:
     name: str
     routes: list[RouteMeta] = field(default_factory=list)
+    # 이 터널을 만든(또는 자격증명을 확인해 옮겨온) 대상 키. CommandRunner.name과
+    # 같은 값("local" 또는 "ssh:<프로필명>"). 옛 설정 파일에는 없던 필드라
+    # 기본값이 빈 문자열이며, 그 경우 UI는 아무것도 표시하지 않는다.
+    owner: str = ""
 
 
 def new_route_id() -> str:
@@ -136,9 +140,13 @@ def _parse_tunnel_meta(v) -> tuple[TunnelMeta, bool]:
     if not isinstance(name, str):
         raise TypeError("name must be str")
 
+    owner = v.get("owner", "") or ""
+    if not isinstance(owner, str):
+        owner = ""
+
     if "routes" in v:
         routes = _parse_routes_list(v.get("routes"))
-        return TunnelMeta(name=name, routes=routes), False
+        return TunnelMeta(name=name, routes=routes, owner=owner), False
 
     # v1 형식 마이그레이션
     hostname = v.get("hostname", "") or ""

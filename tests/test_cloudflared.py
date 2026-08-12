@@ -142,6 +142,26 @@ def test_route_dns_other_failure_raises_plain_cloudflared_error():
     assert not isinstance(exc_info.value, DnsRecordExistsError)
 
 
+def test_credentials_path_builds_from_config_dir():
+    c = CloudflaredClient(FakeRunner({}))
+    assert c.credentials_path("a1b2c3d4-1111-2222-3333-444455556666") == (
+        "C:/Users/me/.cloudflared/a1b2c3d4-1111-2222-3333-444455556666.json")
+
+
+def test_has_credentials_true_when_file_exists():
+    class ExistsRunner(FakeRunner):
+        def file_exists(self, path):
+            return path == "C:/Users/me/.cloudflared/tid.json"
+
+    c = CloudflaredClient(ExistsRunner({}))
+    assert c.has_credentials("tid") is True
+
+
+def test_has_credentials_false_when_file_missing():
+    c = CloudflaredClient(FakeRunner({}))  # file_exists 항상 False
+    assert c.has_credentials("tid") is False
+
+
 def test_route_dns_unrelated_1003_is_not_dns_exists_error():
     # 포트 번호 등 무관한 숫자에 1003이 들어 있어도 덮어쓰기 제안을 하면 안 된다
     r = FakeRunner({"route dns": RunResult(1, "", "dial tcp 127.0.0.1:10030: refused")})

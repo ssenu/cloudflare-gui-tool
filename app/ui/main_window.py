@@ -12,7 +12,7 @@ from app.context import AppContext
 from app.core.cloudflared import CloudflaredError
 from app.core.config_yml import get_routes, parse_config, set_routes
 from app.core.process_mgr import TunnelState
-from app.core.confirm import route_display_label
+from app.core.confirm import owner_label, route_display_label
 from app.core.store import RouteMeta, SshProfile, TunnelMeta, new_route_id
 from app.ui.icons import make_icon
 from app.ui.theme import STATE_COLORS, build_qss, current_palette, ensure_qss_icons
@@ -34,6 +34,11 @@ STATE_LABELS = {
     TunnelState.RUNNING: "실행 중",
     TunnelState.ERROR: "오류",
 }
+
+# O2: 자격증명이 이 대상에 없어 실행할 수 없는 터널의 토글 툴팁.
+NO_CREDENTIALS_TOOLTIP = (
+    "이 터널의 자격증명 파일이 이 기기에 없습니다. "
+    "만든 기기에서 실행하거나, `~/.cloudflared/<uuid>.json`을 이 기기로 복사하세요.")
 
 
 def _elide(text: str, metrics, width: int) -> str:
@@ -229,13 +234,17 @@ class RouteRow(QWidget):
 
 
 class TunnelCard(QFrame):
-    def __init__(self, win: "MainWindow", info, meta: TunnelMeta):
+    def __init__(self, win: "MainWindow", info, meta: TunnelMeta,
+                has_credentials: bool = True):
         super().__init__()
         self.setObjectName("card")
         self.win = win
         self.info = info
         self.meta = meta
         self.tunnel_name = info.name
+        # O3: 자격증명 존재 여부는 refresh() 시점에 한 번만 원격 확인해 카드에
+        # 들고 있는다 - 1초 폴링(_tick)에서 매번 stat을 날리지 않기 위해서다.
+        self.has_credentials = has_credentials
 
         palette = current_palette(win.ctx.store.settings.theme)
         icon_color = palette["text"]
@@ -246,6 +255,24 @@ class TunnelCard(QFrame):
         title.setObjectName("cardTitle")
         self.state_label = QLabel()
         self.state_label.setObjectName("cardSub")
+
+        # O1: 이 터널을 만든(또는 옮겨온) 대상. 비어 있으면 표시하지 않는다.
+        self.owner_badge = QLabel()
+        self.owner_badge.setStyleSheet(f"color: {palette['muted']}; font-size: 11px;")
+        owner_text = owner_label(meta.owner)
+        if owner_text:
+            self.owner_badge.setText(f"만든 곳: {owner_text}")
+        else:
+            self.owner_badge.setVisible(False)
+
+        # O2: 현재 대상에 자격증명이 없으면 실행할 수 없다는 표시 + 토글 비활성화.
+        self.cannot_run_label = QLabel()
+        self.cannot_run_label.setStyleSheet(f"color: {palette['danger']}; font-size: 11px;")
+        if not has_credentials:
+            self.cannot_run_label.setText("이 대상에서 실행 불가")
+            self.cannot_run_label.setToolTip(NO_CREDENTIALS_TOOLTIP)
+        else:
+            self.cannot_run_label.setVisible(False)
 
         self.tunnel_switch = ToggleSwitch(palette)
         self.tunnel_switch.toggled.connect(self._on_tunnel_toggled)
@@ -264,6 +291,8 @@ class TunnelCard(QFrame):
         header.addWidget(self.dot)
         header.addWidget(title)
         header.addWidget(self.state_label)
+        header.addWidget(self.owner_badge)
+        header.addWidget(self.cannot_run_label)
         header.addStretch(1)
         header.addWidget(_toggle_label("터널", palette))
         header.addWidget(self.spinner)
@@ -358,6 +387,14 @@ class TunnelCard(QFrame):
             # 도커 오류 툴팁과 같은 자리를 재사용한다: update_tooltip()이
             # 기본 켜기/끄기 문구로 덮어쓴 뒤 사유로 다시 덮어쓴다.
             self.tunnel_switch.setToolTip(mismatch_reason)
+        # O2: 자격증명이 없으면 토글 자체를 막는다 - 켜봐야 이 대상에서는
+        # 실행될 수 없다. has_credentials는 refresh()에서 캐시된 값이라 이
+        # 폴링 루프에서 추가 원격 호출이 일어나지 않는다.
+        if not self.has_credentials:
+            self.tunnel_switch.setEnabled(False)
+            self.tunnel_switch.setToolTip(NO_CREDENTIALS_TOOLTIP)
+        else:
+            self.tunnel_switch.setEnabled(True)
         for row in self.route_rows:
             row.update_state()
 
@@ -624,16 +661,25 @@ class MainWindow(QWidget):
         # 대상마다 다르기 때문이다.
         metas = self.ctx.store.settings.tunnels_for(self.ctx.runner.name)
         restored = False
+        owner_backfilled = False
         for info in infos:
             meta = metas.get(info.name)
             if meta is None:
                 meta = self._meta_from_config(info.name)
                 metas[info.name] = meta
                 restored = True
-            card = TunnelCard(self, info, meta)
+            # O3: 자격증명 존재 여부는 여기(카드 재생성 시점)에서만 확인한다 -
+            # _tick()의 1초 폴링에서 매번 원격 stat을 날리지 않기 위해서다.
+            has_creds = self.ctx.client.has_credentials(info.id)
+            # O4: owner가 비어 있던 기존 터널이라도 지금 대상에 자격증명이
+            # 있으면 그 대상이 곧 만든/옮긴 기기라는 합리적 추론으로 채운다.
+            if not meta.owner and has_creds:
+                meta.owner = self.ctx.runner.name
+                owner_backfilled = True
+            card = TunnelCard(self, info, meta, has_creds)
             self.list_lay.insertWidget(self.list_lay.count() - 1, card)
             self.cards.append(card)
-        if restored:
+        if restored or owner_backfilled:
             self.ctx.store.save()
 
     def _meta_from_config(self, name: str) -> TunnelMeta:
