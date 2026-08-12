@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>라즈베리파이를 Railway처럼 쓰기 — webPi 세팅 가이드</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #181b24; --panel2: #1f2330; --border: #2a2f3f;
+    --text: #e8eaf0; --muted: #9aa1b5; --accent: #f6821f; --accent2: #4c9aff;
+    --green: #3fb950; --yellow: #d29922;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', 'Malgun Gothic', sans-serif; line-height: 1.7; }
+  .wrap { display: grid; grid-template-columns: 240px 1fr; gap: 32px; max-width: 1200px; margin: 0 auto; padding: 40px 24px 80px; }
+
+  /* Sticky TOC */
+  .toc-wrapper { position: sticky; top: 24px; height: fit-content; }
+  .toc { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; font-size: .9rem; }
+  .toc h3 { font-size: .85rem; font-weight: 700; text-transform: uppercase; color: var(--muted); margin-bottom: 12px; letter-spacing: 0.5px; }
+  .toc ul { list-style: none; }
+  .toc li { margin: 4px 0; }
+  .toc a { color: var(--accent2); text-decoration: none; display: block; padding: 4px 0; transition: color 0.2s; }
+  .toc a:hover { color: var(--accent); }
+  .toc li.sub-item a { padding-left: 12px; font-size: .85rem; color: var(--muted); }
+  .toc li.sub-item a:hover { color: var(--accent2); }
+
+  /* Main content */
+  .main { }
+  header { border-bottom: 2px solid var(--accent); padding-bottom: 24px; margin-bottom: 32px; }
+  header h1 { font-size: 2rem; margin-bottom: 8px; }
+  header p { color: var(--muted); font-size: 1rem; }
+
+  .intro { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 20px 24px; margin-bottom: 28px; }
+  .intro p { margin-bottom: 12px; }
+  .intro p:last-child { margin-bottom: 0; }
+
+  /* Sections */
+  h2 { font-size: 1.4rem; margin: 40px 0 16px; padding-left: 12px; border-left: 4px solid var(--accent); }
+  h2[id]:first-of-type { margin-top: 0; }
+  h3 { font-size: 1.1rem; margin: 20px 0 8px; color: var(--accent2); }
+
+  p { margin-bottom: 12px; }
+
+  /* Code blocks */
+  .code-block { position: relative; margin: 16px 0; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); }
+  .code-block pre { background: var(--panel2); padding: 16px; overflow-x: auto; font-family: 'Cascadia Code', Consolas, monospace; font-size: .9rem; line-height: 1.5; color: var(--text); }
+  .code-block code { all: unset; }
+  .code-block.pi-cmd { border-left: 3px solid var(--accent); }
+  .code-block.pc-cmd { border-left: 3px solid var(--accent2); }
+  .cmd-badge { position: absolute; top: 8px; right: 12px; font-size: .7rem; font-weight: 700; padding: 3px 8px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .cmd-badge.pi { background: rgba(246,130,31,.15); color: var(--accent); }
+  .cmd-badge.pc { background: rgba(76,154,255,.15); color: var(--accent2); }
+
+  /* Inline code */
+  code { background: var(--panel2); padding: 2px 7px; border-radius: 4px; font-family: 'Cascadia Code', Consolas, monospace; font-size: .88em; color: #ffd28e; }
+
+  /* ASCII diagram */
+  .ascii-diagram { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 16px; overflow-x: auto; font-family: 'Cascadia Code', Consolas, monospace; font-size: .85rem; line-height: 1.6; margin: 16px 0; color: var(--text); }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  thead { background: var(--panel2); }
+  th { padding: 12px 16px; text-align: left; font-weight: 600; border-bottom: 1px solid var(--border); }
+  td { padding: 12px 16px; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+
+  /* Notes */
+  .note { border-left: 3px solid var(--yellow); background: rgba(210,153,34,.08); padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 16px 0; color: var(--muted); font-size: .92rem; }
+
+  /* Lists */
+  ul { padding-left: 22px; margin: 12px 0; }
+  ol { padding-left: 22px; margin: 12px 0; }
+  li { margin: 6px 0; }
+
+  /* Blockquotes become notes */
+  blockquote { border-left: 3px solid var(--yellow); background: rgba(210,153,34,.08); padding: 12px 16px; border-radius: 0 8px 8px 0; margin: 16px 0; color: var(--muted); font-size: .92rem; }
+  blockquote p { margin: 0; }
+  blockquote p + p { margin-top: 8px; }
+
+  /* Appendix */
+  .appendix { margin-top: 48px; padding-top: 24px; border-top: 2px solid var(--border); }
+
+  @media (max-width: 1024px) {
+    .wrap { grid-template-columns: 1fr; gap: 0; }
+    .toc-wrapper { position: relative; top: 0; margin-bottom: 32px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="toc-wrapper">
+  <nav class="toc">
+    <h3>목차</h3>
+    <ul>
+      <li><a href="#s0">0. 준비물 확인</a></li>
+      <li><a href="#s1">1. 첫 접속과 기본 세팅</a></li>
+      <li><a href="#s2">2. Tailscale</a></li>
+      <li><a href="#s3">3. Docker 설치</a></li>
+      <li><a href="#s4">4. cloudflared 설치</a></li>
+      <li><a href="#s5">5. 프로젝트 배치 규칙</a></li>
+      <li><a href="#s6">6. GUI 앱에 등록</a></li>
+      <li><a href="#s7">7. GitHub 업데이트 반영</a></li>
+      <li><a href="#s8">8. 재부팅 자동 복구</a></li>
+      <li><a href="#s9">9. 운영 팁</a></li>
+      <li><a href="#s10">10. 트러블슈팅</a></li>
+      <li><a href="#appendix">부록</a></li>
+    </ul>
+  </nav>
+</div>
+
+<div class="main">
+
+<header>
+  <h1>라즈베리파이를 Railway처럼 쓰기</h1>
+  <p>webPi 세팅 가이드</p>
+</header>
+
+<div class="intro">
+  <p>Ubuntu Server를 올린 Raspberry Pi 5(장치 이름 <code>webPi</code>, 사용자 <code>admin</code>)를 개인 배포 서버로 만드는 순서다. 다 끝나면 이렇게 된다.</p>
+  <ul>
+    <li>집 밖 어디서든 노트북에서 <code>ssh admin@webpi</code>로 접속 (Tailscale)</li>
+    <li>이 저장소의 GUI 앱에서 대상을 <strong>webPi</strong>로 바꾸면 원격 터널·서버를 그대로 조작</li>
+    <li>GitHub 저장소를 여러 개 올려두고, 토글 하나로 최신 코드 받아 다시 빌드·기동</li>
+    <li>각 프로젝트는 <code>https://&lt;서브도메인&gt;.&lt;내도메인&gt;</code>으로 외부 공개 (Cloudflare Tunnel)</li>
+  </ul>
+</div>
+
+<div class="ascii-diagram"><pre>   인터넷 ──► Cloudflare ──(터널)──► webPi ──► docker compose (프로젝트별 컨테이너)
+   노트북 ──► Tailscale ──(SSH)───► webPi ──► GUI 앱이 원격 조작</pre></div>
+
+<blockquote>
+  <p><strong>표기:</strong> <code>&lt;...&gt;</code>는 본인 값으로 바꿀 자리. 명령 앞의 <code>pi$</code>는 라즈베리파이에서, <code>pc&gt;</code>는 노트북에서 실행한다는 뜻이다.</p>
+</blockquote>
+
+<h2 id="s0">0. 준비물 확인</h2>
+<ul>
+  <li>webPi가 랜선으로 공유기에 연결되어 있고 전원이 켜져 있음</li>
+  <li>노트북이 같은 공유기(와이파이)에 붙어 있음</li>
+  <li>Cloudflare에 도메인이 등록되어 Active 상태 (앱에서 쓰던 그 도메인)</li>
+  <li>GitHub 계정과 올릴 프로젝트 저장소</li>
+</ul>
+
+<h2 id="s1">1. 첫 접속과 기본 세팅</h2>
+
+<h3>1-1. IP 찾기</h3>
+<p>공유기 관리 페이지의 DHCP 클라이언트 목록에서 <code>webPi</code> 또는 Raspberry Pi 항목의 IP를 확인한다. 안 보이면 노트북에서:</p>
+<div class="code-block pc-cmd">
+  <pre><code>pc&gt; arp -a | findstr "192.168"</code></pre>
+  <span class="cmd-badge pc">노트북</span>
+</div>
+<p>찾은 주소를 <code>&lt;PI_IP&gt;</code>로 부르겠다 (예: <code>192.168.0.42</code>).</p>
+
+<h3>1-2. SSH 접속</h3>
+<div class="code-block pc-cmd">
+  <pre><code>pc&gt; ssh admin@&lt;PI_IP&gt;</code></pre>
+  <span class="cmd-badge pc">노트북</span>
+</div>
+<p>비밀번호는 현재 <code>admin</code>. 접속되면 다음 단계로.</p>
+
+<h3>1-3. 비밀번호부터 바꾸기 (건너뛰지 말 것)</h3>
+<p>곧 Tailscale로 외부에서도 닿게 만들 예정이라, <code>admin/admin</code> 상태로 두면 위험하다.</p>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ passwd</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+
+<h3>1-4. 시스템 업데이트</h3>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ sudo apt update &amp;&amp; sudo apt full-upgrade -y
+pi$ sudo apt install -y ca-certificates curl git ufw unattended-upgrades
+pi$ sudo reboot</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<p>재부팅 후 다시 접속한다. <code>unattended-upgrades</code>는 보안 패치를 자동으로 받아준다.</p>
+
+<h3>1-5. 호스트 이름과 시간대</h3>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ sudo hostnamectl set-hostname webPi
+pi$ sudo timedatectl set-timezone Asia/Seoul</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<p><code>/etc/hosts</code>의 <code>127.0.1.1</code> 줄도 <code>webPi</code>로 맞춰둔다.</p>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ sudo sed -i 's/^127\.0\.1\.1.*/127.0.1.1\twebPi/' /etc/hosts</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+
+<h3>1-6. SSH 키 인증 (앱이 이 방식으로 접속한다)</h3>
+<p>GUI 앱은 비밀번호를 저장하지 않고 <strong>키 파일로만</strong> 접속하므로 이 단계가 필수다. 노트북에서:</p>
+<div class="code-block pc-cmd">
+  <pre><code>pc&gt; ssh-keygen -t ed25519 -C "webPi"        # 이미 있으면 건너뛴다
+pc&gt; type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh admin@&lt;PI_IP&gt; "mkdir -p ~/.ssh &amp;&amp; chmod 700 ~/.ssh &amp;&amp; cat &gt;&gt; ~/.ssh/authorized_keys &amp;&amp; chmod 600 ~/.ssh/authorized_keys"</code></pre>
+  <span class="cmd-badge pc">노트북</span>
+</div>
+<p>새 터미널에서 비밀번호 없이 들어가지는지 확인한다.</p>
+<div class="code-block pc-cmd">
+  <pre><code>pc&gt; ssh admin@&lt;PI_IP&gt;</code></pre>
+  <span class="cmd-badge pc">노트북</span>
+</div>
+
+<h3>1-7. 비밀번호 로그인 끄기</h3>
+<p><strong>키 접속이 확인된 뒤에만</strong> 한다.</p>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+pi$ sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+pi$ sudo systemctl restart ssh</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<p>기존 세션은 유지되니, 끊지 말고 <strong>새 창에서 접속이 되는지 확인</strong>한 다음 닫는다.</p>
+
+<h3>1-8. 방화벽</h3>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ sudo ufw allow OpenSSH
+pi$ sudo ufw --force enable
+pi$ sudo ufw status</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<p>웹 포트(80/443)는 열지 않는다. 외부 공개는 Cloudflare Tunnel이 바깥으로 나가는 연결로 처리하므로 인바운드를 열 이유가 없다.</p>
+
+<h2 id="s2">2. Tailscale — 집 밖에서도 접속</h2>
+
+<h3>2-1. webPi에 설치</h3>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ curl -fsSL https://tailscale.com/install.sh | sh
+pi$ sudo tailscale up</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<p>출력된 URL을 노트북 브라우저에서 열어 로그인하면 기기가 등록된다.</p>
+
+<h3>2-2. 주소 확인</h3>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ tailscale ip -4        # 예: 100.101.102.103
+pi$ tailscale status</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<p>Tailscale 관리 콘솔(https://login.tailscale.com/admin/dns)에서 <strong>MagicDNS</strong>를 켜두면 <code>webpi</code>라는 이름만으로 접속할 수 있다.</p>
+
+<h3>2-3. 노트북에도 설치</h3>
+<p>Windows용 Tailscale을 설치하고 <strong>같은 계정</strong>으로 로그인한다. 그다음:</p>
+<div class="code-block pc-cmd">
+  <pre><code>pc&gt; ssh admin@100.101.102.103      # tailnet IP
+pc&gt; ssh admin@webpi                # MagicDNS를 켰다면 이 이름으로도 접속</code></pre>
+  <span class="cmd-badge pc">노트북</span>
+</div>
+<p>집 밖(휴대폰 핫스팟 등)에서도 같은 명령이 그대로 동작하는지 한 번 확인해두면 좋다.</p>
+
+<h3>2-4. ufw와 Tailscale</h3>
+<p>tailnet 안에서만 열어두고 싶은 포트가 생기면 이렇게 한다.</p>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ sudo ufw allow in on tailscale0</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<blockquote>
+  <p><strong>참고:</strong> <code>tailscale up --ssh</code>(Tailscale SSH)는 키 없이 접속할 수 있어 편하지만, 우리 앱은 paramiko로 표준 SSH·키 인증을 쓰므로 <strong>기본 OpenSSH를 그대로 두는 쪽</strong>이 안전하다. Tailscale은 "어디서든 닿는 네트워크"로만 쓰고, 인증은 1-6에서 만든 키로 한다.</p>
+</blockquote>
+
+<h2 id="s3">3. Docker 설치</h2>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ curl -fsSL https://get.docker.com | sudo sh
+pi$ sudo usermod -aG docker admin
+pi$ exit</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<p>다시 접속한 뒤 그룹이 적용됐는지 확인한다.</p>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ docker run --rm hello-world
+pi$ docker compose version</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<p><code>sudo</code> 없이 위 두 명령이 되면 성공이다. GUI 앱이 <code>docker compose</code> 명령을 sudo 없이 실행하므로 이 설정이 필요하다.</p>
+
+<h2 id="s4">4. cloudflared 설치와 로그인</h2>
+<p>GUI 앱의 온보딩은 <strong>내 PC만</strong> 처리한다. 라즈베리파이에는 직접 깔아야 한다.</p>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ sudo mkdir -p --mode=0755 /usr/share/keyrings
+pi$ curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg &gt;/dev/null
+pi$ echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main" | sudo tee /etc/apt/sources.list.d/cloudflared.list
+pi$ sudo apt update &amp;&amp; sudo apt install -y cloudflared
+pi$ cloudflared --version</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<p>로그인한다. 화면에 URL이 뜨면 노트북 브라우저에서 열고 도메인을 선택한다.</p>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ cloudflared tunnel login</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<p><code>~/.cloudflared/cert.pem</code>이 생기면 준비 끝이다. 이 인증서가 있어야 앱에서 원격 터널을 만들 수 있다.</p>
+
+<h2 id="s5">5. 프로젝트 배치 규칙</h2>
+<p>여러 프로젝트를 얹을 거라 규칙을 먼저 정한다.</p>
+
+<h3>5-1. 폴더 구조</h3>
+<div class="ascii-diagram"><pre>/srv/apps/
+├── blog/          ← GitHub 저장소 클론
+│   ├── docker-compose.yml
+│   └── .env
+├── api/
+└── shop/</pre></div>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ sudo mkdir -p /srv/apps
+pi$ sudo chown admin:admin /srv/apps</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+
+<h3>5-2. 포트 규칙</h3>
+<p>각 프로젝트는 <strong>127.0.0.1에만</strong> 바인딩한다. 그래야 tailnet·터널을 통해서만 접근되고 LAN에 노출되지 않는다.</p>
+<table>
+  <thead>
+    <tr>
+      <th>프로젝트</th>
+      <th>로컬 포트</th>
+      <th>접속 주소</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>blog</td>
+      <td>8001</td>
+      <td>blog.내도메인</td>
+    </tr>
+    <tr>
+      <td>api</td>
+      <td>8002</td>
+      <td>api.내도메인</td>
+    </tr>
+    <tr>
+      <td>shop</td>
+      <td>8003</td>
+      <td>shop.내도메인</td>
+    </tr>
+  </tbody>
+</table>
+<p><code>docker-compose.yml</code> 예시:</p>
+<div class="code-block pi-cmd">
+  <pre><code>services:
+  web:
+    build: .
+    restart: unless-stopped          # 재부팅해도 자동 기동
+    ports:
+      - "127.0.0.1:8001:8000"        # 왼쪽이 Pi의 포트, 오른쪽이 컨테이너 포트
+    env_file: .env
+    depends_on: [db]
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # ports 를 쓰지 않는다 → 컨테이너 네트워크 안에서만 접근
+volumes:
+  pgdata:</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+
+<h3>5-3. GitHub에서 클론</h3>
+<p><strong>공개 저장소</strong>면 그냥 클론한다.</p>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ cd /srv/apps &amp;&amp; git clone https://github.com/&lt;계정&gt;/&lt;저장소&gt;.git blog</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<p><strong>비공개 저장소</strong>면 프로젝트마다 배포 키(Deploy Key)를 만든다. 읽기 전용이라 안전하다.</p>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ ssh-keygen -t ed25519 -f ~/.ssh/deploy_blog -N "" -C "webPi blog"
+pi$ cat ~/.ssh/deploy_blog.pub</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<p>출력된 공개키를 GitHub 저장소 → Settings → Deploy keys → Add deploy key에 붙여넣는다(쓰기 권한 체크 안 함). 그다음 <code>~/.ssh/config</code>에 항목을 추가한다.</p>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ cat &gt;&gt; ~/.ssh/config &lt;&lt;'EOF'
+
+Host github-blog
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/deploy_blog
+    IdentitiesOnly yes
+EOF
+pi$ chmod 600 ~/.ssh/config
+pi$ ssh -T github-blog          # 처음 접속 시 known_hosts 등록 (yes)
+pi$ cd /srv/apps &amp;&amp; git clone github-blog:&lt;계정&gt;/&lt;저장소&gt;.git blog</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<p><code>.env</code> 같은 비밀 파일은 저장소에 넣지 말고 서버에서 직접 만든다.</p>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ nano /srv/apps/blog/.env</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+
+<h3>5-4. 수동으로 한 번 띄워보기</h3>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ cd /srv/apps/blog &amp;&amp; docker compose up --build -d
+pi$ curl -I http://127.0.0.1:8001
+pi$ docker compose logs -f</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<p>여기까지 되면 앱에 등록할 준비가 끝났다.</p>
+
+<h2 id="s6">6. GUI 앱에 등록</h2>
+
+<h3>6-1. SSH 대상 추가</h3>
+<p>앱 상단 <strong>대상</strong> 드롭다운 → <code>SSH 대상 추가...</code></p>
+<table>
+  <thead>
+    <tr>
+      <th>항목</th>
+      <th>값</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>이름</td>
+      <td>webPi</td>
+    </tr>
+    <tr>
+      <td>호스트</td>
+      <td><code>100.101.102.103</code> 또는 <code>webpi</code> (MagicDNS)</td>
+    </tr>
+    <tr>
+      <td>포트</td>
+      <td>22</td>
+    </tr>
+    <tr>
+      <td>사용자</td>
+      <td>admin</td>
+    </tr>
+    <tr>
+      <td>키 파일</td>
+      <td><code>C:\Users\&lt;사용자&gt;\.ssh\id_ed25519</code></td>
+    </tr>
+  </tbody>
+</table>
+<p><strong>연결 테스트</strong>를 눌러 성공하는지 확인하고 저장한다.</p>
+
+<h3>6-2. 대상 전환</h3>
+<p>드롭다운에서 <strong>webPi</strong>를 고른다. 이제 화면의 모든 조작이 라즈베리파이를 향한다. 터널 목록은 Cloudflare 계정 단위라 로컬과 같아 보이지만, 실행 여부·설정 파일·서버 명령은 각 머신의 것이다.</p>
+
+<h3>6-3. 터널과 라우트 만들기</h3>
+<p><strong>터널 생성</strong> → 이름(예: <code>webpi</code>) → 서브도메인·도메인 → 로컬 서비스 <code>http://localhost:8001</code></p>
+<p>두 번째 프로젝트부터는 같은 터널에 <strong>라우트 추가</strong>로 붙이면 된다.</p>
+<table>
+  <thead>
+    <tr>
+      <th>이름</th>
+      <th>도메인</th>
+      <th>로컬 서비스</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>blog</td>
+      <td>blog.내도메인</td>
+      <td>http://localhost:8001</td>
+    </tr>
+    <tr>
+      <td>api</td>
+      <td>api.내도메인</td>
+      <td>http://localhost:8002</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>6-4. 서버(컨테이너) 등록</h3>
+<p>라우트의 ⋮ → 편집에서:</p>
+<table>
+  <thead>
+    <tr>
+      <th>항목</th>
+      <th>값</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>서비스 종류</td>
+      <td>도커 컴포즈</td>
+    </tr>
+    <tr>
+      <td>시작 명령</td>
+      <td><code>git pull --ff-only &amp;&amp; docker compose up --build -d</code></td>
+    </tr>
+    <tr>
+      <td>정지 명령</td>
+      <td><code>docker compose down</code></td>
+    </tr>
+    <tr>
+      <td>작업 폴더</td>
+      <td><code>/srv/apps/blog</code></td>
+    </tr>
+    <tr>
+      <td>터널과 함께 시작</td>
+      <td>취향껏</td>
+    </tr>
+  </tbody>
+</table>
+<p><strong>시작 명령에 <code>git pull</code>을 넣은 것이 핵심이다.</strong> 서버 토글을 껐다 켜는 것만으로 최신 코드를 받아 다시 빌드하는, Railway의 "Redeploy" 버튼과 같은 동작이 된다.</p>
+
+<h3>6-5. 켜기</h3>
+<p>터널 토글 → 초록불 확인 → 서버 토글 → 스피너가 멈추면 브라우저에서 접속 확인.</p>
+<p>빌드는 몇 분 걸릴 수 있다. 진행 상황은 <strong>로그</strong> 버튼의 해당 탭에서 실시간으로 볼 수 있다.</p>
+
+<h2 id="s7">7. GitHub 업데이트 반영하기</h2>
+<p>세 가지 방법이 있다. 아래로 갈수록 자동이지만 손이 더 간다.</p>
+
+<h3>방법 A. 수동 (지금 바로 가능)</h3>
+<p>앱에서 해당 서버 토글을 껐다 켠다. 6-4의 시작 명령이 <code>git pull</code> 후 재빌드하므로 그것으로 끝이다.</p>
+
+<h3>방법 B. 주기적 자동 배포 (권장)</h3>
+<p>5분마다 원격 저장소를 확인해 변경이 있을 때만 다시 띄운다. 인바운드 노출이 없어 안전하고 설정이 단순하다.</p>
+<p>배포 스크립트를 만든다.</p>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ sudo tee /usr/local/bin/deploy-app &lt;&lt;'EOF'
+#!/usr/bin/env bash
+# 사용법: deploy-app &lt;프로젝트폴더명&gt;
+set -euo pipefail
+APP="$1"
+DIR="/srv/apps/$APP"
+cd "$DIR"
+
+git fetch --quiet origin
+LOCAL=$(git rev-parse @)
+REMOTE=$(git rev-parse @{u})
+if [ "$LOCAL" = "$REMOTE" ]; then
+  echo "$(date '+%F %T') [$APP] 변경 없음"
+  exit 0
+fi
+
+echo "$(date '+%F %T') [$APP] 새 커밋 발견: ${LOCAL:0:7} -&gt; ${REMOTE:0:7}"
+git pull --ff-only
+docker compose up --build -d
+docker image prune -f          # 오래된 이미지 정리 (SD카드 용량 보호)
+echo "$(date '+%F %T') [$APP] 배포 완료"
+EOF
+pi$ sudo chmod +x /usr/local/bin/deploy-app</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<p>systemd 타이머로 돌린다(프로젝트마다 하나씩).</p>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ sudo tee /etc/systemd/system/deploy@.service &lt;&lt;'EOF'
+[Unit]
+Description=Auto deploy %i from GitHub
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+User=admin
+ExecStart=/usr/local/bin/deploy-app %i
+EOF
+
+pi$ sudo tee /etc/systemd/system/deploy@.timer &lt;&lt;'EOF'
+[Unit]
+Description=Check %i for updates every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+EOF
+
+pi$ sudo systemctl daemon-reload
+pi$ sudo systemctl enable --now deploy@blog.timer
+pi$ systemctl list-timers 'deploy@*'</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<p>로그는 이렇게 본다.</p>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ journalctl -u deploy@blog.service -n 50 --no-pager</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<p>끄고 싶으면 <code>sudo systemctl disable --now deploy@blog.timer</code>.</p>
+
+<h3>방법 C. 푸시 즉시 배포 (웹훅)</h3>
+<p>GitHub에 푸시하는 순간 반영된다. Cloudflare Tunnel에 배포용 라우트를 하나 더 만들어 쓴다.</p>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ sudo apt install -y webhook
+pi$ mkdir -p ~/webhook
+pi$ nano ~/webhook/hooks.json</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<div class="code-block pi-cmd">
+  <pre><code>[
+  {
+    "id": "deploy-blog",
+    "execute-command": "/usr/local/bin/deploy-app",
+    "pass-arguments-to-command": [
+      { "source": "string", "name": "blog" }
+    ],
+    "trigger-rule": {
+      "and": [
+        {
+          "match": {
+            "type": "payload-hmac-sha256",
+            "secret": "&lt;긴_랜덤_문자열&gt;",
+            "parameter": { "source": "header", "name": "X-Hub-Signature-256" }
+          }
+        },
+        {
+          "match": {
+            "type": "value",
+            "value": "refs/heads/main",
+            "parameter": { "source": "payload", "name": "ref" }
+          }
+        }
+      ]
+    }
+  }
+]</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<p>서비스로 등록한다.</p>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ sudo tee /etc/systemd/system/webhook.service &lt;&lt;'EOF'
+[Unit]
+Description=GitHub webhook receiver
+After=network-online.target
+
+[Service]
+User=admin
+ExecStart=/usr/bin/webhook -hooks /home/admin/webhook/hooks.json -ip 127.0.0.1 -port 9000 -verbose
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+pi$ sudo systemctl enable --now webhook</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<p>앱에서 라우트를 하나 더 추가한다: <code>deploy.내도메인</code> → <code>http://localhost:9000</code>. GitHub 저장소 → Settings → Webhooks → Add webhook:</p>
+<ul>
+  <li>Payload URL: <code>https://deploy.내도메인/hooks/deploy-blog</code></li>
+  <li>Content type: <code>application/json</code></li>
+  <li>Secret: 위에 넣은 <code>&lt;긴_랜덤_문자열&gt;</code></li>
+  <li>이벤트: Just the push event</li>
+</ul>
+<blockquote>
+  <p>이 주소는 인터넷에 열린다. <strong>HMAC 시크릿을 반드시 설정</strong>하고, 가능하면 Cloudflare Access로 한 번 더 막는 것을 권한다.</p>
+</blockquote>
+
+<h2 id="s8">8. 재부팅해도 살아 있게</h2>
+<p>정전이나 재부팅 뒤에도 알아서 돌아오게 해두자.</p>
+<p><strong>컨테이너</strong>는 compose에 <code>restart: unless-stopped</code>를 넣었으면 Docker가 알아서 다시 띄운다.</p>
+<p><strong>터널</strong>은 앱에서 켠 것이 아니라 systemd 서비스로 만들어두는 편이 확실하다. 앱으로 만든 터널 설정을 그대로 쓴다.</p>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ ls ~/.cloudflared/            # config-&lt;터널이름&gt;.yml 확인
+pi$ sudo tee /etc/systemd/system/cloudflared-webpi.service &lt;&lt;'EOF'
+[Unit]
+Description=cloudflared tunnel webpi
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=admin
+ExecStart=/usr/bin/cloudflared --config /home/admin/.cloudflared/config-webpi.yml --no-autoupdate tunnel run webpi
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+pi$ sudo systemctl daemon-reload
+pi$ sudo systemctl enable --now cloudflared-webpi
+pi$ systemctl status cloudflared-webpi --no-pager</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+<blockquote>
+  <p>이렇게 하면 터널의 주인이 systemd가 되므로, <strong>GUI 앱의 터널 토글은 쓰지 않는다</strong>(둘 다 켜면 커넥터가 두 개 붙는다). 앱은 상태 확인과 서버(컨테이너) 조작 용도로 쓰고, 터널 자체는 systemd에 맡기는 구성이다. 라우트를 추가·수정했다면 <code>sudo systemctl restart cloudflared-webpi</code>로 반영한다.</p>
+</blockquote>
+
+<h2 id="s9">9. 운영 팁</h2>
+
+<p><strong>디스크 관리</strong> — SD카드/SSD가 이미지로 금방 찬다.</p>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ docker system df
+pi$ docker system prune -af --volumes    # 주의: 안 쓰는 볼륨까지 지운다
+pi$ df -h</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+
+<p><strong>롤백</strong> — 배포가 잘못됐을 때.</p>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ cd /srv/apps/blog
+pi$ git log --oneline -5
+pi$ git checkout &lt;이전커밋&gt;
+pi$ docker compose up --build -d</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+
+<p><strong>로그 보기</strong> — 앱의 로그 버튼으로도 되고, 직접 볼 수도 있다.</p>
+<div class="code-block pi-cmd">
+  <pre><code>pi$ docker compose -f /srv/apps/blog/docker-compose.yml logs -f --tail 100</code></pre>
+  <span class="cmd-badge pi">라즈베리파이</span>
+</div>
+
+<p><strong>메모리</strong> — Pi 5에서 Postgres 여러 개는 부담이다. 가벼운 서비스는 SQLite를 고려하고, <code>docker stats</code>로 사용량을 지켜보자.</p>
+
+<p><strong>이미지 아키텍처</strong> — 반드시 <strong>arm64</strong>여야 한다. 노트북(x86)에서 빌드해 올리면 <code>exec format error</code>가 난다. Pi에서 직접 빌드하거나 <code>docker buildx build --platform linux/arm64</code>를 쓴다.</p>
+
+<h2 id="s10">10. 안 될 때 확인 순서</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>증상</th>
+      <th>확인할 것</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>SSH 접속 안 됨 (LAN)</td>
+      <td>공유기에서 IP 재확인, <code>ping &lt;PI_IP&gt;</code></td>
+    </tr>
+    <tr>
+      <td>SSH 접속 안 됨 (외부)</td>
+      <td>노트북·Pi 양쪽 <code>tailscale status</code>, 둘 다 같은 계정인지</td>
+    </tr>
+    <tr>
+      <td>앱 연결 테스트 실패</td>
+      <td>키 파일 경로, 사용자명 <code>admin</code>, 1-7 이후 키 접속이 되는지</td>
+    </tr>
+    <tr>
+      <td>터널은 초록인데 502</td>
+      <td>컨테이너가 떠 있는지(<code>docker compose ps</code>), 포트가 라우트의 로컬 서비스와 같은지</td>
+    </tr>
+    <tr>
+      <td>사이트가 안 열림</td>
+      <td>Cloudflare DNS에 CNAME이 있는지, 터널이 실행 중인지, config의 ingress에 그 hostname이 있는지</td>
+    </tr>
+    <tr>
+      <td>자동 배포가 안 됨</td>
+      <td><code>journalctl -u deploy@blog.service</code>, 배포 키 권한, 브랜치 이름(main/master)</td>
+    </tr>
+    <tr>
+      <td>빌드가 실패</td>
+      <td>앱 로그 탭 또는 <code>docker compose build</code> 직접 실행해 에러 확인</td>
+    </tr>
+    <tr>
+      <td>컨테이너가 계속 재시작</td>
+      <td><code>docker compose logs</code>, <code>.env</code> 값 누락, arm64 이미지인지</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="appendix" id="appendix">
+<h2>부록: 프로젝트 추가 체크리스트</h2>
+
+<p>새 프로젝트를 얹을 때 반복하는 순서다.</p>
+<ol>
+  <li>포트 정하기 (5-2 표에 한 줄 추가)</li>
+  <li><code>/srv/apps/&lt;이름&gt;</code>으로 클론 (비공개면 배포 키 발급)</li>
+  <li><code>.env</code> 작성, <code>docker-compose.yml</code>의 포트를 <code>127.0.0.1:&lt;포트&gt;:&lt;컨테이너포트&gt;</code>로</li>
+  <li><code>docker compose up --build -d</code>로 수동 확인</li>
+  <li>앱에서 라우트 추가 → 서비스 등록(시작 명령에 <code>git pull --ff-only &amp;&amp;</code> 포함)</li>
+  <li>자동 배포가 필요하면 <code>sudo systemctl enable --now deploy@&lt;이름&gt;.timer</code></li>
+  <li>터널을 systemd로 돌리고 있다면 <code>sudo systemctl restart cloudflared-webpi</code></li>
+</ol>
+</div>
+
+</div>
+
+</div>
+</body>
+</html>
