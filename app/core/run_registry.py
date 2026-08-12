@@ -32,6 +32,9 @@ class RunRegistry:
     def unit_service(self, tunnel: str, route_id: str) -> str:
         return f"svc-{tunnel}-{route_id}"
 
+    def unit_clone(self, repo_id: str) -> str:
+        return f"clone-{repo_id}"
+
     # ---- 경로 ----
     def pid_path(self, unit: str) -> str:
         return f"{self.run_dir()}/{unit}.pid"

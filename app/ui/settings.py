@@ -25,6 +25,11 @@ class SettingsDialog(QDialog):
         self.cf_path_edit.setPlaceholderText("비우면 PATH에서 cloudflared 탐색")
         form.addRow("cloudflared 경로", self.cf_path_edit)
 
+        # 프로젝트 클론 기본 위치
+        self.repo_root_edit = QLineEdit(ctx.store.settings.repo_root)
+        self.repo_root_edit.setPlaceholderText("예: /srv/apps")
+        form.addRow("프로젝트 클론 위치", self.repo_root_edit)
+
         # 테마
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(list(THEME_LABELS.values()))
@@ -45,6 +50,7 @@ class SettingsDialog(QDialog):
 
     def _persist(self):
         self.ctx.store.settings.cloudflared_path = self.cf_path_edit.text().strip()
+        self.ctx.store.settings.repo_root = self.repo_root_edit.text().strip() or "/srv/apps"
         self.ctx.store.settings.theme = THEME_VALUES.get(
             self.theme_combo.currentText(), "dark")
         self.ctx.store.save()

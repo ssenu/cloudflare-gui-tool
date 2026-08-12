@@ -45,6 +45,15 @@ class SshProfile:
 
 
 @dataclass
+class RepoMeta:
+    id: str            # new_route_id()와 같은 방식으로 생성 (secrets.token_hex(4))
+    name: str          # 폴더 이름 (URL에서 자동 추출, 수정 가능)
+    url: str
+    path: str          # 대상 머신의 절대 경로 (예: /srv/apps/blog)
+    branch: str = ""   # 비우면 기본 브랜치
+
+
+@dataclass
 class Settings:
     root_domain: str = ""
     cloudflared_path: str = ""
@@ -55,10 +64,19 @@ class Settings:
     targets: dict[str, dict[str, TunnelMeta]] = field(default_factory=dict)
     ssh_profiles: list[SshProfile] = field(default_factory=list)
     theme: str = "dark"
+    # 대상(로컬/SSH 프로필)별 클론된 저장소 목록. targets와 같은 이유로
+    # 대상 키(CommandRunner.name)별로 분리한다 - 로컬과 원격 머신의 경로가
+    # 서로 다르기 때문이다.
+    repos: dict[str, list[RepoMeta]] = field(default_factory=dict)
+    repo_root: str = "/srv/apps"
 
     def tunnels_for(self, target_key: str) -> dict[str, TunnelMeta]:
         """target_key에 해당하는 터널 dict를 돌려준다. 없으면 새로 만들어 등록한다."""
         return self.targets.setdefault(target_key, {})
+
+    def repos_for(self, target_key: str) -> list[RepoMeta]:
+        """target_key에 해당하는 저장소 목록을 돌려준다. 없으면 새로 만들어 등록한다."""
+        return self.repos.setdefault(target_key, [])
 
 
 def _filter_dataclass_kwargs(dataclass_type, data: dict) -> dict:
@@ -146,6 +164,27 @@ def _parse_tunnel_meta(v) -> tuple[TunnelMeta, bool]:
     return TunnelMeta(name=name, routes=[]), False
 
 
+def _parse_repo_meta(data) -> RepoMeta:
+    """dict를 RepoMeta로 변환. id/name/url/path가 없거나 문자열이 아니면 TypeError."""
+    kwargs = _filter_dataclass_kwargs(RepoMeta, data)
+    for key in ("id", "name", "url", "path"):
+        if not isinstance(kwargs.get(key), str) or not kwargs.get(key):
+            raise TypeError(f"{key} must be non-empty str")
+    return RepoMeta(**kwargs)
+
+
+def _parse_repos_list(repos_data) -> list[RepoMeta]:
+    """저장소 배열을 파싱. 잘못된 항목은 개별 스킵."""
+    repos: list[RepoMeta] = []
+    if isinstance(repos_data, list):
+        for r in repos_data:
+            try:
+                repos.append(_parse_repo_meta(r))
+            except (TypeError, ValueError):
+                continue
+    return repos
+
+
 def default_settings_path() -> str:
     base = os.environ.get("APPDATA") or os.path.expanduser("~")
     return os.path.join(base, "CloudflareTunnelGUI", "settings.json")
@@ -218,12 +257,27 @@ class SettingsStore:
                 if theme not in ("dark", "light"):
                     theme = "dark"
 
+                # 대상별 저장소 목록 (키가 없던 기존 설정 파일도 문제없이 로드됨)
+                repos: dict[str, list[RepoMeta]] = {}
+                repos_data = raw.get("repos", {})
+                if isinstance(repos_data, dict):
+                    for target_key, repo_list in repos_data.items():
+                        if not isinstance(target_key, str):
+                            continue
+                        repos[target_key] = _parse_repos_list(repo_list)
+
+                repo_root = raw.get("repo_root", "/srv/apps")
+                if not isinstance(repo_root, str):
+                    repo_root = "/srv/apps"
+
                 self.settings = Settings(
                     root_domain=raw.get("root_domain", ""),
                     cloudflared_path=raw.get("cloudflared_path", ""),
                     targets=targets,
                     ssh_profiles=ssh_profiles,
                     theme=theme,
+                    repos=repos,
+                    repo_root=repo_root,
                 )
 
                 # v1 형식에서 실제로 마이그레이션이 일어난 경우에만 재저장.
@@ -253,6 +307,11 @@ class SettingsStore:
             },
             "ssh_profiles": [asdict(p) for p in self.settings.ssh_profiles],
             "theme": self.settings.theme,
+            "repos": {
+                target_key: [asdict(r) for r in repo_list]
+                for target_key, repo_list in self.settings.repos.items()
+            },
+            "repo_root": self.settings.repo_root,
         }
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump(raw, f, ensure_ascii=False, indent=2)

@@ -2,8 +2,8 @@ import json
 import os
 import time
 
-from app.core.store import (RouteMeta, ServiceSpec, SettingsStore, SshProfile,
-                            TunnelMeta, new_route_id)
+from app.core.store import (RepoMeta, RouteMeta, ServiceSpec, SettingsStore,
+                            SshProfile, TunnelMeta, new_route_id)
 
 
 def test_load_missing_file_returns_defaults(tmp_path):
@@ -620,3 +620,87 @@ def test_nested_targets_format_roundtrips(tmp_path):
     assert save_calls == []  # 이미 v2/targets 형식이므로 재저장 없음
     assert "a" in s.tunnels_for("local")
     assert "b" in s.tunnels_for("ssh:rpi")
+
+
+# ---- 저장소(RepoMeta) ----
+
+def test_repos_for_missing_target_returns_and_registers_empty_list(tmp_path):
+    store = SettingsStore(path=str(tmp_path / "settings.json"))
+    store.load()
+    assert "ssh:new" not in store.settings.repos
+    result = store.settings.repos_for("ssh:new")
+    assert result == []
+    assert "ssh:new" in store.settings.repos
+    assert store.settings.repos["ssh:new"] is result
+
+
+def test_repo_root_default(tmp_path):
+    store = SettingsStore(path=str(tmp_path / "settings.json"))
+    s = store.load()
+    assert s.repo_root == "/srv/apps"
+
+
+def test_repos_roundtrip(tmp_path):
+    path = str(tmp_path / "settings.json")
+    store = SettingsStore(path=path)
+    store.load()
+    store.settings.repo_root = "/srv/apps"
+    store.settings.repos_for("ssh:webpi").append(
+        RepoMeta(id="aaaa1111", name="blog", url="https://github.com/a/blog.git",
+                 path="/srv/apps/blog", branch="main"))
+    store.save()
+
+    loaded = SettingsStore(path=path).load()
+    repos = loaded.repos_for("ssh:webpi")
+    assert len(repos) == 1
+    assert repos[0].name == "blog"
+    assert repos[0].url == "https://github.com/a/blog.git"
+    assert repos[0].path == "/srv/apps/blog"
+    assert repos[0].branch == "main"
+    assert loaded.repo_root == "/srv/apps"
+
+
+def test_repos_missing_key_in_old_file_loads_empty(tmp_path):
+    """repos 키가 없는(구버전) settings.json도 문제없이 로드되어야 한다."""
+    path = str(tmp_path / "settings.json")
+    old_json = {
+        "root_domain": "example.com",
+        "cloudflared_path": "",
+        "tunnels": {},
+        "ssh_profiles": [],
+        "theme": "dark",
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(old_json, f)
+
+    store = SettingsStore(path=path)
+    s = store.load()
+    assert s.repos_for("local") == []
+    assert s.repo_root == "/srv/apps"
+
+
+def test_repos_bad_entries_skipped(tmp_path):
+    path = str(tmp_path / "settings.json")
+    bad_json = {
+        "root_domain": "",
+        "cloudflared_path": "",
+        "targets": {},
+        "ssh_profiles": [],
+        "repos": {
+            "local": [
+                {"id": "aaaa1111", "name": "good", "url": "https://x.com/a/good.git",
+                 "path": "/srv/apps/good"},
+                {"name": "no-id", "url": "https://x.com/a/b.git", "path": "/srv/apps/b"},
+                {"id": "", "name": "empty-id", "url": "u", "path": "p"},
+                "not_a_dict",
+            ],
+        },
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(bad_json, f)
+
+    store = SettingsStore(path=path)
+    s = store.load()
+    repos = s.repos_for("local")
+    assert len(repos) == 1
+    assert repos[0].name == "good"

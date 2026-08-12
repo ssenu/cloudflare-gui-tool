@@ -386,6 +386,8 @@ class MainWindow(QWidget):
         self.add_btn = QPushButton("터널 생성")
         self.add_btn.setIcon(make_icon("plus", palette["on_accent"]))
         self.add_btn.setObjectName("primary")
+        self.repos_btn = QPushButton("프로젝트")
+        # 프로젝트 버튼도 설정 버튼과 마찬가지로 아이콘 없이 텍스트만 쓴다
         self.settings_btn = QPushButton("설정")
         # I1: 설정 버튼은 아이콘 없이 텍스트만
         self.help_btn = QPushButton("?")
@@ -393,6 +395,7 @@ class MainWindow(QWidget):
         self.help_btn.setToolTip("사용 흐름 안내")
         self.refresh_btn.clicked.connect(self.refresh)
         self.add_btn.clicked.connect(self._create_tunnel)
+        self.repos_btn.clicked.connect(self._open_repos)
         self.settings_btn.clicked.connect(self._open_settings)
         self.help_btn.clicked.connect(self._open_guide)
         self.target_combo.currentIndexChanged.connect(self._switch_target)
@@ -402,6 +405,7 @@ class MainWindow(QWidget):
         top.addWidget(self.target_combo, 1)
         top.addWidget(self.refresh_btn)
         top.addWidget(self.add_btn)
+        top.addWidget(self.repos_btn)
         top.addWidget(self.settings_btn)
         top.addWidget(self.help_btn)
 
@@ -867,6 +871,11 @@ class MainWindow(QWidget):
                 self.refresh()
 
         dlg.finished.connect(_on_finished)
+        self._open_modal(dlg)
+
+    def _open_repos(self):
+        from app.ui.repo_manager import RepoManagerDialog
+        dlg = RepoManagerDialog(self.ctx, self)
         self._open_modal(dlg)
 
     def _open_guide(self):
