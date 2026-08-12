@@ -25,6 +25,10 @@ class TunnelWizard(QDialog):
         self.ctx = ctx
         self.existing = existing_names
         self.created_meta: TunnelMeta | None = None
+        # C1 수정: owner는 계정 단위(Settings.tunnel_owners)에 기록해야 하므로
+        # created_meta에 담지 않고 터널 UUID를 별도로 실어 보낸다 - 호출측
+        # (main_window._create_tunnel)이 tunnel_owners[tunnel_id]에 쓴다.
+        self.created_tunnel_id: str = ""
         self._events: list[tuple] = []  # 워커 스레드 → UI 폴링 큐
         self._next_mode = "nav"  # "nav" | "close" | "done"
         self._tunnel_created = False  # 터널 생성 성공 여부 추적
@@ -469,8 +473,8 @@ class TunnelWizard(QDialog):
                         stop_cmd=self.stop_cmd_edit.text().strip(),
                         cwd=self.cwd_edit.text().strip(),
                         autostart=self.together_chk.isChecked()))
-                self.created_meta = TunnelMeta(name=name, routes=[route],
-                                               owner=self.ctx.runner.name)
+                self.created_meta = TunnelMeta(name=name, routes=[route])
+                self.created_tunnel_id = self._created.get("tunnel_id", "")
                 # 루트 도메인 기억
                 self.ctx.store.settings.root_domain = self.domain_edit.text().strip()
                 self._next_mode = "done"

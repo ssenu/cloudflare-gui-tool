@@ -247,17 +247,22 @@ def test_reload_targets_falls_back_to_local_when_profile_deleted(qapp, tmp_path)
     assert win.ctx.runner is win.ctx.local_runner
 
 
-# ---- O: 터널 카드의 "만든 곳" 배지 / 자격증명 없을 때 실행 불가 표시 ----
+# ---- O/C1: 터널 카드의 "만든 곳" 배지 / 자격증명 없을 때 실행 불가 표시 ----
+#
+# owner는 계정 단위(Settings.tunnel_owners, 키=터널 UUID)에 저장된다 - 대상별
+# targets에 두면 대상을 바꾸는 순간 다른 dict를 보게 되어 기능이 무력화된다
+# (C1). 아래 테스트들은 owner를 TunnelMeta가 아니라 tunnel_owners에 직접
+# 심어서, 실제 저장 위치를 기준으로 검증한다.
 
-def test_card_shows_owner_badge_when_owner_set(qapp, tmp_path):
+def test_card_shows_owner_badge_when_owner_recorded(qapp, tmp_path):
     runner = FakeRunner(home="/home/fake")
     runner.run_results[LIST_TUNNELS_CMD] = RunResult(
         0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
     runner.files["/home/fake/.cloudflared/tid1.json"] = "{}"  # 자격증명 있음
 
     win = make_window(qapp, tmp_path, runner)
-    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
-        name="t1", owner="local")
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1")
+    win.ctx.store.settings.tunnel_owners["tid1"] = "local"
     win.refresh()
 
     card = win.cards[0]
@@ -267,17 +272,18 @@ def test_card_shows_owner_badge_when_owner_set(qapp, tmp_path):
     assert card.tunnel_switch.isEnabled()
 
 
-def test_card_hides_owner_badge_when_owner_empty(qapp, tmp_path):
+def test_card_hides_owner_badge_when_owner_not_recorded(qapp, tmp_path):
     runner = FakeRunner(home="/home/fake")
     runner.run_results[LIST_TUNNELS_CMD] = RunResult(
         0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
-    # 자격증명이 없어야 backfill이 일어나지 않고 owner가 빈 채로 남는다
+    # 자격증명이 없어야 backfill이 일어나지 않고 owner가 기록되지 않은 채로 남는다
     win = make_window(qapp, tmp_path, runner)
-    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1", owner="")
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1")
     win.refresh()
 
     card = win.cards[0]
     assert card.owner_badge.isHidden()
+    assert win.ctx.store.settings.tunnel_owners == {}
 
 
 def test_card_shows_cannot_run_and_disables_toggle_without_credentials(qapp, tmp_path):
@@ -287,8 +293,8 @@ def test_card_shows_cannot_run_and_disables_toggle_without_credentials(qapp, tmp
     # 자격증명 파일을 만들지 않는다 -> has_credentials False
 
     win = make_window(qapp, tmp_path, runner)
-    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
-        name="t1", owner="ssh:webPi")
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1")
+    win.ctx.store.settings.tunnel_owners["tid1"] = "ssh:webPi"
     win.refresh()
 
     card = win.cards[0]
@@ -302,6 +308,58 @@ def test_card_shows_cannot_run_and_disables_toggle_without_credentials(qapp, tmp
     assert not card.tunnel_switch.isEnabled()
 
 
+def test_owner_badge_survives_target_switch(qapp, tmp_path):
+    """C1의 핵심 증거: 대상 A에서 기록된 owner가 대상 B로 전환해도 그대로 보여야 한다.
+
+    targets는 대상별로 나뉘어 있지만 tunnel_owners는 계정 단위 단일 맵이므로,
+    대상을 바꿔도(러너 교체) 같은 owner를 봐야 한다.
+    """
+    runner_a = FakeRunner(home="/home/a")
+    runner_a.name = "local"
+    runner_a.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid-shared","name":"t1","created_at":"","connections":[]}]', "")
+    runner_a.files["/home/a/.cloudflared/tid-shared.json"] = "{}"  # A에 자격증명 있음
+
+    win = make_window(qapp, tmp_path, runner_a)
+    win.ctx.store.settings.tunnels_for("local")["t1"] = TunnelMeta(name="t1")
+    win.refresh()  # backfill: tunnel_owners["tid-shared"] = "local"
+
+    assert win.ctx.store.settings.tunnel_owners["tid-shared"] == "local"
+    assert "이 PC" in win.cards[0].owner_badge.text()
+
+    # 대상을 SSH 프로필(webPi)로 전환한다 - 실제 연결 없이 러너만 교체
+    runner_b = FakeRunner(home="/home/b")
+    runner_b.name = "ssh:webPi"
+    runner_b.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid-shared","name":"t1","created_at":"","connections":[]}]', "")
+    # B에는 자격증명이 없다 - 그래도 owner는 "이 PC"로 보여야 한다(A가 만든 것)
+    win.ctx.store.settings.tunnels_for("ssh:webPi")["t1"] = TunnelMeta(name="t1")
+    win.ctx.runner = runner_b
+    win.refresh()
+
+    card = win.cards[0]
+    assert not card.owner_badge.isHidden()
+    assert "이 PC" in card.owner_badge.text()  # 여전히 대상 A(local)로 표시됨
+    assert not card.cannot_run_label.isHidden()  # B에는 자격증명이 없으므로 실행 불가
+
+
+def test_backfill_never_overwrites_existing_owner(qapp, tmp_path):
+    """자격증명이 양쪽 대상에 다 있어도, 이미 기록된 owner를 가로채면 안 된다(C2)."""
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    runner.files["/home/fake/.cloudflared/tid1.json"] = "{}"  # 지금 대상에도 자격증명 있음
+
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1")
+    win.ctx.store.settings.tunnel_owners["tid1"] = "ssh:webPi"  # 이미 다른 대상이 owner
+    win.refresh()
+
+    # backfill 조건("id가 없을 때만")에 해당하지 않으므로 덮어쓰지 않는다
+    assert win.ctx.store.settings.tunnel_owners["tid1"] == "ssh:webPi"
+    assert "webPi" in win.cards[0].owner_badge.text()
+
+
 def test_refresh_backfills_owner_when_credentials_present(qapp, tmp_path):
     runner = FakeRunner(home="/home/fake")
     runner.run_results[LIST_TUNNELS_CMD] = RunResult(
@@ -309,15 +367,14 @@ def test_refresh_backfills_owner_when_credentials_present(qapp, tmp_path):
     runner.files["/home/fake/.cloudflared/tid1.json"] = "{}"
 
     win = make_window(qapp, tmp_path, runner)
-    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1", owner="")
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1")
     win.refresh()
 
-    meta = win.ctx.store.settings.tunnels_for("fake")["t1"]
-    assert meta.owner == "fake"  # 현재 대상(runner.name)으로 채워졌어야 함
+    assert win.ctx.store.settings.tunnel_owners["tid1"] == "fake"  # 현재 대상(runner.name)
 
     # 저장까지 반영됐는지 재로드로 확인
     reloaded = SettingsStore(path=win.ctx.store.path).load()
-    assert reloaded.tunnels_for("fake")["t1"].owner == "fake"
+    assert reloaded.tunnel_owners["tid1"] == "fake"
 
 
 def test_credentials_check_happens_once_per_refresh_not_on_tick(qapp, tmp_path):
@@ -335,7 +392,8 @@ def test_credentials_check_happens_once_per_refresh_not_on_tick(qapp, tmp_path):
     runner.files["/home/fake/.cloudflared/tid1.json"] = "{}"
 
     win = make_window(qapp, tmp_path, runner)
-    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1", owner="local")
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1")
+    win.ctx.store.settings.tunnel_owners["tid1"] = "local"
     win.refresh()
     after_refresh = calls["n"]
     assert after_refresh >= 1
@@ -345,3 +403,55 @@ def test_credentials_check_happens_once_per_refresh_not_on_tick(qapp, tmp_path):
 
     # _tick()(1초 폴링)에서는 자격증명 파일을 다시 조회하지 않아야 한다
     assert calls["n"] == after_refresh
+
+
+# ---- I3: 단축키가 비활성화된(자격증명 없는) 토글을 우회하면 안 된다 ----
+
+def test_shortcut_tunnel_ignores_disabled_toggle(qapp, tmp_path):
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    # 자격증명 없음 -> 토글 비활성화
+
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1")
+    win.refresh()
+
+    card = win.cards[0]
+    assert not card.tunnel_switch.isEnabled()
+
+    calls = []
+    win.ctx.manager.start_tunnel = lambda *a, **k: calls.append(a)
+
+    win._shortcut_tunnel(0)  # Ctrl+1에 해당
+
+    assert calls == []  # 비활성 토글이므로 아무 것도 호출되지 않아야 한다
+    assert not card.tunnel_switch.isChecked()
+
+
+def test_shortcut_server_ignores_disabled_toggle(qapp, tmp_path):
+    from app.core.store import RouteMeta, ServiceSpec
+
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    runner.files["/home/fake/.cloudflared/tid1.json"] = "{}"  # 터널 자체는 실행 가능
+
+    route = RouteMeta(id=new_route_id(), hostname="a.example.com",
+                      service="http://localhost:8000",
+                      server=ServiceSpec(kind="command", start_cmd="myserver"))
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1", routes=[route])
+    win.refresh()
+
+    card = win.cards[0]
+    switch = card.route_rows[0].server_switch
+    switch.setEnabled(False)  # 서버 토글이 비활성화된 상황을 흉내낸다
+
+    calls = []
+    win.ctx.manager.start_service = lambda *a, **k: calls.append(a)
+
+    win._shortcut_server(0)  # Ctrl+Shift+1에 해당
+
+    assert calls == []
+    assert not switch.isChecked()

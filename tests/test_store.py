@@ -50,39 +50,55 @@ def test_save_and_load_roundtrip(tmp_path):
     assert "local" in raw["targets"]
 
 
-def test_owner_roundtrip(tmp_path):
+def test_tunnel_owners_roundtrip(tmp_path):
+    # C1: owner는 대상별 targets가 아니라 계정 단위(터널 UUID 키) 맵에
+    # 저장된다 - 대상을 바꿔도 같은 값을 봐야 하므로 targets 밖에 있어야 한다.
     path = str(tmp_path / "settings.json")
     store = SettingsStore(path=path)
     store.load()
-    store.settings.tunnels_for("local")["mysite"] = TunnelMeta(
-        name="mysite", owner="ssh:webPi")
+    store.settings.tunnel_owners["a1b2c3d4-uuid"] = "ssh:webPi"
     store.save()
 
     loaded = SettingsStore(path=path).load()
-    assert loaded.tunnels_for("local")["mysite"].owner == "ssh:webPi"
+    assert loaded.tunnel_owners == {"a1b2c3d4-uuid": "ssh:webPi"}
+    raw = json.loads(open(path, encoding="utf-8").read())
+    assert raw["tunnel_owners"] == {"a1b2c3d4-uuid": "ssh:webPi"}
 
 
-def test_owner_defaults_to_empty_when_absent_from_old_config(tmp_path):
-    """owner 필드가 없던 구버전 설정 파일도 문제없이 로드되어야 함"""
+def test_tunnel_owners_defaults_to_empty_when_absent_from_old_config(tmp_path):
+    """tunnel_owners 키가 없던 구버전 설정 파일도 문제없이 로드되어야 함"""
     path = str(tmp_path / "settings.json")
     old_format = {
         "root_domain": "example.com",
         "targets": {
             "local": {
-                "mysite": {
-                    "name": "mysite",
-                    "routes": [],
-                    # owner 키 자체가 없음 (구버전)
-                }
+                "mysite": {"name": "mysite", "routes": []},
             }
         },
+        # tunnel_owners 키 자체가 없음 (구버전)
     }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(old_format, f)
 
     store = SettingsStore(path=path)
     s = store.load()
-    assert s.tunnels_for("local")["mysite"].owner == ""
+    assert s.tunnel_owners == {}
+
+
+def test_tunnel_owners_ignores_non_string_entries(tmp_path):
+    path = str(tmp_path / "settings.json")
+    bad_format = {
+        "tunnel_owners": {
+            "good-uuid": "local",
+            "bad-uuid": 123,       # 값이 문자열이 아님 -> 스킵
+        },
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(bad_format, f)
+
+    store = SettingsStore(path=path)
+    s = store.load()
+    assert s.tunnel_owners == {"good-uuid": "local"}
 
 
 def test_theme_roundtrip(tmp_path):

@@ -235,7 +235,7 @@ class RouteRow(QWidget):
 
 class TunnelCard(QFrame):
     def __init__(self, win: "MainWindow", info, meta: TunnelMeta,
-                has_credentials: bool = True):
+                has_credentials: bool = True, owner_key: str = ""):
         super().__init__()
         self.setObjectName("card")
         self.win = win
@@ -256,10 +256,13 @@ class TunnelCard(QFrame):
         self.state_label = QLabel()
         self.state_label.setObjectName("cardSub")
 
-        # O1: 이 터널을 만든(또는 옮겨온) 대상. 비어 있으면 표시하지 않는다.
+        # O1/C1: 이 터널을 만든(또는 옮겨온) 대상. owner_key는 계정 단위
+        # (Settings.tunnel_owners[tunnel_id])에서 조회한 값을 refresh()가
+        # 넘겨준다 - meta(대상별로 나뉘어 있음)에서 읽지 않는다. 비어 있으면
+        # 표시하지 않는다.
         self.owner_badge = QLabel()
         self.owner_badge.setStyleSheet(f"color: {palette['muted']}; font-size: 11px;")
-        owner_text = owner_label(meta.owner)
+        owner_text = owner_label(owner_key)
         if owner_text:
             self.owner_badge.setText(f"만든 곳: {owner_text}")
         else:
@@ -660,6 +663,7 @@ class MainWindow(QWidget):
         # tunnel list는 대상 간에 같아도, config-*.yml/서버 실행 명령은
         # 대상마다 다르기 때문이다.
         metas = self.ctx.store.settings.tunnels_for(self.ctx.runner.name)
+        owners = self.ctx.store.settings.tunnel_owners
         restored = False
         owner_backfilled = False
         for info in infos:
@@ -671,12 +675,15 @@ class MainWindow(QWidget):
             # O3: 자격증명 존재 여부는 여기(카드 재생성 시점)에서만 확인한다 -
             # _tick()의 1초 폴링에서 매번 원격 stat을 날리지 않기 위해서다.
             has_creds = self.ctx.client.has_credentials(info.id)
-            # O4: owner가 비어 있던 기존 터널이라도 지금 대상에 자격증명이
-            # 있으면 그 대상이 곧 만든/옮긴 기기라는 합리적 추론으로 채운다.
-            if not meta.owner and has_creds:
-                meta.owner = self.ctx.runner.name
+            # C1/C2: owner는 계정 단위(터널 UUID 키)로만 기록한다 - 대상별
+            # meta에 두면 대상을 바꾸는 순간 다른 dict를 보게 돼 기능이
+            # 무력화된다. backfill도 "이 id로 기록된 owner가 아직 없을 때만"
+            # 채운다 - 이미 있으면 절대 덮어쓰지 않는다(자격증명을 여러
+            # 대상에 복사해도 소유권을 가로채지 못하게).
+            if info.id not in owners and has_creds:
+                owners[info.id] = self.ctx.runner.name
                 owner_backfilled = True
-            card = TunnelCard(self, info, meta, has_creds)
+            card = TunnelCard(self, info, meta, has_creds, owners.get(info.id, ""))
             self.list_lay.insertWidget(self.list_lay.count() - 1, card)
             self.cards.append(card)
         if restored or owner_backfilled:
@@ -720,6 +727,12 @@ class MainWindow(QWidget):
                 meta = wiz.created_meta
                 if isinstance(meta, TunnelMeta):
                     self.ctx.store.settings.tunnels_for(self.ctx.runner.name)[meta.name] = meta
+                    # C1: owner는 계정 단위(터널 UUID 키)로 기록한다. 새로
+                    # 만든 터널이라 항상 새 id이므로 여기서는 무조건 쓴다
+                    # (backfill의 "이미 있으면 덮지 않기"는 refresh() 쪽 로직).
+                    tid = wiz.created_tunnel_id
+                    if tid:
+                        self.ctx.store.settings.tunnel_owners[tid] = self.ctx.runner.name
                     self.ctx.store.save()
                 self.refresh()
 
@@ -989,14 +1002,20 @@ class MainWindow(QWidget):
 
     # ---- 단축키 ----
     def _shortcut_tunnel(self, idx: int):
+        # I3: QAbstractButton.toggle()은 isEnabled()를 보지 않으므로, 자격증명이
+        # 없어 setEnabled(False)된 토글까지 단축키로 우회해 켜지는 것을 막는다.
         if idx < len(self.cards):
-            self.cards[idx].tunnel_switch.toggle()
+            switch = self.cards[idx].tunnel_switch
+            if switch.isEnabled():
+                switch.toggle()
 
     def _shortcut_server(self, idx: int):
         if idx < len(self.cards):
             card = self.cards[idx]
             if card.route_rows and card.route_rows[0].server_switch is not None:
-                card.route_rows[0].server_switch.toggle()
+                switch = card.route_rows[0].server_switch
+                if switch.isEnabled():
+                    switch.toggle()
 
     # ---- 종료 정리 ----
     def closeEvent(self, event):

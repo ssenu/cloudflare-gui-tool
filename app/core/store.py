@@ -28,10 +28,6 @@ class RouteMeta:
 class TunnelMeta:
     name: str
     routes: list[RouteMeta] = field(default_factory=list)
-    # 이 터널을 만든(또는 자격증명을 확인해 옮겨온) 대상 키. CommandRunner.name과
-    # 같은 값("local" 또는 "ssh:<프로필명>"). 옛 설정 파일에는 없던 필드라
-    # 기본값이 빈 문자열이며, 그 경우 UI는 아무것도 표시하지 않는다.
-    owner: str = ""
 
 
 def new_route_id() -> str:
@@ -73,6 +69,12 @@ class Settings:
     # 서로 다르기 때문이다.
     repos: dict[str, list[RepoMeta]] = field(default_factory=dict)
     repo_root: str = "/srv/apps"
+    # 터널을 만든(또는 자격증명을 확인해 옮겨온) 대상 키. tunnel list가
+    # Cloudflare 계정 단위라 owner도 대상별이 아니라 계정 단위여야 한다 -
+    # 그래서 targets처럼 대상 키로 나누지 않고, 터널 UUID(TunnelInfo.id, 이름
+    # 변경에도 안전)를 키로 쓰는 단일 맵으로 둔다. 값은 CommandRunner.name
+    # ("local" 또는 "ssh:<프로필명>").
+    tunnel_owners: dict[str, str] = field(default_factory=dict)
 
     def tunnels_for(self, target_key: str) -> dict[str, TunnelMeta]:
         """target_key에 해당하는 터널 dict를 돌려준다. 없으면 새로 만들어 등록한다."""
@@ -140,13 +142,9 @@ def _parse_tunnel_meta(v) -> tuple[TunnelMeta, bool]:
     if not isinstance(name, str):
         raise TypeError("name must be str")
 
-    owner = v.get("owner", "") or ""
-    if not isinstance(owner, str):
-        owner = ""
-
     if "routes" in v:
         routes = _parse_routes_list(v.get("routes"))
-        return TunnelMeta(name=name, routes=routes, owner=owner), False
+        return TunnelMeta(name=name, routes=routes), False
 
     # v1 형식 마이그레이션
     hostname = v.get("hostname", "") or ""
@@ -278,6 +276,16 @@ class SettingsStore:
                 if not isinstance(repo_root, str):
                     repo_root = "/srv/apps"
 
+                # 터널 UUID -> 만든 대상 키. 계정 단위라 targets처럼 대상별로
+                # 나누지 않는다. 키/값이 문자열이 아닌 항목은 개별 스킵(옛
+                # 설정 파일에 아예 없던 필드라 없어도 정상 로드되어야 함).
+                tunnel_owners: dict[str, str] = {}
+                owners_data = raw.get("tunnel_owners", {})
+                if isinstance(owners_data, dict):
+                    for tid, owner in owners_data.items():
+                        if isinstance(tid, str) and isinstance(owner, str):
+                            tunnel_owners[tid] = owner
+
                 self.settings = Settings(
                     root_domain=raw.get("root_domain", ""),
                     cloudflared_path=raw.get("cloudflared_path", ""),
@@ -286,6 +294,7 @@ class SettingsStore:
                     theme=theme,
                     repos=repos,
                     repo_root=repo_root,
+                    tunnel_owners=tunnel_owners,
                 )
 
                 # v1 형식에서 실제로 마이그레이션이 일어난 경우에만 재저장.
@@ -320,6 +329,7 @@ class SettingsStore:
                 for target_key, repo_list in self.settings.repos.items()
             },
             "repo_root": self.settings.repo_root,
+            "tunnel_owners": dict(self.settings.tunnel_owners),
         }
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump(raw, f, ensure_ascii=False, indent=2)
