@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-                             QHBoxLayout, QLineEdit, QListWidget, QMessageBox,
+                             QHBoxLayout, QLabel, QLineEdit, QListWidget, QMessageBox,
                              QPushButton, QSpinBox, QVBoxLayout)
 
 from app.context import AppContext
@@ -34,12 +34,18 @@ class SshManagerDialog(QDialog):
 
         # 프로필 폼
         self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("예: webPi (목록에서 구분할 이름)")
         self.host_edit = QLineEdit()
+        self.host_edit.setPlaceholderText(
+            "예: 100.78.119.115 또는 webpi — Tailscale 주소나 LAN IP")
         self.port_spin = QSpinBox()
         self.port_spin.setRange(1, 65535)
         self.port_spin.setValue(22)
+        self.port_spin.setToolTip("보통 22")
         self.user_edit = QLineEdit("pi")
+        self.user_edit.setPlaceholderText("예: admin")
         self.key_edit = QLineEdit()
+        self.key_edit.setPlaceholderText(r"예: C:\Users\사용자\.ssh\id_ed25519")
         key_btn = QPushButton("키 파일...")
         key_btn.setIcon(make_icon("folder", icon_color))
         key_btn.clicked.connect(lambda: self.key_edit.setText(
@@ -50,7 +56,14 @@ class SshManagerDialog(QDialog):
         save_btn.setObjectName("primary")
         save_btn.clicked.connect(self._save_profile)
 
+        hint_label = QLabel(
+            "비밀번호는 저장하지 않습니다. 대상 서버의 ~/.ssh/authorized_keys에 "
+            "공개키를 등록한 뒤 개인키 파일을 지정하세요.")
+        hint_label.setWordWrap(True)
+        hint_label.setStyleSheet(f"color: {palette['muted']}; font-size: 11px;")
+
         form = QFormLayout()
+        form.addRow(hint_label)
         form.addRow("이름", self.name_edit)
         form.addRow("호스트", self.host_edit)
         form.addRow("포트", self.port_spin)
