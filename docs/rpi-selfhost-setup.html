@@ -150,7 +150,37 @@
   <pre><code>pc&gt; arp -a | findstr "192.168"</code></pre>
   <span class="cmd-badge pc">노트북</span>
 </div>
-<p>찾은 주소를 <code>&lt;PI_IP&gt;</code>로 부르겠다 (예: <code>192.168.0.42</code>).</p>
+<p><strong>이 집 환경에서 확인된 값</strong> (Linksys E9450, 관리 주소 <code>http://192.168.79.1</code>):</p>
+<table>
+  <thead>
+    <tr>
+      <th>항목</th>
+      <th>값</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>호스트 이름</td>
+      <td>webPi</td>
+    </tr>
+    <tr>
+      <td>MAC 주소</td>
+      <td><code>2c:cf:67:63:c3:ea</code></td>
+    </tr>
+    <tr>
+      <td>IP 주소</td>
+      <td><strong>192.168.79.6</strong> (DHCP 예약으로 고정 완료)</td>
+    </tr>
+  </tbody>
+</table>
+<p>아래에서 <code>&lt;PI_IP&gt;</code> 는 <code>192.168.79.6</code> 이다.</p>
+
+<h3>1-1-1. IP 고정 (이미 적용됨)</h3>
+<p>공유기가 매번 같은 주소를 주도록 예약해 두었다. 다시 확인하거나 다른 기기를 추가할 때는:</p>
+<p><strong>고급 설정 → LAN → 고정 IP 리스 목록 → 추가</strong> 에서 MAC 주소와 IP를 넣고 <strong>적용/저장</strong>을 누른다. 적용 시 DHCP 서버가 재시작되며 무선 연결이 몇 초간 끊길 수 있다.</p>
+<blockquote>
+  <p>파이 안에서 netplan으로 static IP를 박는 방법도 있지만, 공유기 예약이 더 낫다. 주소 충돌을 공유기가 직접 막아주고, OS를 다시 설치해도 설정이 남으며, 파이 설정을 잘못 건드려 접속 불능이 될 위험이 없다.</p>
+</blockquote>
 
 <h3>1-2. SSH 접속</h3>
 <div class="code-block pc-cmd">
