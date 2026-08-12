@@ -38,6 +38,9 @@ def make_window(qapp, tmp_path, runner: FakeRunner | None = None) -> MainWindow:
     ctx = make_ctx(tmp_path, runner)
     win = MainWindow(ctx)
     win._timer.stop()  # 테스트 중 실제 QTimer가 돌지 않도록 (수동으로 _tick 호출)
+    # 첫 조회는 창을 먼저 띄우려고 이벤트 루프로 미뤄져 있다(성능). 테스트는
+    # 이벤트 루프를 돌리지 않으므로 여기서 대신 한 번 불러 준다.
+    win.refresh()
     return win
 
 
@@ -138,6 +141,7 @@ def test_delete_route_rolls_back_when_config_write_fails(qapp, tmp_path, monkeyp
     ctx.store.settings.tunnels_for(ctx.runner.name)["t1"] = meta
     win = MainWindow(ctx)
     win._timer.stop()
+    win.refresh()
     card = win.cards[0]
     assert len(card.meta.routes) == 1
 
@@ -397,32 +401,41 @@ def test_refresh_backfills_owner_when_credentials_present(qapp, tmp_path):
     assert reloaded.tunnel_owners["tid1"] == "fake"
 
 
-def test_credentials_check_happens_once_per_refresh_not_on_tick(qapp, tmp_path):
-    calls = {"n": 0}
+def test_credentials_check_is_one_listing_per_refresh_not_per_tunnel(qapp, tmp_path):
+    """자격증명 확인은 터널 수와 무관하게 디렉터리 조회 1회여야 한다.
+
+    예전에는 터널마다 file_exists()를 불러, SSH 대상에서 터널이 늘어날수록
+    새로고침이 그만큼 느려졌다(왕복이 터널 수에 비례).
+    """
+    listings = {"n": 0}
 
     class CountingRunner(FakeRunner):
-        def file_exists(self, path):
-            if path.endswith(".json") and "/.cloudflared/" in path and "config-" not in path:
-                calls["n"] += 1
-            return super().file_exists(path)
+        def list_dir(self, path):
+            if path.endswith("/.cloudflared"):
+                listings["n"] += 1
+            return super().list_dir(path)
 
     runner = CountingRunner(home="/home/fake")
-    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
-        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
-    runner.files["/home/fake/.cloudflared/tid1.json"] = "{}"
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(0, """[
+        {"id":"tid1","name":"t1","created_at":"","connections":[]},
+        {"id":"tid2","name":"t2","created_at":"","connections":[]},
+        {"id":"tid3","name":"t3","created_at":"","connections":[]}]""", "")
+    for tid in ("tid1", "tid2", "tid3"):
+        runner.files[f"/home/fake/.cloudflared/{tid}.json"] = "{}"
 
     win = make_window(qapp, tmp_path, runner)
-    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1")
-    win.ctx.store.settings.tunnel_owners["tid1"] = "local"
+    listings["n"] = 0
     win.refresh()
-    after_refresh = calls["n"]
-    assert after_refresh >= 1
+
+    assert listings["n"] == 1  # 터널이 3개여도 조회는 1회
+    assert len(win.cards) == 3
+    assert all(c.has_credentials for c in win.cards)
 
     for _ in range(5):
         win._tick()
 
-    # _tick()(1초 폴링)에서는 자격증명 파일을 다시 조회하지 않아야 한다
-    assert calls["n"] == after_refresh
+    # _tick()(1초 폴링)에서는 자격증명을 다시 조회하지 않아야 한다
+    assert listings["n"] == 1
 
 
 # ---- 프로젝트(Git 클론) 버튼은 SSH 대상에서만 활성화 ----
@@ -539,3 +552,147 @@ def test_card_hides_no_route_badge_when_routes_exist(qapp, tmp_path):
     win.refresh()
 
     assert win.cards[0].no_route_label.isHidden()
+
+
+# ---- 카테고리 접기/펴기 ----
+
+def _two_group_window(qapp, tmp_path):
+    """local 소유 1개 + ssh:webPi 소유 1개인 창을 만든다(현재 대상은 local)."""
+    runner = FakeRunner(home="/home/fake")
+    runner.name = "local"
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(0, """[
+        {"id":"tid-pc","name":"t-pc","created_at":"","connections":[]},
+        {"id":"tid-pi","name":"t-pi","created_at":"","connections":[]}]""", "")
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.ssh_profiles.append(SshProfile(name="webPi", host="1.2.3.4"))
+    win.ctx.store.settings.tunnel_owners["tid-pc"] = "local"
+    win.ctx.store.settings.tunnel_owners["tid-pi"] = "ssh:webPi"
+    win.refresh()
+    return win
+
+
+def test_other_groups_are_collapsed_by_default(qapp, tmp_path):
+    win = _two_group_window(qapp, tmp_path)
+
+    headers = {h.owner_key: h for h in win.group_headers}
+    assert headers["local"].collapsed is False       # 현재 대상은 펼침
+    assert headers["ssh:webPi"].collapsed is True    # 나머지는 접힘
+
+    cards = {c.tunnel_name: c for c in win.cards}
+    assert not cards["t-pc"].isHidden()
+    assert cards["t-pi"].isHidden()
+
+
+def test_manual_toggle_expands_and_survives_refresh(qapp, tmp_path):
+    win = _two_group_window(qapp, tmp_path)
+
+    win._toggle_group("ssh:webPi")
+    cards = {c.tunnel_name: c for c in win.cards}
+    assert not cards["t-pi"].isHidden()
+
+    # 다시 그려도 사용자가 편 상태가 유지되어야 한다
+    win.refresh()
+    headers = {h.owner_key: h for h in win.group_headers}
+    assert headers["ssh:webPi"].collapsed is False
+
+
+def test_current_group_can_be_collapsed_manually(qapp, tmp_path):
+    win = _two_group_window(qapp, tmp_path)
+
+    win._toggle_group("local")
+
+    cards = {c.tunnel_name: c for c in win.cards}
+    assert cards["t-pc"].isHidden()
+
+
+def test_switching_target_recollapses_by_new_rule(qapp, tmp_path):
+    """Rpi를 대상으로 잡으면 '이 PC' 카테고리가 자동으로 접혀야 한다."""
+    win = _two_group_window(qapp, tmp_path)
+    assert not {c.tunnel_name: c for c in win.cards}["t-pc"].isHidden()
+
+    remote = FakeRunner(home="/home/pi")
+    remote.name = "ssh:webPi"
+    remote.run_results[LIST_TUNNELS_CMD] = win.ctx.runner.run_results[LIST_TUNNELS_CMD]
+    win.ctx.runner = remote
+    win._reset_group_collapse()  # _switch_target이 하는 일
+    win.refresh()
+
+    cards = {c.tunnel_name: c for c in win.cards}
+    assert cards["t-pc"].isHidden()      # 이 PC 그룹은 접힘
+    assert not cards["t-pi"].isHidden()  # 새 대상 그룹은 펼침
+
+
+def test_header_shows_count(qapp, tmp_path):
+    win = _two_group_window(qapp, tmp_path)
+    assert {h.owner_key: h.count_label.text() for h in win.group_headers} == {
+        "local": "1개", "ssh:webPi": "1개"}
+
+
+# ---- 성능: 불필요한 재생성/네트워크 왕복 없애기 ----
+
+def test_refresh_without_fetch_does_not_call_tunnel_list(qapp, tmp_path):
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    win = make_window(qapp, tmp_path, runner)
+
+    before = sum(1 for c, _ in runner.run_calls if c == LIST_TUNNELS_CMD)
+    win.refresh(fetch=False)
+    after = sum(1 for c, _ in runner.run_calls if c == LIST_TUNNELS_CMD)
+
+    assert after == before  # 계정 조회를 다시 하지 않는다
+    assert len(win.cards) == 1  # 그래도 카드는 그대로 있다
+
+
+def test_unchanged_refresh_keeps_same_card_widgets(qapp, tmp_path):
+    """내용이 같으면 위젯을 부수고 다시 만들지 않는다(버튼 누를 때 멈칫함의 원인)."""
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    win = make_window(qapp, tmp_path, runner)
+    first = win.cards[0]
+
+    win.refresh()
+
+    assert win.cards[0] is first
+
+
+def test_route_change_forces_rebuild(qapp, tmp_path):
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    win = make_window(qapp, tmp_path, runner)
+    first = win.cards[0]
+
+    meta = win.ctx.store.settings.tunnels_for("fake")["t1"]
+    meta.routes.append(RouteMeta(id=new_route_id(), hostname="a.example.com",
+                                 service="http://localhost:8000"))
+    win.refresh(fetch=False)
+
+    assert win.cards[0] is not first
+    assert len(win.cards[0].route_rows) == 1
+
+
+def test_empty_state_label_visible_without_tunnels(qapp, tmp_path):
+    win = make_window(qapp, tmp_path)  # 터널 0개
+    assert not win.list_status.isHidden()
+    assert "아직 터널이 없습니다" in win.list_status.text()
+
+    runner = win.ctx.runner
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    win.refresh()
+    assert win.list_status.isHidden()
+
+
+def test_refresh_button_actually_refetches(qapp, tmp_path):
+    """clicked(bool)이 fetch 인자로 새어 들어가면 새로고침이 무력화된다."""
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(0, "[]", "")
+    win = make_window(qapp, tmp_path, runner)
+
+    before = sum(1 for c, _ in runner.run_calls if c == LIST_TUNNELS_CMD)
+    win.refresh_btn.click()
+    after = sum(1 for c, _ in runner.run_calls if c == LIST_TUNNELS_CMD)
+
+    assert after == before + 1

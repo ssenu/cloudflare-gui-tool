@@ -23,6 +23,12 @@ from app.ui.wizard import TunnelWizard
 
 ADD_SSH_TARGET = "__add__"
 
+TOP_BTN_HEIGHT = 34  # 상단 바 버튼/콤보 공통 높이
+
+LOADING_TEXT = "터널 목록을 불러오는 중..."
+EMPTY_TEXT = ("아직 터널이 없습니다.\n"
+              "위의 '＋터널 생성'으로 첫 터널을 만들어 보세요.")
+
 # C1: 폴링(_tick) 간격. 정상일 땐 1초, 대상 연결이 끊긴 것으로 보이면 5초로
 # 물러나 실패한 원격 호출을 계속 재시도하며 UI를 붙잡지 않게 한다.
 POLL_INTERVAL_NORMAL_MS = 1000
@@ -235,20 +241,27 @@ class RouteRow(QWidget):
 
 
 class OwnerGroupHeader(QWidget):
-    """터널 목록을 기기별로 나누는 카테고리 머리글 (좌측 정렬).
+    """터널 목록을 기기별로 나누는 카테고리 머리글 (좌측 정렬, 접기/펴기).
 
     아래에 붙는 카드들이 "이 기기에서 만든 터널"임을 한 줄로 알려준다.
-    카드마다 '만든 곳' 배지를 반복하는 대신 이 머리글 하나로 묶는다.
+    머리글을 누르면 그 그룹의 카드를 접거나 펼 수 있다 - 지금 보고 있는 대상이
+    아닌 그룹은 어차피 실행할 수 없으므로 기본값으로 접혀 있다.
     """
 
-    def __init__(self, owner_key: str, palette: dict, is_current: bool):
+    def __init__(self, owner_key: str, palette: dict, is_current: bool,
+                 count: int, collapsed: bool, on_toggle=None):
         super().__init__()
         self.owner_key = owner_key
         self.label_text = owner_group_label(owner_key)
+        self.collapsed = collapsed
+        self._on_toggle = on_toggle
+        self._palette = palette
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        self.chevron = QLabel()
+        self.chevron.setFixedWidth(12)
 
         icon_name = "monitor" if owner_key == "local" else "server"
-        if not owner_label(owner_key):
-            icon_name = "server"
         icon_label = QLabel()
         icon_label.setPixmap(make_icon(icon_name, palette["muted"]).pixmap(14, 14))
 
@@ -256,11 +269,15 @@ class OwnerGroupHeader(QWidget):
         self.name_label.setStyleSheet(
             f"color: {palette['muted']}; font-size: 12px; font-weight: 600;")
 
+        self.count_label = QLabel(f"{count}개")
+        self.count_label.setStyleSheet(
+            f"color: {palette['muted']}; font-size: 11px;")
+
         # 지금 보고 있는 대상이 어느 그룹인지 표시해, 실행 가능한 터널이 어디
         # 모여 있는지 한눈에 알 수 있게 한다.
         self.current_label = QLabel("현재 대상")
         self.current_label.setStyleSheet(
-            f"color: {palette['accent']}; font-size: 11px;")
+            f"color: {palette['accent']}; font-size: 11px; font-weight: 600;")
         self.current_label.setVisible(is_current)
 
         line = QFrame()
@@ -269,12 +286,33 @@ class OwnerGroupHeader(QWidget):
         line.setStyleSheet(f"background: {palette['border']}; border: none;")
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(2, 8, 2, 0)
+        lay.setContentsMargins(2, 8, 2, 2)
         lay.setSpacing(6)
+        lay.addWidget(self.chevron)
         lay.addWidget(icon_label)
         lay.addWidget(self.name_label)
+        lay.addWidget(self.count_label)
         lay.addWidget(self.current_label)
         lay.addWidget(line, 1)
+
+        self._update_chevron()
+
+    def _update_chevron(self):
+        # 접힘 상태를 삼각형 방향으로 표현한다(아이콘 리소스를 늘리지 않으려고
+        # 문자를 쓴다 - 이모지가 아니라 기하 도형이라 폰트 의존도 낮다).
+        self.chevron.setText("▶" if self.collapsed else "▼")
+        self.chevron.setStyleSheet(
+            f"color: {self._palette['muted']}; font-size: 9px;")
+        self.setToolTip("눌러서 펼치기" if self.collapsed else "눌러서 접기")
+
+    def set_collapsed(self, collapsed: bool):
+        self.collapsed = collapsed
+        self._update_chevron()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._on_toggle:
+            self._on_toggle(self.owner_key)
+        super().mouseReleaseEvent(event)
 
 
 class TunnelCard(QFrame):
@@ -458,6 +496,12 @@ class MainWindow(QWidget):
         self.ctx = ctx
         self.cards: list[TunnelCard] = []
         self.group_headers: list[OwnerGroupHeader] = []
+        # 카테고리 접힘: 사용자가 직접 누른 그룹만 여기 기록하고, 나머지는
+        # "현재 대상만 펼침" 규칙을 따른다(대상을 바꾸면 자동으로 다시 접힌다).
+        self._collapse_overrides: dict[str, bool] = {}
+        # 마지막 tunnel list 결과와 마지막으로 그린 내용의 지문(성능).
+        self._tunnel_cache = None
+        self._render_sig: tuple | None = None
         self._log_viewers: dict[str, "LogViewer"] = {}
         # B3: 인덱스가 아니라 현재 대상의 식별자로 콤보를 재선택한다. None이면
         # 로컬, 문자열이면 SSH 프로필 이름. 인덱스만 쓰면 프로필이 삭제됐을 때
@@ -470,10 +514,14 @@ class MainWindow(QWidget):
         self.target_combo = QComboBox()
         palette = current_palette(ctx.store.settings.theme)
         icon_color = palette["text"]
+        # 대상 콤보가 창 폭을 다 먹으면 오른쪽 버튼들이 끝으로 밀려 서로
+        # 멀어진다. 이름+호스트가 들어갈 만큼만 주고 나머지는 여백으로 둔다.
+        self.target_combo.setMinimumWidth(220)
+        self.target_combo.setMaximumWidth(340)
         self.refresh_btn = QPushButton()
         self.refresh_btn.setIcon(make_icon("refresh", icon_color))
-        self.refresh_btn.setFixedWidth(40)
-        self.refresh_btn.setToolTip("새로고침")
+        self.refresh_btn.setFixedSize(TOP_BTN_HEIGHT, TOP_BTN_HEIGHT)
+        self.refresh_btn.setToolTip("새로고침 (F5)")
         self.add_btn = QPushButton("터널 생성")
         self.add_btn.setIcon(make_icon("plus", palette["on_accent"]))
         self.add_btn.setObjectName("primary")
@@ -482,9 +530,17 @@ class MainWindow(QWidget):
         self.settings_btn = QPushButton("설정")
         # I1: 설정 버튼은 아이콘 없이 텍스트만
         self.help_btn = QPushButton("?")
-        self.help_btn.setFixedSize(34, 34)
+        self.help_btn.setFixedSize(TOP_BTN_HEIGHT, TOP_BTN_HEIGHT)
         self.help_btn.setToolTip("사용 흐름 안내")
-        self.refresh_btn.clicked.connect(self.refresh)
+        # 상단 바 버튼 높이를 하나로 맞춘다(아이콘 버튼과 글자 버튼이 섞여
+        # 있으면 기본 높이가 달라 위아래로 들쭉날쭉해 보인다).
+        for btn in (self.add_btn, self.repos_btn, self.settings_btn):
+            btn.setFixedHeight(TOP_BTN_HEIGHT)
+        self.target_combo.setFixedHeight(TOP_BTN_HEIGHT)
+        # clicked 시그널은 checked(bool)를 넘긴다. self.refresh를 그대로 연결하면
+        # 그 False가 fetch 인자로 들어가 "새로고침을 눌러도 다시 조회하지 않는"
+        # 정반대 동작이 된다. 인자를 끊어서 연결한다.
+        self.refresh_btn.clicked.connect(lambda: self.refresh())
         self.add_btn.clicked.connect(self._create_tunnel)
         self.repos_btn.clicked.connect(self._open_repos)
         self.settings_btn.clicked.connect(self._open_settings)
@@ -492,9 +548,11 @@ class MainWindow(QWidget):
         self.target_combo.currentIndexChanged.connect(self._switch_target)
 
         top = QHBoxLayout()
+        top.setSpacing(6)
         top.addWidget(QLabel("대상:"))
-        top.addWidget(self.target_combo, 1)
+        top.addWidget(self.target_combo)
         top.addWidget(self.refresh_btn)
+        top.addStretch(1)  # 대상 선택과 동작 버튼을 시각적으로 갈라 놓는다
         top.addWidget(self.add_btn)
         top.addWidget(self.repos_btn)
         top.addWidget(self.settings_btn)
@@ -502,6 +560,15 @@ class MainWindow(QWidget):
 
         # 카드 목록
         self.list_lay = QVBoxLayout()
+        # 목록이 비어 있는 동안(불러오는 중 / 터널 0개) 빈 화면만 덩그러니
+        # 보이지 않도록 자리를 채우는 안내. 두 상태가 동시에 나올 수 없으므로
+        # 라벨 하나로 문구만 바꿔 쓴다 - 숨긴 라벨을 여러 개 두면 레이아웃이
+        # 그 자리를 계속 잡고 있어 위쪽에 빈 공간이 남는다.
+        self.list_status = QLabel(LOADING_TEXT)
+        self.list_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.list_status.setStyleSheet(
+            f"color: {palette['muted']}; font-size: 13px; padding: 40px 0;")
+        self.list_lay.addWidget(self.list_status)
         self.list_lay.addStretch(1)
         inner = QWidget()
         inner.setLayout(self.list_lay)
@@ -536,8 +603,13 @@ class MainWindow(QWidget):
         self._poll_backoff_active = False
 
         self._reload_targets()
-        self.refresh()
+        self._update_repos_btn()
         apply_titlebar_theme(self, ctx.store.settings.theme == "dark")
+
+        # 첫 조회(cloudflared tunnel list)는 네트워크 왕복이라 수백 ms~수 초가
+        # 걸린다. 생성자 안에서 부르면 창이 그려지기도 전에 그 시간만큼 멈춰
+        # "켤 때 버벅인다"가 된다. 이벤트 루프에 넘겨 창을 먼저 띄운다.
+        QTimer.singleShot(0, self.refresh)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -545,6 +617,7 @@ class MainWindow(QWidget):
 
         # 단축키 등록
         from PyQt6.QtGui import QKeySequence, QShortcut
+        QShortcut(QKeySequence("F5"), self).activated.connect(self.refresh)
         for i in range(1, 10):
             sc = QShortcut(QKeySequence(f"Ctrl+{i}"), self)
             sc.activated.connect(lambda n=i - 1: self._shortcut_tunnel(n))
@@ -677,6 +750,7 @@ class MainWindow(QWidget):
         # 죽은 세션을 보거나 다른 대상의 로그를 잘못 보여줄 수 있다. 가장
         # 단순하고 오해가 없는 방법으로 전부 닫는다.
         self._close_all_log_viewers()
+        self._reset_group_collapse()
         self.refresh()
 
     def _close_all_log_viewers(self):
@@ -688,8 +762,65 @@ class MainWindow(QWidget):
             return "이 PC"
         return self.ctx.runner.name.split(":", 1)[-1]
 
+    # ---- 카테고리 접기/펴기 ----
+    def _default_collapsed(self, owner_key: str) -> bool:
+        """지금 보고 있는 대상이 만든 그룹만 펼친 상태로 둔다.
+
+        다른 기기의 터널은 이 대상에서 실행할 수 없으므로(자격증명이 없다)
+        기본값으로 접어 화면을 비운다. 사용자가 직접 편 그룹은
+        _collapse_overrides가 기억한다.
+        """
+        return owner_key != self.ctx.runner.name
+
+    def _is_collapsed(self, owner_key: str) -> bool:
+        if owner_key in self._collapse_overrides:
+            return self._collapse_overrides[owner_key]
+        return self._default_collapsed(owner_key)
+
+    def _reset_group_collapse(self):
+        """대상이 바뀌면 손으로 편 기록을 지운다.
+
+        새 대상 기준으로 다시 접히게 하기 위해서다 - Rpi로 옮기면 '이 PC'
+        그룹은 다시 접혀야 화면이 지금 할 수 있는 일만 보여준다.
+        """
+        self._collapse_overrides.clear()
+
+    def _toggle_group(self, owner_key: str):
+        self._collapse_overrides[owner_key] = not self._is_collapsed(owner_key)
+        self._apply_collapsed()
+
+    def _apply_collapsed(self):
+        for header in self.group_headers:
+            collapsed = self._is_collapsed(header.owner_key)
+            header.set_collapsed(collapsed)
+            for card in self.cards:
+                if card.owner_key == header.owner_key:
+                    card.setVisible(not collapsed)
+
     # ---- 목록 ----
-    def refresh(self):
+    def _credential_ids(self) -> set[str]:
+        """이 대상에 자격증명 파일이 있는 터널 id 집합.
+
+        예전에는 터널마다 file_exists()를 한 번씩 불렀는데, SSH 대상에서는
+        터널 수만큼 왕복이 생겨 새로고침이 눈에 띄게 굼떴다. 디렉터리를 한 번
+        읽어 이름만 비교한다(왕복 1회).
+        """
+        try:
+            names = self.ctx.runner.list_dir(self.ctx.client.config_dir())
+        except Exception:
+            return set()
+        return {n[:-5] for n in names if n.endswith(".json")}
+
+    def refresh(self, fetch: bool = True):
+        """카드 목록을 다시 그린다.
+
+        fetch=False면 계정 터널 목록을 다시 받아오지 않고 마지막 결과를 쓴다.
+        라우트 편집·설정 변경처럼 '계정의 터널 구성이 바뀔 수 없는' 경로에서
+        네트워크 왕복(수백 ms~수 초)을 없애기 위한 것이다.
+        """
+        if not fetch and self._tunnel_cache is not None:
+            self._render_cards(self._tunnel_cache)
+            return
         try:
             self.setCursor(Qt.CursorShape.WaitCursor)
             infos = self.ctx.client.list_tunnels()
@@ -706,12 +837,10 @@ class MainWindow(QWidget):
         finally:
             self.unsetCursor()
 
-        for c in self.cards:
-            c.setParent(None)
-        self.cards.clear()
-        for h in self.group_headers:
-            h.setParent(None)
-        self.group_headers.clear()
+        self._tunnel_cache = infos
+        self._render_cards(infos)
+
+    def _render_cards(self, infos):
         self._update_repos_btn()
 
         # 대상(로컬/SSH 프로필)마다 독립된 터널 설정을 쓴다. 계정 단위인
@@ -721,16 +850,18 @@ class MainWindow(QWidget):
         owners = self.ctx.store.settings.tunnel_owners
         restored = False
         owner_backfilled = False
-        pairs: list[tuple[str, TunnelCard]] = []
+        # O3/성능: 자격증명 확인은 카드를 그릴 때 한 번만 한다(1초 폴링에서는
+        # 하지 않는다). 게다가 터널마다 stat을 날리지 않고 디렉터리 한 번 읽기로
+        # 끝낸다 - SSH 대상에서 왕복 수가 터널 수에 비례하던 것을 1로 줄인다.
+        cred_ids = self._credential_ids()
+        rows: list[tuple[str, object, TunnelMeta, bool]] = []
         for info in infos:
             meta = metas.get(info.name)
             if meta is None:
                 meta = self._meta_from_config(info.name)
                 metas[info.name] = meta
                 restored = True
-            # O3: 자격증명 존재 여부는 여기(카드 재생성 시점)에서만 확인한다 -
-            # _tick()의 1초 폴링에서 매번 원격 stat을 날리지 않기 위해서다.
-            has_creds = self.ctx.client.has_credentials(info.id)
+            has_creds = info.id in cred_ids
             # C1/C2: owner는 계정 단위(터널 UUID 키)로만 기록한다 - 대상별
             # meta에 두면 대상을 바꾸는 순간 다른 dict를 보게 돼 기능이
             # 무력화된다. backfill도 "이 id로 기록된 owner가 아직 없을 때만"
@@ -739,25 +870,72 @@ class MainWindow(QWidget):
             if info.id not in owners and has_creds:
                 owners[info.id] = self.ctx.runner.name
                 owner_backfilled = True
-            owner_key = owners.get(info.id, "")
-            pairs.append((owner_key,
-                          TunnelCard(self, info, meta, has_creds, owner_key)))
+            rows.append((owners.get(info.id, ""), info, meta, has_creds))
+
+        if restored or owner_backfilled:
+            self.ctx.store.save()
+
+        # 성능: 화면에 그릴 내용이 지난번과 같으면 위젯을 부수고 다시 만들지
+        # 않는다. 다이얼로그를 닫을 때마다 카드 수십 개를 재생성하던 것이
+        # "버튼 누르면 잠깐 멈춤"의 원인이었다.
+        signature = self._render_signature(rows)
+        if signature == self._render_sig and self.cards:
+            for card in self.cards:
+                card.update_state()
+            self._apply_collapsed()
+            return
+        self._render_sig = signature
+
+        for c in self.cards:
+            c.setParent(None)
+        self.cards.clear()
+        for h in self.group_headers:
+            h.setParent(None)
+        self.group_headers.clear()
 
         # 기기(카테고리)별로 묶어 머리글 아래에 카드를 배치한다. cards는
         # 화면에 보이는 순서와 같게 유지한다 - Ctrl+1~9 단축키가 이 순서를 쓴다.
         palette = current_palette(self.ctx.store.settings.theme)
         current_key = self.ctx.runner.name
-        for owner_key, cards in group_by_owner(pairs, self._owner_order()):
-            header = OwnerGroupHeader(owner_key, palette,
-                                      is_current=owner_key == current_key)
+        pairs = [(owner_key, (info, meta, has_creds))
+                 for owner_key, info, meta, has_creds in rows]
+        for owner_key, group in group_by_owner(pairs, self._owner_order()):
+            header = OwnerGroupHeader(
+                owner_key, palette, is_current=owner_key == current_key,
+                count=len(group), collapsed=self._is_collapsed(owner_key),
+                on_toggle=self._toggle_group)
             self.list_lay.insertWidget(self.list_lay.count() - 1, header)
             self.group_headers.append(header)
-            for card in cards:
+            for info, meta, has_creds in group:
+                card = TunnelCard(self, info, meta, has_creds, owner_key)
                 self.list_lay.insertWidget(self.list_lay.count() - 1, card)
                 self.cards.append(card)
 
-        if restored or owner_backfilled:
-            self.ctx.store.save()
+        self._set_list_status(EMPTY_TEXT if not self.cards else "")
+        self._apply_collapsed()
+
+    def _set_list_status(self, text: str):
+        """목록 안내 문구(로딩/비어 있음). 빈 문자열이면 숨긴다."""
+        self.list_status.setVisible(bool(text))
+        if text:
+            self.list_status.setText(text)
+        # 숨긴 뒤에도 레이아웃이 옛 자리를 잡고 있지 않도록 즉시 다시 계산한다.
+        self.list_lay.activate()
+
+    @staticmethod
+    def _render_signature(rows) -> tuple:
+        """카드를 다시 만들어야 하는지 판단하는 값.
+
+        카드가 보여주는 것(이름/소유자/자격증명 여부/라우트 구성)만 담는다.
+        실행 상태처럼 매 틱 바뀌는 값은 update_state()가 따로 반영하므로
+        여기 넣으면 안 된다 - 넣으면 1초마다 전체를 다시 그리게 된다.
+        """
+        return tuple(
+            (owner_key, info.name, has_creds,
+             tuple((r.id, r.label, r.hostname, r.service, r.server.kind,
+                    r.server.start_cmd, r.server.stop_cmd, r.server.cwd,
+                    r.server.autostart) for r in meta.routes))
+            for owner_key, info, meta, has_creds in rows)
 
     def _owner_order(self) -> list[str]:
         """카테고리 표시 순서: 이 PC → 설정에 등록된 SSH 프로필 순."""
@@ -904,7 +1082,8 @@ class MainWindow(QWidget):
         def _on_finished(result):
             if result == dlg.DialogCode.Accepted:
                 self._notify_restart_needed(card.tunnel_name)
-                self.refresh()
+                # 라우트만 바뀌었으므로 계정 터널 목록은 다시 받지 않는다
+                self.refresh(fetch=False)
 
         dlg.finished.connect(_on_finished)
         self._open_modal(dlg)
@@ -916,7 +1095,8 @@ class MainWindow(QWidget):
         def _on_finished(result):
             if result == dlg.DialogCode.Accepted:
                 self._notify_restart_needed(card.tunnel_name)
-                self.refresh()
+                # 라우트만 바뀌었으므로 계정 터널 목록은 다시 받지 않는다
+                self.refresh(fetch=False)
 
         dlg.finished.connect(_on_finished)
         self._open_modal(dlg)
@@ -960,7 +1140,7 @@ class MainWindow(QWidget):
         self.ctx.store.settings.tunnels_for(self.ctx.runner.name)[card.tunnel_name] = card.meta
         self.ctx.store.save()
         self._notify_restart_needed(card.tunnel_name)
-        self.refresh()
+        self.refresh(fetch=False)
 
     def _notify_restart_needed(self, tunnel_name: str):
         if self.ctx.manager.tunnel_state(tunnel_name) in (
@@ -1016,7 +1196,8 @@ class MainWindow(QWidget):
                 self._apply_theme()  # 내부에서 refresh()까지 호출한다
             else:
                 # B3/I: 프로필 삭제로 로컬 폴백이 일어났을 수 있으니 항상 갱신한다.
-                self.refresh()
+                # 설정만 바뀌었으므로 터널 목록은 다시 받지 않는다.
+                self.refresh(fetch=False)
 
         dlg.finished.connect(_on_finished)
         self._open_modal(dlg)
@@ -1053,7 +1234,10 @@ class MainWindow(QWidget):
             for row in c.route_rows:
                 row.spinner.set_palette(new_palette)
         self._reload_targets()
-        self.refresh()  # 카드를 새 팔레트로 다시 그린다 (ToggleSwitch 포함)
+        # 표시 내용은 그대로여도 팔레트가 달라졌으므로 지문을 비워 강제로
+        # 다시 그리게 한다(그러지 않으면 이전 색의 카드가 남는다).
+        self._render_sig = None
+        self.refresh(fetch=False)
 
     def _tick(self):
         # C1: 이 슬롯은 QTimer에서 호출되는데, PyQt6는 슬롯의 미처리 예외에서

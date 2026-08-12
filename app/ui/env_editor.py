@@ -9,9 +9,10 @@ git 추적 대상이라 대상 머신에서 고치면 다음 pull이 거부되�
 """
 from __future__ import annotations
 
-from PyQt6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFormLayout,
-                             QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-                             QPushButton, QScrollArea, QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
+                             QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+                             QMessageBox, QPushButton, QScrollArea, QVBoxLayout,
+                             QWidget)
 
 from app.context import AppContext
 from app.core.env_file import (HOST_PORT_KEY, EnvFile, is_secret_key,
@@ -71,6 +72,7 @@ class EnvEditorDialog(QDialog):
         self.repo = repo
         self.path = f"{repo.path.rstrip('/')}/.env"
         self.saved = False
+        self.loaded_from = ""  # 내 PC에서 불러온 파일 경로(있으면)
         self.setWindowTitle(f"환경설정 — {repo.name}")
         self.setMinimumWidth(560)
 
@@ -110,6 +112,14 @@ class EnvEditorDialog(QDialog):
         add_btn = QPushButton("항목 추가")
         add_btn.clicked.connect(lambda: self._add_row("", ""))
 
+        # 내 PC에 있는 .env를 그대로 올리는 경로. SSH 대상에서는 원격 파일을
+        # 고를 수 없으므로 QFileDialog는 항상 이 PC를 본다 - 그게 의도다.
+        self.upload_btn = QPushButton("파일에서 불러오기")
+        self.upload_btn.setToolTip(
+            "내 PC의 .env 파일을 읽어 이 화면을 채웁니다. "
+            "저장을 눌러야 대상 머신에 반영됩니다.")
+        self.upload_btn.clicked.connect(self._load_from_file)
+
         self.err = QLabel()
         self.err.setStyleSheet(f"color: {palette['danger']};")
         self.err.setWordWrap(True)
@@ -130,6 +140,7 @@ class EnvEditorDialog(QDialog):
         top.addWidget(QLabel("환경변수"))
         top.addStretch(1)
         top.addWidget(self.show_chk)
+        top.addWidget(self.upload_btn)
         top.addWidget(add_btn)
 
         root = QVBoxLayout(self)
@@ -155,6 +166,50 @@ class EnvEditorDialog(QDialog):
     def _apply_echo(self, show: bool):
         for row in self.rows:
             row.apply_echo(show)
+
+    # ---- 내 PC의 .env 올리기 ----
+    def _load_from_file(self):
+        path, _filter = QFileDialog.getOpenFileName(
+            self, "불러올 .env 파일", "",
+            "환경변수 파일 (*.env .env* *.txt);;모든 파일 (*)")
+        if not path:
+            return
+        try:
+            # .env는 사람이 손으로 쓰는 파일이라 인코딩이 제각각이다. UTF-8이
+            # 아니면 치환해서라도 읽는다 - 여기서 실패해 아무것도 못 하는 것보다
+            # 값이 보이는 편이 낫고, 저장은 항상 UTF-8로 쓴다.
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError as ex:
+            QMessageBox.warning(self, "읽기 실패", str(ex))
+            return
+
+        incoming = EnvFile(text)
+        items = incoming.items()
+        if not items:
+            QMessageBox.information(
+                self, "비어 있음",
+                "KEY=VALUE 형식의 줄을 찾지 못했습니다. 다른 파일인지 확인해 주세요.")
+            return
+
+        if self.rows or self.port_edit.text().strip():
+            ok = QMessageBox.question(
+                self, "불러오기",
+                f"{len(items)}개 항목을 읽었습니다.\n"
+                "지금 화면의 내용을 이 파일로 대체할까요?\n"
+                "(저장을 누르기 전까지 대상 머신은 바뀌지 않습니다)")
+            if ok != QMessageBox.StandardButton.Yes:
+                return
+
+        for row in list(self.rows):
+            self._delete_row(row)
+        self.port_edit.setText(incoming.get(HOST_PORT_KEY))
+        for key, value in items:
+            if key == HOST_PORT_KEY:
+                continue
+            self._add_row(key, value)
+        self.err.setText("")
+        self.loaded_from = path
 
     # ---- 저장 ----
     def _collect(self) -> tuple[list[tuple[str, str]], str]:

@@ -139,3 +139,80 @@ def test_write_failure_shows_error_and_does_not_close(qapp, tmp_path):
 
     assert "저장 실패" in dlg.err.text()
     assert not dlg.saved
+
+
+# ---- 내 PC의 .env 올리기 ----
+
+def test_load_from_file_replaces_form(qapp, tmp_path, monkeypatch):
+    dlg, _ = make_dialog(tmp_path, "HOST_PORT=8000\nOLD_KEY=old\n")
+
+    src = tmp_path / "laptop.env"
+    src.write_text("# 노트북에서 쓰던 값\nHOST_PORT=8005\nADMIN_PASSWORD=pw\n",
+                   encoding="utf-8")
+    monkeypatch.setattr("app.ui.env_editor.QFileDialog.getOpenFileName",
+                        lambda *a, **k: (str(src), ""))
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *a, **k: QMessageBox.StandardButton.Yes)
+
+    dlg._load_from_file()
+
+    assert dlg.port_edit.text() == "8005"
+    assert [(r.key(), r.value()) for r in dlg.rows] == [("ADMIN_PASSWORD", "pw")]
+    assert dlg.loaded_from == str(src)
+
+
+def test_load_from_file_can_be_cancelled_at_confirm(qapp, tmp_path, monkeypatch):
+    dlg, _ = make_dialog(tmp_path, "HOST_PORT=8000\nKEEP=1\n")
+    src = tmp_path / "other.env"
+    src.write_text("A=2\n", encoding="utf-8")
+    monkeypatch.setattr("app.ui.env_editor.QFileDialog.getOpenFileName",
+                        lambda *a, **k: (str(src), ""))
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *a, **k: QMessageBox.StandardButton.No)
+
+    dlg._load_from_file()
+
+    assert dlg.port_edit.text() == "8000"  # 그대로
+    assert [r.key() for r in dlg.rows] == ["KEEP"]
+
+
+def test_load_from_file_ignores_non_env_content(qapp, tmp_path, monkeypatch):
+    dlg, _ = make_dialog(tmp_path, "A=1\n")
+    src = tmp_path / "notes.txt"
+    src.write_text("그냥 메모입니다\n두 번째 줄\n", encoding="utf-8")
+    monkeypatch.setattr("app.ui.env_editor.QFileDialog.getOpenFileName",
+                        lambda *a, **k: (str(src), ""))
+
+    dlg._load_from_file()
+
+    assert [r.key() for r in dlg.rows] == ["A"]  # 아무것도 바꾸지 않는다
+
+
+def test_load_from_file_then_save_writes_to_target(qapp, tmp_path, monkeypatch):
+    """불러오기만으로는 원격이 바뀌지 않고, 저장을 눌러야 반영된다."""
+    dlg, runner = make_dialog(tmp_path, "A=1\n")
+    src = tmp_path / "laptop.env"
+    src.write_text("HOST_PORT=8007\nGATE_PASSWORD=pw\n", encoding="utf-8")
+    monkeypatch.setattr("app.ui.env_editor.QFileDialog.getOpenFileName",
+                        lambda *a, **k: (str(src), ""))
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *a, **k: QMessageBox.StandardButton.Yes)
+
+    dlg._load_from_file()
+    assert runner.files["/srv/apps/app/.env"] == "A=1\n"  # 아직 그대로
+
+    dlg._on_save()
+    saved = runner.files["/srv/apps/app/.env"]
+    assert "HOST_PORT=8007" in saved
+    assert "GATE_PASSWORD=pw" in saved
+    assert "A=1" not in saved  # 대체됐으므로 사라진다
+
+
+def test_cancelling_file_dialog_changes_nothing(qapp, tmp_path, monkeypatch):
+    dlg, _ = make_dialog(tmp_path, "A=1\n")
+    monkeypatch.setattr("app.ui.env_editor.QFileDialog.getOpenFileName",
+                        lambda *a, **k: ("", ""))
+
+    dlg._load_from_file()
+
+    assert [r.key() for r in dlg.rows] == ["A"]
