@@ -7,7 +7,8 @@ from app.context import AppContext
 from app.core.cloudflared import CloudflaredError, DnsRecordExistsError
 from app.core.config_yml import set_routes
 from app.core.store import RouteMeta, ServiceSpec, TunnelMeta, new_route_id
-from app.core.wizard_logic import validate_service, validate_subdomain
+from app.core.wizard_logic import (ConfigRecoveryError, ensure_config,
+                                   validate_service, validate_subdomain)
 from app.ui.repo_picker import CwdPickerRow
 from app.ui.theme import current_palette
 from app.ui.winutil import apply_titlebar_theme
@@ -156,12 +157,17 @@ class RouteDialog(QDialog):
         cwd = self.cwd_edit.text().strip()
         autostart = self.autostart_chk.isChecked()
 
+        # 설정 파일이 없으면 여기서 만든다. 도메인 없이 터널만 먼저 만들었거나
+        # 터미널에서 직접 만든 터널이 이 경우인데, 라우트를 붙이려는 것 자체가
+        # 설정 파일을 원한다는 뜻이므로 거절할 이유가 없다.
         path = self.ctx.client.config_path(self.tunnel.name)
-        if not self.ctx.runner.file_exists(path):
-            QMessageBox.warning(
-                self, "설정 없음",
-                f"config-{self.tunnel.name}.yml 이 없어 라우트를 저장할 수 없습니다.\n"
-                "수동으로 생성된 터널이면 설정 파일을 먼저 만들어야 합니다.")
+        try:
+            ensure_config(self.ctx.client, self.tunnel.name)
+        except ConfigRecoveryError as ex:
+            QMessageBox.warning(self, "설정 파일을 만들 수 없음", str(ex))
+            return
+        except Exception as ex:
+            QMessageBox.critical(self, "설정 파일 생성 실패", str(ex))
             return
 
         is_new = self.route is None

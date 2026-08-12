@@ -142,3 +142,69 @@ def test_create_tunnel_only_writes_config_without_routes():
     assert created["tunnel_id"] == "11111111-2222-3333-4444-555555555555"
     # DNS 연결 단계가 없으므로 route dns 명령은 실행되지 않아야 한다
     assert not any("route" in c[0] for c in runner.run_calls)
+
+
+# ---- 설정 파일이 없는 터널에 라우트 붙이기 (자동 생성) ----
+
+def _client_with(tunnels_json: str, files: dict):
+    from app.core.cloudflared import CloudflaredClient
+    from tests.fake_runner import FakeRunner
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[("cloudflared", "tunnel", "list", "--output", "json")] = \
+        RunResult(0, tunnels_json, "")
+    runner.files.update(files)
+    return CloudflaredClient(runner), runner
+
+
+def test_ensure_config_creates_when_missing():
+    from app.core.wizard_logic import ensure_config
+    client, runner = _client_with(
+        '[{"id":"tid1","name":"web","created_at":"","connections":[]}]',
+        {"/home/fake/.cloudflared/tid1.json": "{}"})
+
+    created = ensure_config(client, "web")
+
+    assert created is True
+    text = runner.files["/home/fake/.cloudflared/config-web.yml"]
+    cfg = parse_config(text)
+    assert cfg["tunnel"] == "tid1"
+    assert cfg["credentials-file"] == "/home/fake/.cloudflared/tid1.json"
+    assert cfg["ingress"] == [{"service": "http_status:404"}]
+
+
+def test_ensure_config_keeps_existing_file_untouched():
+    from app.core.wizard_logic import ensure_config
+    existing = "tunnel: tid1\ncredentials-file: x\ningress:\n- hostname: a.b\n  service: http://localhost:1\n"
+    client, runner = _client_with(
+        '[{"id":"tid1","name":"web","created_at":"","connections":[]}]',
+        {"/home/fake/.cloudflared/config-web.yml": existing})
+
+    created = ensure_config(client, "web")
+
+    assert created is False
+    assert runner.files["/home/fake/.cloudflared/config-web.yml"] == existing
+
+
+def test_ensure_config_refuses_without_credentials():
+    """자격증명이 없으면 설정만 만들어봐야 실행 시점에 실패한다 - 미리 막는다."""
+    from app.core.wizard_logic import ConfigRecoveryError, ensure_config
+    import pytest
+    client, runner = _client_with(
+        '[{"id":"tid1","name":"web","created_at":"","connections":[]}]', {})
+
+    with pytest.raises(ConfigRecoveryError) as ex:
+        ensure_config(client, "web")
+
+    assert "자격증명" in str(ex.value)
+    assert "config-web.yml" not in str(runner.files)  # 아무것도 쓰지 않는다
+
+
+def test_ensure_config_refuses_when_tunnel_not_in_account():
+    from app.core.wizard_logic import ConfigRecoveryError, ensure_config
+    import pytest
+    client, _ = _client_with("[]", {})
+
+    with pytest.raises(ConfigRecoveryError) as ex:
+        ensure_config(client, "web")
+
+    assert "찾지 못했습니다" in str(ex.value)

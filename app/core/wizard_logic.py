@@ -53,6 +53,51 @@ def plan_steps(name: str, hostname: str, service: str) -> list[PlannedStep]:
     ]
 
 
+class ConfigRecoveryError(Exception):
+    """설정 파일을 새로 만들 수 없는 상황(터널을 못 찾음/자격증명 없음)."""
+
+
+def ensure_config(client: CloudflaredClient, name: str) -> bool:
+    """config-<name>.yml이 없으면 라우트 없는 기본 설정으로 만든다.
+
+    만들었으면 True, 이미 있으면 False.
+
+    설정 파일이 없는 터널은 여러 경로로 생긴다 - 도메인 없이 터널만 만든 뒤
+    다른 기기에서 열었을 때, 터미널에서 직접 `cloudflared tunnel create`로
+    만들었을 때, 설정 파일만 지웠을 때. 이런 터널에 라우트를 붙이려는 것은
+    지극히 정상적인 요구라서, 없다고 거절하는 대신 그 자리에서 만들어 준다.
+
+    다만 다음 두 경우에는 만들지 않고 ConfigRecoveryError를 던진다. 잘못된
+    파일을 써 두면 터널이 켜지는 것처럼 보이다가 실행 시점에 실패한다:
+    - 계정의 터널 목록에 그 이름이 없다 (id를 알 수 없다)
+    - 이 대상에 자격증명 파일이 없다 (있어도 이 기기에서는 실행 불가)
+    """
+    path = client.config_path(name)
+    if client.runner.file_exists(path):
+        return False
+
+    tunnel_id = ""
+    for info in client.list_tunnels():
+        if info.name == name:
+            tunnel_id = info.id
+            break
+    if not tunnel_id:
+        raise ConfigRecoveryError(
+            f"'{name}' 터널을 Cloudflare 계정에서 찾지 못했습니다. "
+            "목록을 새로고침한 뒤 다시 시도하세요.")
+
+    credentials = client.credentials_path(tunnel_id)
+    if not client.runner.file_exists(credentials):
+        raise ConfigRecoveryError(
+            f"이 기기에 '{name}' 터널의 자격증명 파일이 없어 설정을 만들 수 "
+            f"없습니다.\n{credentials}\n\n"
+            "터널을 만든 기기에서 라우트를 추가하거나, 그 기기의 자격증명 "
+            "파일을 이 경로로 복사하세요.")
+
+    client.runner.write_file(path, build_config(tunnel_id, credentials, []))
+    return True
+
+
 def plan_steps_tunnel_only(name: str) -> list[PlannedStep]:
     """도메인 연결 없이 터널만 만들 때의 단계."""
     return [
