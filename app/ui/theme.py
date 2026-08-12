@@ -124,6 +124,17 @@ QTabBar::tab:selected {{ background: {p['panel']}; border-bottom: 2px solid {p['
 QListWidget {{ background: {p['panel2']}; border: 1px solid {p['border']};
     border-radius: 6px; color: {p['text']}; }}
 QListWidget::item:selected {{ background: {p['accent']}; color: {p['on_accent']}; }}
+QTableWidget, QTableView {{ background: {p['panel2']}; border: 1px solid {p['border']};
+    border-radius: 6px; color: {p['text']}; gridline-color: {p['border']}; }}
+QTableWidget::item, QTableView::item {{ padding: 4px 6px; }}
+/* 선택 행 표시. 이 규칙이 없으면 Qt 기본 하이라이트가 우리 팔레트 위에서
+   거의 보이지 않아 "선택됐는지 모르겠다"가 된다. 포커스를 잃어도(!active)
+   같은 색을 유지해야 버튼을 누르러 간 사이 선택이 사라진 것처럼 보이지 않는다. */
+QTableWidget::item:selected, QTableView::item:selected,
+QTableWidget::item:selected:!active, QTableView::item:selected:!active {{
+    background: {p['accent']}; color: {p['on_accent']}; }}
+QHeaderView::section {{ background: {p['panel']}; color: {p['muted']};
+    padding: 5px 6px; border: none; border-bottom: 1px solid {p['border']}; }}
 QSpinBox::up-button, QSpinBox::down-button {{ width: 16px; }}
 QScrollBar:vertical {{ background: {p['panel']}; width: 10px; }}
 QScrollBar::handle:vertical {{ background: {p['border']}; border-radius: 5px; }}

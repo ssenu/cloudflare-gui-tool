@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                             QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-                             QMessageBox, QPushButton)
+                             QFormLayout, QLabel, QLineEdit, QMessageBox)
 
 from app.context import AppContext
 from app.core.cloudflared import CloudflaredError, DnsRecordExistsError
 from app.core.config_yml import set_routes
 from app.core.store import RouteMeta, ServiceSpec, TunnelMeta, new_route_id
 from app.core.wizard_logic import validate_service, validate_subdomain
-from app.ui.icons import make_icon
+from app.ui.repo_picker import CwdPickerRow
 from app.ui.theme import current_palette
 from app.ui.winutil import apply_titlebar_theme
 
@@ -76,21 +75,10 @@ class RouteDialog(QDialog):
         self.stop_cmd_edit.setPlaceholderText("비우면 프로세스를 강제 종료합니다 (선택)")
         self.cwd_edit = QLineEdit(route.server.cwd if route else "")
         self.cwd_edit.setPlaceholderText("작업 폴더 (도커는 필수)")
-        browse = QPushButton("폴더 선택...")
-        browse.setIcon(make_icon("folder", icon_color))
-        browse.clicked.connect(lambda: self.cwd_edit.setText(
-            QFileDialog.getExistingDirectory(self, "작업 폴더") or self.cwd_edit.text()))
-        # 버그 수정: "폴더 선택..."은 QFileDialog로 내 PC의 폴더만 고를 수 있어
-        # SSH 대상일 때는 원격 경로를 고를 수 없다 - 의미가 없으므로 숨긴다.
-        if ctx.is_remote:
-            browse.setVisible(False)
-        from_repo = QPushButton("프로젝트에서 선택")
-        from_repo.setIcon(make_icon("folder", icon_color))
-        from_repo.clicked.connect(self._pick_from_repo)
-        # 프로젝트(Git 클론)는 SSH 대상 전용이라 로컬에서는 고를 목록이 없다 -
-        # "폴더 선택..."과 정반대로 원격일 때만 보여준다.
-        if not ctx.is_remote:
-            from_repo.setVisible(False)
+        # 로컬/원격에 따라 폴더 선택 방식이 갈리는 규칙은 CwdPickerRow가 갖는다
+        # (마법사와 공유해, 한쪽만 고쳐지는 일이 없게 한다).
+        self.cwd_picker = CwdPickerRow(ctx, self.cwd_edit, self.service_edit,
+                                       icon_color)
 
         self.autostart_chk = QCheckBox("터널을 켤 때 함께 시작")
         self.autostart_chk.setChecked(route.server.autostart if route else False)
@@ -108,11 +96,7 @@ class RouteDialog(QDialog):
         form.addRow("시작 명령", self.start_cmd_edit)
         form.addRow("정지 명령", self.stop_cmd_edit)
         form.addRow("작업 폴더", self.cwd_edit)
-        browse_row = QHBoxLayout()
-        browse_row.addWidget(browse)
-        browse_row.addWidget(from_repo)
-        browse_row.addStretch(1)
-        form.addRow("", browse_row)
+        form.addRow("", self.cwd_picker)
         form.addRow("", self.autostart_chk)
         form.addRow(self.err_label)
 
@@ -126,22 +110,6 @@ class RouteDialog(QDialog):
 
         self.setLayout(form)
         apply_titlebar_theme(self, ctx.store.settings.theme == "dark")
-
-    # ---- 프로젝트에서 경로 선택 ----
-    def _pick_from_repo(self):
-        repos = self.ctx.store.settings.repos_for(self.ctx.runner.name)
-        if not repos:
-            QMessageBox.information(
-                self, "프로젝트 없음",
-                "먼저 상단 '프로젝트' 메뉴에서 저장소를 클론하세요.")
-            return
-        from PyQt6.QtWidgets import QInputDialog
-        names = [f"{r.name} ({r.path})" for r in repos]
-        choice, ok = QInputDialog.getItem(
-            self, "프로젝트에서 선택", "작업 폴더로 사용할 프로젝트", names, 0, False)
-        if ok and choice:
-            idx = names.index(choice)
-            self.cwd_edit.setText(repos[idx].path)
 
     # ---- 종류 변경 ----
     def _on_kind_changed(self):

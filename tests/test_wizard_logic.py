@@ -1,3 +1,4 @@
+from app.core.runner import RunResult
 from app.core.config_yml import parse_config
 from app.core.wizard_logic import (execute_creation, finish_creation, plan_steps,
                                    validate_name, validate_service, validate_subdomain)
@@ -106,3 +107,38 @@ def test_finish_creation_does_not_recreate_tunnel():
     cfg = parse_config(text)
     assert cfg["tunnel"] == "tunnel-id-1234"
     assert all(ok for _, _, ok in events)
+
+
+# ---- 터널만 만들기 ----
+
+def test_plan_steps_tunnel_only_has_two_steps():
+    from app.core.wizard_logic import plan_steps_tunnel_only
+    steps = plan_steps_tunnel_only("mysite")
+    assert len(steps) == 2
+    assert "tunnel create mysite" in steps[0].preview
+    assert "라우트 없음" in steps[1].preview
+
+
+def test_create_tunnel_only_writes_config_without_routes():
+    from app.core.cloudflared import CloudflaredClient
+    from app.core.config_yml import get_routes, parse_config
+    from app.core.wizard_logic import create_tunnel_only
+    from tests.fake_runner import FakeRunner
+
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[("cloudflared", "tunnel", "create", "mysite")] = RunResult(
+        0, "Created tunnel mysite with id 11111111-2222-3333-4444-555555555555", "")
+    client = CloudflaredClient(runner)
+    events = []
+    created = {}
+
+    create_tunnel_only(client, "mysite",
+                       lambda i, m, ok: events.append((i, ok)), created)
+
+    text = runner.files["/home/fake/.cloudflared/config-mysite.yml"]
+    cfg = parse_config(text)
+    assert get_routes(cfg) == []            # 라우트 없음
+    assert cfg["ingress"] == [{"service": "http_status:404"}]  # 폴백만 남는다
+    assert created["tunnel_id"] == "11111111-2222-3333-4444-555555555555"
+    # DNS 연결 단계가 없으므로 route dns 명령은 실행되지 않아야 한다
+    assert not any("route" in c[0] for c in runner.run_calls)

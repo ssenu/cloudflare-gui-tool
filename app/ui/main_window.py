@@ -314,6 +314,19 @@ class TunnelCard(QFrame):
         else:
             self.cannot_run_label.setVisible(False)
 
+        # 라우트가 하나도 없는 터널은 켜도 404만 응답한다(ingress에 폴백만 있음).
+        # "터널을 켰는데 왜 안 되지"를 미리 막기 위해 카드에 밝혀 둔다.
+        self.no_route_label = QLabel()
+        self.no_route_label.setStyleSheet(
+            f"color: {palette['muted']}; font-size: 11px;")
+        if not meta.routes:
+            self.no_route_label.setText("라우트 없음")
+            self.no_route_label.setToolTip(
+                "연결된 도메인이 없어 켜도 404만 응답합니다. "
+                "아래 '라우트 추가'로 도메인을 붙이세요.")
+        else:
+            self.no_route_label.setVisible(False)
+
         self.tunnel_switch = ToggleSwitch(palette)
         self.tunnel_switch.toggled.connect(self._on_tunnel_toggled)
         self.spinner = Spinner(palette)
@@ -331,6 +344,7 @@ class TunnelCard(QFrame):
         header.addWidget(self.dot)
         header.addWidget(title)
         header.addWidget(self.state_label)
+        header.addWidget(self.no_route_label)
         header.addWidget(self.cannot_run_label)
         header.addStretch(1)
         header.addWidget(_toggle_label("터널", palette))

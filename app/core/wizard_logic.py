@@ -53,6 +53,36 @@ def plan_steps(name: str, hostname: str, service: str) -> list[PlannedStep]:
     ]
 
 
+def plan_steps_tunnel_only(name: str) -> list[PlannedStep]:
+    """도메인 연결 없이 터널만 만들 때의 단계."""
+    return [
+        PlannedStep("터널 생성", f"cloudflared tunnel create {name}"),
+        PlannedStep("설정 파일 작성",
+                    f"~/.cloudflared/config-{name}.yml 생성 (라우트 없음)"),
+    ]
+
+
+def create_tunnel_only(client: CloudflaredClient, name: str,
+                       progress: Callable[[int, str, bool], None],
+                       created: dict | None = None) -> None:
+    """터널만 만들고 설정 파일은 라우트 없이 쓴다(DNS 연결 없음).
+
+    라우트가 하나도 없어도 cloudflared는 정상적으로 실행된다 - ingress에
+    404 폴백만 남기 때문이다. 도메인은 나중에 "라우트 추가"로 붙인다.
+    """
+    progress(0, "터널 생성 중...", True)
+    tid, cred = client.create_tunnel(name)
+    if created is not None:
+        created["tunnel_id"] = tid
+        created["credentials"] = cred
+    progress(0, f"터널 생성 완료 (id: {tid[:8]}...)", True)
+
+    progress(1, "설정 파일 작성 중...", True)
+    text = build_config(tid, cred, [])
+    client.runner.write_file(client.config_path(name), text)
+    progress(1, "설정 파일 작성 완료 (라우트는 나중에 추가)", True)
+
+
 def execute_creation(client: CloudflaredClient, name: str, hostname: str,
                      service: str,
                      progress: Callable[[int, str, bool], None],

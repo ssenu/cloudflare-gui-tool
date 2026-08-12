@@ -3,16 +3,19 @@ from __future__ import annotations
 import threading
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog,
-                             QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                             QScrollArea, QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel,
+                             QLineEdit, QPushButton, QScrollArea, QVBoxLayout,
+                             QWidget)
 
 from app.context import AppContext
 from app.core.cloudflared import DnsRecordExistsError
 from app.core.store import RouteMeta, ServiceSpec, TunnelMeta, new_route_id
-from app.core.wizard_logic import (execute_creation, finish_creation, plan_steps,
-                                   validate_name, validate_service, validate_subdomain)
+from app.core.wizard_logic import (create_tunnel_only, execute_creation,
+                                   finish_creation, plan_steps,
+                                   plan_steps_tunnel_only, validate_name,
+                                   validate_service, validate_subdomain)
 from app.ui.icons import make_icon
+from app.ui.repo_picker import CwdPickerRow
 from app.ui.route_dialog import (DOCKER_START_DEFAULT, DOCKER_STOP_DEFAULT,
                                  KIND_LABELS)
 from app.ui.theme import current_palette
@@ -150,10 +153,17 @@ class TunnelWizard(QDialog):
         self.stop_cmd_edit.setPlaceholderText("비우면 프로세스를 강제 종료합니다 (선택)")
         self.cwd_edit = QLineEdit()
         self.cwd_edit.setPlaceholderText("작업 폴더 (선택, 도커는 필수)")
-        browse = QPushButton("폴더 선택...")
-        browse.clicked.connect(lambda: self.cwd_edit.setText(
-            QFileDialog.getExistingDirectory(self, "작업 폴더") or self.cwd_edit.text()))
+        # 이전에는 여기서 QFileDialog를 직접 열었다. SSH 대상일 때도 내 PC의
+        # 폴더 선택창이 떠서 원격 경로를 고를 수 없었다(같은 기능이 이미
+        # route_dialog에는 제대로 있었다). 규칙을 공유 위젯으로 옮겼다.
+        self.cwd_picker = CwdPickerRow(self.ctx, self.cwd_edit, self.service_edit,
+                                       palette["text"])
         self.together_chk = QCheckBox("터널을 켤 때 서버도 함께 시작")
+
+        # 터널 생성과 DNS 연결을 분리하는 선택지. 라우트 없이도 터널은
+        # 만들어지므로(ingress에 404 폴백만 남는다) 2~4단계를 건너뛴다.
+        self.later_chk = QCheckBox("지금은 도메인을 연결하지 않고 터널만 만들기")
+        self.later_chk.toggled.connect(self._on_later_toggled)
 
         self.hostname_result = QLabel()
         self.hostname_result.setStyleSheet(
@@ -175,7 +185,11 @@ class TunnelWizard(QDialog):
             self._hint("루트 도메인은 Cloudflare에 등록되어 상태가 Active여야 합니다."),
             QLabel("서브도메인"), self.sub_edit,
             QLabel("루트 도메인"), self.domain_edit,
-            self.hostname_result))
+            self.hostname_result,
+            self.later_chk,
+            self._hint("터널만 먼저 만들어 두고, 도메인은 카드의 '라우트 추가'로 "
+                       "나중에 붙일 수 있습니다. 라우트가 없는 동안에는 터널을 켜도 "
+                       "404만 응답합니다.")))
         self.pages.append(self._page(
             "3. 로컬 서비스 주소",
             self._hint("웹서버가 실제로 듣고 있는 주소입니다. 로컬 구간은 http로 "
@@ -192,7 +206,7 @@ class TunnelWizard(QDialog):
             QLabel("서비스 종류"), self.kind_combo,
             QLabel("시작 명령"), self.cmd_edit,
             QLabel("정지 명령"), self.stop_cmd_edit,
-            QLabel("작업 폴더"), self.cwd_edit, browse,
+            QLabel("작업 폴더"), self.cwd_edit, self.cwd_picker,
             self.together_chk))
         self.pages.append(self._page(
             "5. 실행",
@@ -204,6 +218,20 @@ class TunnelWizard(QDialog):
         for e in (self.name_edit, self.sub_edit, self.domain_edit,
                   self.service_edit):
             e.textChanged.connect(self._update_preview)
+
+    # ---- 도메인 나중에 연결 ----
+    def _on_later_toggled(self, checked: bool):
+        # 입력칸을 비활성화해 "이 값은 지금 쓰이지 않는다"를 눈으로 알린다.
+        self.sub_edit.setEnabled(not checked)
+        self.domain_edit.setEnabled(not checked)
+        self.hostname_result.setVisible(not checked)
+        if self._page_index == 1:
+            self.next_btn.setText("생성 시작" if checked else "다음 →")
+            self.err.clear()
+        self._update_preview()
+
+    def _tunnel_only(self) -> bool:
+        return self.later_chk.isChecked()
 
     # ---- 종류 변경 ----
     def _on_kind_changed(self):
@@ -222,6 +250,8 @@ class TunnelWizard(QDialog):
         if i == 0:
             return validate_name(self.name_edit.text().strip(), self.existing)
         if i == 1:
+            if self._tunnel_only():
+                return ""  # 도메인을 쓰지 않으므로 검증할 것이 없다
             e = validate_subdomain(self.sub_edit.text().strip())
             if not e and not self.domain_edit.text().strip():
                 e = "루트 도메인을 입력하세요"
@@ -236,9 +266,13 @@ class TunnelWizard(QDialog):
 
     def _update_preview(self):
         i = self._page_index
-        steps = plan_steps(self.name_edit.text().strip() or "<이름>",
-                           self._hostname(), self.service_edit.text().strip())
-        if i in (0, 1, 2):
+        name = self.name_edit.text().strip() or "<이름>"
+        if self._tunnel_only():
+            steps = plan_steps_tunnel_only(name)
+        else:
+            steps = plan_steps(name, self._hostname(),
+                               self.service_edit.text().strip())
+        if i in (0, 1, 2) and i < len(steps):
             self.preview.setText("실행될 명령: " + steps[i].preview)
             self.preview.show()
         else:
@@ -293,7 +327,9 @@ class TunnelWizard(QDialog):
     def _go(self, i: int):
         self._show_page(i)
         self.back_btn.setVisible(0 < i < 4)
-        self.next_btn.setText("생성 시작" if i == 3 else "다음 →")
+        # 도메인을 나중에 연결하는 경우 2단계가 마지막 입력 페이지가 된다.
+        last_input = 1 if self._tunnel_only() else 3
+        self.next_btn.setText("생성 시작" if i == last_input else "다음 →")
         self.err.clear()
         self._update_preview()
 
@@ -311,9 +347,10 @@ class TunnelWizard(QDialog):
 
     def _back(self):
         i = self._page_index
-        # 실행 페이지(4)에서 뒤로가면 페이지 3으로 돌아가고, 생성 시작 버튼 준비
+        # 실행 페이지(4)에서 뒤로가면 마지막 입력 페이지로 돌아간다. 도메인을
+        # 나중에 연결하는 경우에는 3·4단계를 건너뛰었으므로 2단계가 그 자리다.
         if i == 4:
-            self._go(3)
+            self._go(1 if self._tunnel_only() else 3)
         else:
             self._go(i - 1)
 
@@ -332,7 +369,11 @@ class TunnelWizard(QDialog):
             self.err.setText(e)
             return
         i = self._page_index
-        if i < 3:
+        if i == 1 and self._tunnel_only():
+            # 3·4단계(서비스 주소, 서버 명령)는 라우트가 있어야 의미가 있다
+            self._go(4)
+            self._start_creation()
+        elif i < 3:
             self._go(i + 1)
         elif i == 3:
             self._go(4)
@@ -359,11 +400,18 @@ class TunnelWizard(QDialog):
             if idx >= 1:
                 self._tunnel_created = True
 
+        tunnel_only = self._tunnel_only()
+
         def work():
             try:
-                execute_creation(client, name, hostname, service, progress,
-                                 created=self._created)
-                self._events.append(("done", name, hostname, service))
+                if tunnel_only:
+                    create_tunnel_only(client, name, progress,
+                                       created=self._created)
+                    self._events.append(("done", name, "", ""))
+                else:
+                    execute_creation(client, name, hostname, service, progress,
+                                     created=self._created)
+                    self._events.append(("done", name, hostname, service))
             except Exception as ex:  # CloudflaredError 포함
                 is_dns_conflict = isinstance(ex, DnsRecordExistsError)
                 self._events.append(
@@ -464,19 +512,24 @@ class TunnelWizard(QDialog):
                     (self.status_label.text() + "\n" + ev[1]).strip())
             elif ev[0] == "done":
                 _, name, hostname, service = ev
-                route = RouteMeta(
-                    id=new_route_id(), hostname=hostname, service=service,
-                    label=self.label_edit.text().strip(),
-                    server=ServiceSpec(
-                        kind=self.kind_combo.currentData(),
-                        start_cmd=self.cmd_edit.text().strip(),
-                        stop_cmd=self.stop_cmd_edit.text().strip(),
-                        cwd=self.cwd_edit.text().strip(),
-                        autostart=self.together_chk.isChecked()))
-                self.created_meta = TunnelMeta(name=name, routes=[route])
+                if hostname:
+                    route = RouteMeta(
+                        id=new_route_id(), hostname=hostname, service=service,
+                        label=self.label_edit.text().strip(),
+                        server=ServiceSpec(
+                            kind=self.kind_combo.currentData(),
+                            start_cmd=self.cmd_edit.text().strip(),
+                            stop_cmd=self.stop_cmd_edit.text().strip(),
+                            cwd=self.cwd_edit.text().strip(),
+                            autostart=self.together_chk.isChecked()))
+                    routes = [route]
+                    # 루트 도메인 기억 (도메인을 실제로 입력했을 때만)
+                    self.ctx.store.settings.root_domain = \
+                        self.domain_edit.text().strip()
+                else:
+                    routes = []  # 도메인은 나중에 '라우트 추가'로 붙인다
+                self.created_meta = TunnelMeta(name=name, routes=routes)
                 self.created_tunnel_id = self._created.get("tunnel_id", "")
-                # 루트 도메인 기억
-                self.ctx.store.settings.root_domain = self.domain_edit.text().strip()
                 self._next_mode = "done"
                 self.next_btn.setEnabled(True)
                 self.overwrite_btn.setVisible(False)

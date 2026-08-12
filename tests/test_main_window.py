@@ -504,3 +504,38 @@ def test_shortcut_server_ignores_disabled_toggle(qapp, tmp_path):
 
     assert calls == []
     assert not switch.isChecked()
+
+
+# ---- 라우트 없는 터널 표시 (터널만 먼저 만드는 경로) ----
+
+def test_card_shows_no_route_badge_when_tunnel_has_no_routes(qapp, tmp_path):
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    runner.files["/home/fake/.cloudflared/tid1.json"] = "{}"
+
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1", routes=[])
+    win.refresh()
+
+    card = win.cards[0]
+    assert not card.no_route_label.isHidden()
+    assert "라우트 없음" in card.no_route_label.text()
+    assert "404" in card.no_route_label.toolTip()
+    # 실행 자체는 막지 않는다 - 터널만 켜 두고 나중에 라우트를 붙일 수 있다
+    assert card.tunnel_switch.isEnabled()
+
+
+def test_card_hides_no_route_badge_when_routes_exist(qapp, tmp_path):
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    route = RouteMeta(id=new_route_id(), hostname="a.example.com",
+                      service="http://localhost:8000")
+
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
+        name="t1", routes=[route])
+    win.refresh()
+
+    assert win.cards[0].no_route_label.isHidden()

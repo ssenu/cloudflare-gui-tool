@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (QAbstractItemView, QDialog, QHBoxLayout, QHeaderView,
-                             QLabel, QMessageBox, QPushButton, QTableWidget,
+                             QLabel, QMenu, QMessageBox, QPushButton, QTableWidget,
                              QTableWidgetItem, QVBoxLayout, QWidget)
 
 from app.context import AppContext
@@ -11,7 +12,9 @@ from app.core.git_repo import (STATE_CLONING, STATE_FAILED, STATE_NONE,
                                STATE_READY, GitClient, clone_state)
 from app.core.run_registry import RunRegistry
 from app.core.store import RepoMeta
+from app.ui.icons import make_icon
 from app.ui.theme import STATE_COLORS, current_palette
+from app.ui.widgets import danger_menu_action
 from app.ui.winutil import apply_titlebar_theme
 from app.core.process_mgr import TunnelState
 
@@ -29,7 +32,8 @@ STATE_DOT_COLORS = {
     STATE_NONE: "#888888",
 }
 
-COLS = ["", "이름", "URL", "경로", "커밋"]
+COLS = ["", "이름", "URL", "경로", "커밋", ""]
+MENU_COL = 5  # 프로젝트별 동작(⋮). 터널 라우트 행과 같은 방식으로 통일한다.
 
 
 class RepoManagerDialog(QDialog):
@@ -62,31 +66,33 @@ class RepoManagerDialog(QDialog):
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.table.setColumnWidth(0, 28)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(MENU_COL, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(MENU_COL, 34)
+        # 선택 행을 눈에 띄게 만드는 색은 theme.py의 QTableWidget::item:selected가
+        # 담당한다. 여기서는 행 전체가 함께 선택되도록만 맞춘다.
+        self.table.itemSelectionChanged.connect(self._on_selection_changed)
 
         add_btn = QPushButton("클론 추가")
         add_btn.setObjectName("primary")
         add_btn.clicked.connect(self._add_clone)
-        update_btn = QPushButton("업데이트")
-        update_btn.setToolTip("선택한 프로젝트를 git pull로 업데이트합니다")
-        update_btn.clicked.connect(self._update_selected)
-        log_btn = QPushButton("로그")
-        log_btn.clicked.connect(self._show_log)
-        remove_btn = QPushButton("목록에서 제거")
-        remove_btn.clicked.connect(self._remove_selected)
-        delete_btn = QPushButton("폴더까지 삭제")
-        delete_btn.setObjectName("danger")
-        delete_btn.clicked.connect(self._delete_selected)
+
+        # 프로젝트별 동작은 각 행의 ⋮ 메뉴로 옮겼다. 예전처럼 아래쪽 버튼을
+        # 쓰면 "무엇이 선택됐는지" 확신이 없는 상태에서 삭제를 누르게 된다.
+        self.hint_label = QLabel("각 줄의 ⋮ 에서 환경설정·로그·업데이트·삭제를 할 수 있습니다")
+        self.hint_label.setStyleSheet(f"color: {palette['muted']}; font-size: 11px;")
 
         btns = QHBoxLayout()
         btns.addWidget(add_btn)
-        btns.addWidget(update_btn)
-        btns.addWidget(log_btn)
+        btns.addWidget(self.hint_label)
         btns.addStretch(1)
-        btns.addWidget(remove_btn)
-        btns.addWidget(delete_btn)
+
+        self.selected_label = QLabel()
+        self.selected_label.setStyleSheet(
+            f"color: {palette['accent']}; font-size: 12px; font-weight: 600;")
 
         root = QVBoxLayout(self)
         root.addWidget(title)
+        root.addWidget(self.selected_label)
         root.addWidget(self.table, 1)
         root.addLayout(btns)
 
@@ -148,6 +154,53 @@ class RepoManagerDialog(QDialog):
             commit = self._cached_commit(repo) if state == STATE_READY else ""
             self.table.setItem(i, 4, QTableWidgetItem(commit))
 
+            self.table.setCellWidget(i, MENU_COL, self._menu_widget(repo))
+        self._on_selection_changed()
+
+    # ---- 프로젝트별 메뉴 ----
+    def _menu_widget(self, repo: RepoMeta) -> QWidget:
+        palette = current_palette(self.ctx.store.settings.theme)
+        btn = QPushButton()
+        btn.setIcon(make_icon("dots", palette["text"]))
+        btn.setFixedWidth(28)
+        btn.setToolTip(f"{repo.name} 동작")
+        btn.clicked.connect(lambda: self._open_menu(btn, repo))
+        wrap = QWidget()
+        lay = QHBoxLayout(wrap)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(btn)
+        return wrap
+
+    def _open_menu(self, anchor: QPushButton, repo: RepoMeta):
+        # 메뉴를 연 줄을 선택 상태로 만든다 - 어떤 프로젝트에 대한 동작인지
+        # 화면에서도 분명해진다.
+        self._select_repo(repo)
+        palette = current_palette(self.ctx.store.settings.theme)
+        menu = QMenu(self)
+        for text, handler in (("환경설정", self._edit_env),
+                              ("로그", self._show_log),
+                              ("업데이트 (git pull)", self._update_repo)):
+            action = QAction(text, menu)
+            action.triggered.connect(lambda _c=False, h=handler: h(repo))
+            menu.addAction(action)
+        menu.addSeparator()
+        remove_action = QAction("목록에서 제거", menu)
+        remove_action.triggered.connect(lambda: self._remove_repo(repo))
+        menu.addAction(remove_action)
+        danger_menu_action(menu, "폴더까지 삭제", palette,
+                           lambda: self._delete_repo(repo))
+        menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+    def _select_repo(self, repo: RepoMeta):
+        for i, r in enumerate(self._repos()):
+            if r.id == repo.id:
+                self.table.selectRow(i)
+                return
+
+    def _on_selection_changed(self):
+        repo = self._selected_repo()
+        self.selected_label.setText(f"선택됨: {repo.name}" if repo else "")
+
     def _tick(self):
         repos = self._repos()
         for i, repo in enumerate(repos):
@@ -175,11 +228,12 @@ class RepoManagerDialog(QDialog):
     def _is_cloning(self, repo: RepoMeta) -> bool:
         return clone_state(self.reg, self.git, repo, self._state_cache) == STATE_CLONING
 
-    def _update_selected(self):
-        repo = self._selected_repo()
-        if repo is None:
-            QMessageBox.information(self, "업데이트", "먼저 프로젝트를 선택하세요")
-            return
+    def _edit_env(self, repo: RepoMeta):
+        from app.ui.env_editor import EnvEditorDialog
+        dlg = EnvEditorDialog(self.ctx, repo, self)
+        dlg.exec()
+
+    def _update_repo(self, repo: RepoMeta):
         if self._is_cloning(repo):
             QMessageBox.warning(self, "업데이트 불가",
                                 "클론이 진행 중입니다. 먼저 완료되기를 기다리세요.")
@@ -197,20 +251,13 @@ class RepoManagerDialog(QDialog):
             return
         self._reload()
 
-    def _show_log(self):
-        repo = self._selected_repo()
-        if repo is None:
-            QMessageBox.information(self, "로그", "먼저 프로젝트를 선택하세요")
-            return
+    def _show_log(self, repo: RepoMeta):
         from app.ui.log_viewer import LogViewer
         unit = self.reg.unit_clone(repo.id)
         viewer = LogViewer(self.ctx, repo.name, {"클론/업데이트": self.reg.log_path(unit)}, self)
         viewer.show()
 
-    def _remove_selected(self):
-        repo = self._selected_repo()
-        if repo is None:
-            return
+    def _remove_repo(self, repo: RepoMeta):
         ok = QMessageBox.question(
             self, "목록에서 제거",
             f"'{repo.name}'을(를) 목록에서만 제거할까요?\n대상 머신의 폴더는 그대로 남습니다.")
@@ -219,10 +266,7 @@ class RepoManagerDialog(QDialog):
         self._remove_from_settings(repo)
         self._reload()
 
-    def _delete_selected(self):
-        repo = self._selected_repo()
-        if repo is None:
-            return
+    def _delete_repo(self, repo: RepoMeta):
         if self._is_cloning(repo):
             QMessageBox.warning(self, "삭제 불가",
                                 "클론이 진행 중입니다. 먼저 완료되기를 기다리세요.")

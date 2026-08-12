@@ -105,3 +105,66 @@ def test_close_timer_stopped_on_close_event(qapp, tmp_path):
     wiz.closeEvent(QCloseEvent())
 
     assert not wiz._close_timer.isActive()
+
+
+# ---- 터널만 만들기 (도메인은 나중에 연결) ----
+
+def test_tunnel_only_skips_domain_validation_and_jumps_to_run(qapp, tmp_path):
+    wiz = make_wizard(qapp, tmp_path)
+    wiz.name_edit.setText("mysite")
+    wiz._go(1)
+    wiz.later_chk.setChecked(True)
+
+    # 서브도메인이 비어 있어도 통과해야 한다
+    assert wiz._validate_current() == ""
+    assert wiz.next_btn.text() == "생성 시작"
+    assert not wiz.sub_edit.isEnabled()
+
+    started = []
+    wiz._start_creation = lambda: started.append(True)
+    wiz._next()
+
+    assert wiz._page_index == 4  # 3·4단계를 건너뛴다
+    assert started == [True]
+
+
+def test_tunnel_only_back_returns_to_domain_page(qapp, tmp_path):
+    wiz = make_wizard(qapp, tmp_path)
+    wiz.later_chk.setChecked(True)
+    wiz._go(4)
+    wiz._back()
+    assert wiz._page_index == 1
+
+
+def test_tunnel_only_done_creates_meta_without_routes(qapp, tmp_path):
+    wiz = make_wizard(qapp, tmp_path)
+    wiz._created = {"tunnel_id": "tid1"}
+    wiz._events.append(("done", "mysite", "", ""))
+
+    wiz._drain_events()
+
+    assert wiz.created_meta is not None
+    assert wiz.created_meta.routes == []
+    assert wiz.created_tunnel_id == "tid1"
+
+
+def test_tunnel_only_does_not_overwrite_saved_root_domain(qapp, tmp_path):
+    # 도메인 칸을 쓰지 않았으므로 기억해 둔 루트 도메인을 지우면 안 된다.
+    wiz = make_wizard(qapp, tmp_path)
+    wiz.ctx.store.settings.root_domain = "example.com"
+    wiz.domain_edit.setText("")
+    wiz._events.append(("done", "mysite", "", ""))
+
+    wiz._drain_events()
+
+    assert wiz.ctx.store.settings.root_domain == "example.com"
+
+
+def test_normal_path_still_creates_route(qapp, tmp_path):
+    wiz = make_wizard(qapp, tmp_path)
+    wiz._events.append(("done", "mysite", "a.example.com", "http://localhost:8000"))
+
+    wiz._drain_events()
+
+    assert len(wiz.created_meta.routes) == 1
+    assert wiz.created_meta.routes[0].hostname == "a.example.com"
