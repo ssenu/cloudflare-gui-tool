@@ -6,14 +6,22 @@ from app.core.git_repo import (
     GitClient,
     clone_argv,
     clone_state,
+    ensure_repo_root,
     join_path,
     parse_repo_name,
     validate_repo_name,
+    validate_repo_root,
     validate_repo_url,
 )
 from app.core.run_registry import RunRegistry
+from app.core.runner import RunResult
 from app.core.store import RepoMeta
 from tests.fake_runner import FakeRunner
+
+
+def _set_commit(runner: FakeRunner, path: str, commit: str = "abc1234"):
+    runner.run_results[("git", "-C", path, "rev-parse", "--short", "HEAD")] = \
+        RunResult(0, commit + "\n", "")
 
 
 # ---- parse_repo_name ----
@@ -188,6 +196,7 @@ def test_clone_state_ready_when_pid_gone_and_repo_exists():
     git = GitClient(runner)
     repo = _repo()
     runner.files[repo.path + "/.git"] = ""
+    _set_commit(runner, repo.path)
     assert clone_state(reg, git, repo) == STATE_READY
 
 
@@ -214,3 +223,118 @@ def test_clone_state_clears_dead_pid_file():
     runner.live_pids.discard(pid)
     clone_state(reg, git, repo)
     assert reg.read_pid(unit) is None
+
+
+# ---- I2: 중단된 클론(.git은 있으나 커밋 없음)을 ready로 오판하지 않는다 ----
+
+def test_clone_state_git_dir_without_commit_is_failed_not_ready():
+    """PID가 죽었고 .git은 있지만(중단된 클론의 흔적) HEAD 커밋을 얻지
+    못하면 ready가 아니라 failed여야 한다."""
+    runner = FakeRunner()
+    reg = RunRegistry(runner)
+    git = GitClient(runner)
+    repo = _repo()
+    unit = reg.unit_clone(repo.id)
+    pid = runner.spawn_detached(["git", "clone"], None, reg.log_path(unit))
+    reg.write_pid(unit, pid, cmd="git")
+    runner.live_pids.discard(pid)  # 네트워크 끊김 등으로 중단
+    runner.files[repo.path + "/.git"] = ""  # git clone이 아주 이른 시점에 만든 흔적
+    # current_commit()은 기본 run_results(성공, 빈 stdout)라 빈 문자열을 반환한다
+    assert clone_state(reg, git, repo) == STATE_FAILED
+
+
+def test_clone_state_ready_result_is_cached_and_not_rechecked():
+    """한 번 ready로 확정되면 이후 호출은 원격 조회 없이 캐시를 반환한다."""
+    runner = FakeRunner()
+    reg = RunRegistry(runner)
+    git = GitClient(runner)
+    repo = _repo()
+    runner.files[repo.path + "/.git"] = ""
+    _set_commit(runner, repo.path)
+    cache: dict = {}
+    assert clone_state(reg, git, repo, cache) == STATE_READY
+    calls_after_first = len(runner.run_calls)
+    assert clone_state(reg, git, repo, cache) == STATE_READY
+    assert len(runner.run_calls) == calls_after_first  # 추가 원격 왕복 없음
+
+
+# ---- I3: repo_root 검증 ----
+
+def test_validate_repo_root_empty():
+    assert validate_repo_root("") != ""
+
+
+def test_validate_repo_root_relative_rejected():
+    assert validate_repo_root("srv/apps") != ""
+
+
+def test_validate_repo_root_dotdot_rejected():
+    assert validate_repo_root("/srv/../etc") != ""
+
+
+def test_validate_repo_root_valid():
+    assert validate_repo_root("/srv/apps") == ""
+
+
+# ---- C1: repo_root 부모 디렉터리 생성 ----
+
+def test_ensure_repo_root_creates_and_returns_true():
+    runner = FakeRunner()
+    assert runner.file_exists("/srv/apps") is False
+    assert ensure_repo_root(runner, "/srv/apps") is True
+    assert runner.file_exists("/srv/apps") is True
+
+
+def test_ensure_repo_root_returns_false_when_blocked():
+    """SSH의 mkdir -p가 권한 부족으로 조용히 실패하는 상황을 재현한다."""
+    runner = FakeRunner()
+    runner.ensure_dir_blocked.add("/srv/apps")
+    assert ensure_repo_root(runner, "/srv/apps") is False
+    assert runner.file_exists("/srv/apps") is False
+
+
+# ---- I4: PID 재사용 대조 ----
+
+def test_clone_state_pid_reused_with_different_command_is_failed():
+    runner = FakeRunner()
+    reg = RunRegistry(runner)
+    git = GitClient(runner)
+    repo = _repo()
+    unit = reg.unit_clone(repo.id)
+    pid = runner.spawn_detached(["git", "clone"], None, reg.log_path(unit))
+    reg.write_pid(unit, pid, cmd="git")
+    # PID가 재사용되어 지금은 전혀 다른 프로세스(예: nginx)가 실행 중
+    runner.pid_cmdlines_map[pid] = "nginx"
+    assert clone_state(reg, git, repo) == STATE_FAILED
+    assert reg.read_pid(unit) is None  # PID 파일이 정리되었는지
+
+
+def test_clone_state_pid_cmdlines_lookup_failure_is_fail_open():
+    """조회 자체가 실패(None)하면 대조를 건너뛰고 계속 cloning으로 본다."""
+    runner = FakeRunner()
+    reg = RunRegistry(runner)
+    git = GitClient(runner)
+    repo = _repo()
+    unit = reg.unit_clone(repo.id)
+    pid = runner.spawn_detached(["git", "clone"], None, reg.log_path(unit))
+    reg.write_pid(unit, pid, cmd="git")
+    runner.pid_cmdlines_fail = True
+    assert clone_state(reg, git, repo) == STATE_CLONING
+    assert reg.read_pid(unit) == pid  # PID 파일이 그대로 남아있어야 함
+
+
+def test_clone_state_cmd_verification_happens_once_per_pid():
+    """일치가 확인된 PID는 매 틱 재조회하지 않는다."""
+    runner = FakeRunner()
+    reg = RunRegistry(runner)
+    git = GitClient(runner)
+    repo = _repo()
+    unit = reg.unit_clone(repo.id)
+    pid = runner.spawn_detached(["git", "clone"], None, reg.log_path(unit))
+    reg.write_pid(unit, pid, cmd="git")
+    cache: dict = {}
+    assert clone_state(reg, git, repo, cache) == STATE_CLONING
+    calls_after_first = runner.pid_cmdlines_calls
+    assert clone_state(reg, git, repo, cache) == STATE_CLONING
+    assert clone_state(reg, git, repo, cache) == STATE_CLONING
+    assert runner.pid_cmdlines_calls == calls_after_first  # 재조회 없음

@@ -1,4 +1,5 @@
 import time
+from app.core.runner import RunResult
 from app.core.ssh_runner import quote_cmd, SshProcess
 from app.core.store import SshProfile
 from app.core.ssh_runner import SshRunner
@@ -14,6 +15,21 @@ def test_runner_name_includes_profile():
     r = SshRunner(SshProfile(name="rpi", host="1.2.3.4"))
     assert r.name == "ssh:rpi"
     assert not r.is_connected()
+
+
+def test_remove_tree_runs_rm_rf():
+    """I5: remove_tree()는 rm -rf를 (list 인자로) 실행해야 한다.
+    실제 연결 없이 run()을 대체해 호출 인자만 검증한다."""
+    r = SshRunner(SshProfile(name="rpi", host="1.2.3.4"))
+    calls = []
+
+    def fake_run(cmd, timeout=60.0, cwd=None):
+        calls.append(cmd)
+        return RunResult(0, "", "")
+
+    r.run = fake_run
+    r.remove_tree("/srv/apps/blog")
+    assert calls == [["rm", "-rf", "/srv/apps/blog"]]
 
 
 # Fake channel for testing SshProcess without real SSH

@@ -50,3 +50,13 @@ def test_file_ops(tmp_path):
     assert r.read_file(f) == "내용"
     r.remove_file(f)
     assert not r.file_exists(f)
+
+
+def test_remove_tree_removes_directory_and_contents(tmp_path):
+    r = LocalRunner()
+    d = tmp_path / "proj"
+    (d / "sub").mkdir(parents=True)
+    (d / "sub" / "f.txt").write_text("hi", encoding="utf-8")
+    assert d.exists()
+    r.remove_tree(str(d))
+    assert not d.exists()

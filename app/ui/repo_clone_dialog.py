@@ -11,8 +11,8 @@ from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QFormLayout, QLabel,
                              QLineEdit, QMessageBox, QVBoxLayout)
 
 from app.context import AppContext
-from app.core.git_repo import (clone_argv, join_path, parse_repo_name,
-                               validate_repo_name, validate_repo_url)
+from app.core.git_repo import (clone_argv, ensure_repo_root, join_path,
+                               parse_repo_name, validate_repo_name, validate_repo_url)
 from app.core.run_registry import RunRegistry
 from app.core.store import RepoMeta, new_route_id
 from app.ui.theme import current_palette
@@ -118,6 +118,20 @@ class RepoCloneDialog(QDialog):
 
         reg = RunRegistry(self.ctx.runner)
         unit = reg.unit_clone(repo.id)
+
+        # C1: git clone은 목적지의 상위 디렉터리(repo_root)를 만들어주지
+        # 않는다. /srv/apps가 아직 없는 새 대상에서는 매번
+        # "could not create leading directories"로 조용히 실패하므로,
+        # 클론을 시작하기 전에 먼저 만들어보고 안 되면 실행 가능한 안내를
+        # 보여준 뒤 아예 시작하지 않는다.
+        if not ensure_repo_root(self.ctx.runner, self.repo_root):
+            QMessageBox.critical(
+                self, "클론 시작 실패",
+                f"클론 위치 {self.repo_root}를 만들 수 없습니다. 대상 서버에서 다음을 "
+                f"실행한 뒤 다시 시도하세요:\n"
+                f"sudo mkdir -p {self.repo_root} && sudo chown $USER {self.repo_root}")
+            return
+
         try:
             # SSH 대상은 write_file/spawn_detached가 상위 디렉터리를 자동
             # 생성해주지 않는다(SFTP는 로컬 write_file과 달리 mkdir을 하지

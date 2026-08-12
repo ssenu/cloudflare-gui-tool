@@ -28,6 +28,7 @@ class FakeRunner(CommandRunner):
     def append_file(self, path, text): pass
     def file_exists(self, path): return False
     def remove_file(self, path): pass
+    def remove_tree(self, path): pass
     def home_dir(self): return "C:/Users/me"
     def spawn_detached(self, cmd, cwd, log_path): raise NotImplementedError
     def pids_alive(self, pids, timeout=60.0): return set()

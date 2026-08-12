@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (QComboBox, QDialogButtonBox, QFormLayout, QLineEdit,
-                             QVBoxLayout, QDialog)
+                             QMessageBox, QVBoxLayout, QDialog)
 
 from app.context import AppContext
+from app.core.git_repo import validate_repo_root
 from app.ui.winutil import apply_titlebar_theme
 
 THEME_LABELS = {"dark": "다크", "light": "라이트"}
@@ -50,7 +51,19 @@ class SettingsDialog(QDialog):
 
     def _persist(self):
         self.ctx.store.settings.cloudflared_path = self.cf_path_edit.text().strip()
-        self.ctx.store.settings.repo_root = self.repo_root_edit.text().strip() or "/srv/apps"
+
+        # I3: repo_root는 클론 목적지 조립과 "폴더까지 삭제"의 rm -rf 인자로
+        # 그대로 쓰이므로 name과 같은 수준으로 엄격히 검증한다. 잘못된
+        # 값이면 경고하고 이전 값을 유지한다(입력칸도 이전 값으로 되돌린다).
+        new_root = self.repo_root_edit.text().strip()
+        err = validate_repo_root(new_root)
+        if err:
+            QMessageBox.warning(self, "클론 위치 오류",
+                                f"{err}\n이전 값을 그대로 유지합니다.")
+            self.repo_root_edit.setText(self.ctx.store.settings.repo_root)
+        else:
+            self.ctx.store.settings.repo_root = new_root
+
         self.ctx.store.settings.theme = THEME_VALUES.get(
             self.theme_combo.currentText(), "dark")
         self.ctx.store.save()

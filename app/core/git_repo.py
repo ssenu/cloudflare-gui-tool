@@ -74,6 +74,40 @@ def join_path(root: str, name: str) -> str:
     return f"{root}/{name}"
 
 
+def validate_repo_root(path: str) -> str:
+    """클론 기본 위치(repo_root)를 검증한다. 오류 메시지 또는 빈 문자열.
+
+    이 값은 이후 join_path()로 클론 목적지를, "폴더까지 삭제"에서는 그
+    목적지를 그대로 rm -rf 인자로 넘기는 데 쓰인다 - 상대경로나 ".."가
+    섞이면 삭제가 의도한 위치 밖으로 나갈 수 있어 이름(name)과 같은
+    수준으로 엄격히 막는다.
+    """
+    path = path.strip()
+    if not path:
+        return "클론 위치를 입력하세요"
+    if not path.startswith("/"):
+        return "절대 경로여야 합니다 (예: /srv/apps)"
+    segments = path.split("/")
+    if ".." in segments:
+        return "경로에 '..'를 포함할 수 없습니다"
+    return ""
+
+
+def ensure_repo_root(runner: CommandRunner, repo_root: str) -> bool:
+    """repo_root 디렉터리가 있는지 확인하고, 없으면 만들어본다.
+
+    성공적으로 존재하게 되면 True. SSH의 ensure_dir(``mkdir -p``)는 권한
+    부족 등으로 실패해도 예외를 던지지 않으므로(로컬 ensure_dir은 예외를
+    던질 수 있음), 시도 후 실제로 존재하는지 다시 확인해서 판정한다 -
+    두 러너의 실패 방식이 달라도 호출자는 반환값 하나만 보면 된다.
+    """
+    try:
+        runner.ensure_dir(repo_root)
+    except Exception:
+        pass
+    return runner.file_exists(repo_root)
+
+
 def clone_argv(url: str, dest: str, branch: str = "") -> list[str]:
     """git clone 명령을 구성한다. shallow clone(--depth)은 쓰지 않는다 -
     이후 git pull로 업데이트해야 하기 때문이다."""
@@ -115,24 +149,63 @@ class GitClient:
         return ["git", "-C", path, "pull", "--ff-only"]
 
 
-def clone_state(reg: RunRegistry, git: GitClient, repo) -> str:
+def clone_state(reg: RunRegistry, git: GitClient, repo,
+                cache: dict[str, dict] | None = None) -> str:
     """클론 진행 상태를 판정한다.
 
-    - PID 파일이 있고 살아있으면 "cloning"
-    - PID 파일이 없고 저장소면 "ready"
-    - PID 파일이 없고 저장소가 아니면 "failed" (한 번도 시작 안 했으면 "none")
-    - 클론이 끝났으면(PID 죽음) PID 파일을 정리한다
+    - PID가 있고 살아있으면 "cloning" - 단, 기록된 명령 토큰(``git``)과
+      실제 실행 중인 명령이 다르면(PID 재사용 의심) "failed"로 판정한다.
+      조회 자체가 실패(원격 연결 문제 등)하면 fail-open: 대조를 건너뛰고
+      살아있는 것으로 본다. 한 번 일치가 확인된 PID는 캐시해 매 틱
+      재조회하지 않는다.
+    - PID가 없거나 막 죽었으면: ``is_repo()``이고 **동시에**
+      ``current_commit()``이 값을 반환할 때만 "ready" - git clone은 아주
+      이른 시점에 ``.git``을 만들기 때문에, 중간에 끊긴 클론도 ``.git``
+      존재만으로는 "완료"로 오판하기 쉽다. 둘 중 하나라도 아니면 로그가
+      있었으면(시도한 적 있으면) "failed", 없으면 "none".
+    - "ready"로 한 번 확정된 유닛은 결과를 캐시해 이후로는 원격 조회 없이
+      즉시 반환한다(안정된 항목의 폴링 비용을 없앤다).
+    - 죽은 PID 파일은 정리한다.
+
+    ``cache``는 호출자가 여러 틱에 걸쳐 들고 있는 dict(``repo.id`` 키)다.
+    넘기지 않으면 매 호출이 새 캐시로 취급되어 캐싱 이점이 없다 - UI는
+    반드시 같은 dict를 재사용해야 한다.
     """
+    if cache is None:
+        cache = {}
+    entry = cache.setdefault(repo.id, {})
+
+    if entry.get("ready"):
+        return STATE_READY
+
     unit = reg.unit_clone(repo.id)
-    pid = reg.read_pid(unit)
-    if pid is not None:
-        alive = reg.runner.pids_alive([pid])
-        if pid in alive:
+    record = reg.read_record(unit)
+    if record is not None:
+        pid, cmd_token = record
+        alive = pid in reg.runner.pids_alive([pid])
+        if alive:
+            if cmd_token and entry.get("cmd_verified_pid") != pid:
+                cmdlines = reg.runner.pid_cmdlines([pid])
+                if cmdlines is None:
+                    pass  # fail-open: 조회 실패 - 대조 건너뛰고 살아있는 것으로 간주
+                elif pid in cmdlines:
+                    if cmd_token.strip().lower() in cmdlines[pid].strip().lower():
+                        entry["cmd_verified_pid"] = pid
+                    else:
+                        # PID 재사용 의심: 이 PID는 더 이상 우리 클론이 아니다.
+                        reg.clear_pid(unit)
+                        return STATE_FAILED
+                # else: 이번 조회 응답에 이 PID가 없었다 - 모름으로 보류
             return STATE_CLONING
         # 죽은 PID 파일은 정리한다
         reg.clear_pid(unit)
+
     if git.is_repo(repo.path):
-        return STATE_READY
+        commit = git.current_commit(repo.path)
+        if commit:
+            entry["ready"] = True
+            entry["commit"] = commit
+            return STATE_READY
     # 로그가 있었다면(클론을 시도했었다면) 실패로 본다
     if reg.runner.file_exists(reg.log_path(unit)):
         return STATE_FAILED

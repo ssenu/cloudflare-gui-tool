@@ -32,6 +32,11 @@ class FakeRunner(CommandRunner):
         # True면 pid_cmdlines()가 조회 실패(None)를 흉내낸다 - fail-open
         # 회귀 테스트용 (SSH 타임아웃, busybox ps -p/-o 미지원 등 재현)
         self.pid_cmdlines_fail: bool = False
+        # ensure_dir()이 조용히 실패(디렉터리를 만들지 못함)하는 것을
+        # 흉내내는 경로 집합 - 실제 SSH의 "mkdir -p"가 권한 부족으로
+        # 실패해도 예외를 던지지 않는 것과 동일하게 재현한다.
+        self.ensure_dir_blocked: set[str] = set()
+        self.removed_trees: list[str] = []
 
     # ---- 명령 실행 ----
     def run(self, cmd, timeout: float = 60.0, cwd: str | None = None) -> RunResult:
@@ -57,10 +62,18 @@ class FakeRunner(CommandRunner):
         self.files[path] = self.files.get(path, "") + text
 
     def file_exists(self, path: str) -> bool:
-        return path in self.files
+        return path in self.files or path in self.dirs
 
     def remove_file(self, path: str) -> None:
         del self.files[path]
+
+    def remove_tree(self, path: str) -> None:
+        self.removed_trees.append(path)
+        prefix = path.rstrip("/") + "/"
+        for p in list(self.files):
+            if p == path or p.startswith(prefix):
+                del self.files[p]
+        self.dirs = {d for d in self.dirs if d != path and not d.startswith(prefix)}
 
     def home_dir(self) -> str:
         return self._home
@@ -108,6 +121,8 @@ class FakeRunner(CommandRunner):
         return len(self.files[path].encode("utf-8"))
 
     def ensure_dir(self, path: str) -> None:
+        if path in self.ensure_dir_blocked:
+            return  # SSH의 "mkdir -p" 실패처럼 예외 없이 조용히 실패한 것을 흉내
         self.dirs.add(path)
 
     def list_dir(self, path: str) -> list[str]:

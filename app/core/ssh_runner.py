@@ -188,6 +188,10 @@ class SshRunner(CommandRunner):
         assert self._sftp
         self._sftp.remove(self._expand(path))
 
+    def remove_tree(self, path: str) -> None:
+        # run()이 이미 리스트 인자를 shlex.quote로 안전하게 조립해준다.
+        self.run(["rm", "-rf", self._expand(path)])
+
     def home_dir(self) -> str:
         assert self._sftp
         if self._home is None:

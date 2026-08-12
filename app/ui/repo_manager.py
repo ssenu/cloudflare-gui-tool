@@ -7,8 +7,8 @@ from PyQt6.QtWidgets import (QAbstractItemView, QDialog, QHBoxLayout, QHeaderVie
                              QTableWidgetItem, QVBoxLayout, QWidget)
 
 from app.context import AppContext
-from app.core.git_repo import (STATE_CLONING, STATE_FAILED, STATE_READY,
-                               GitClient, clone_state)
+from app.core.git_repo import (STATE_CLONING, STATE_FAILED, STATE_NONE,
+                               STATE_READY, GitClient, clone_state)
 from app.core.run_registry import RunRegistry
 from app.core.store import RepoMeta
 from app.ui.theme import STATE_COLORS, current_palette
@@ -19,14 +19,14 @@ STATE_LABELS = {
     STATE_CLONING: "클론 중",
     STATE_READY: "준비됨",
     STATE_FAILED: "실패",
-    "none": "-",
+    STATE_NONE: "-",
 }
 
 STATE_DOT_COLORS = {
     STATE_CLONING: STATE_COLORS[TunnelState.STARTING],
     STATE_READY: STATE_COLORS[TunnelState.RUNNING],
     STATE_FAILED: STATE_COLORS[TunnelState.ERROR],
-    "none": "#888888",
+    STATE_NONE: "#888888",
 }
 
 COLS = ["", "이름", "URL", "경로", "커밋"]
@@ -43,6 +43,10 @@ class RepoManagerDialog(QDialog):
         self.reg = RunRegistry(ctx.runner)
         self.git = GitClient(ctx.runner)
         self._last_state: dict[str, str] = {}
+        # clone_state()가 PID 재사용 대조 결과와 "ready 확정" 여부를 이
+        # dict에 쌓는다. RepoManagerDialog가 살아있는 동안(여러 틱에 걸쳐)
+        # 계속 재사용해야 캐싱 효과(원격 왕복 감소)가 있다.
+        self._state_cache: dict[str, dict] = {}
 
         target_name = "이 PC" if not ctx.is_remote else ctx.runner.name.split(":", 1)[-1]
         title = QLabel(f"프로젝트 — 대상: {target_name}")
@@ -117,11 +121,16 @@ class RepoManagerDialog(QDialog):
         lay.addWidget(dot)
         return w
 
+    def _cached_commit(self, repo: RepoMeta) -> str:
+        """clone_state()가 ready 확정 시점에 이미 조회해 캐시에 남겨둔 커밋을
+        재사용한다 - 표시를 위해 원격에 또 왕복하지 않는다."""
+        return self._state_cache.get(repo.id, {}).get("commit", "")
+
     def _reload(self):
         repos = self._repos()
         self.table.setRowCount(len(repos))
         for i, repo in enumerate(repos):
-            state = clone_state(self.reg, self.git, repo)
+            state = clone_state(self.reg, self.git, repo, self._state_cache)
             self._last_state[repo.id] = state
             self.table.setCellWidget(i, 0, self._dot_widget(STATE_DOT_COLORS[state]))
 
@@ -136,7 +145,7 @@ class RepoManagerDialog(QDialog):
             path_item.setToolTip(repo.path)
             self.table.setItem(i, 3, path_item)
 
-            commit = self.git.current_commit(repo.path) if state == STATE_READY else ""
+            commit = self._cached_commit(repo) if state == STATE_READY else ""
             self.table.setItem(i, 4, QTableWidgetItem(commit))
 
     def _tick(self):
@@ -144,14 +153,16 @@ class RepoManagerDialog(QDialog):
         for i, repo in enumerate(repos):
             if i >= self.table.rowCount():
                 break
-            state = clone_state(self.reg, self.git, repo)
+            # I2: clone_state()가 이미 ready로 확정된 유닛은 원격 조회 없이
+            # 즉시 캐시값을 반환하므로, 안정된(ready) 항목은 사실상 폴링
+            # 비용이 0이다 - 매 틱 부르는 것 자체가 안전하다.
+            state = clone_state(self.reg, self.git, repo, self._state_cache)
             prev = self._last_state.get(repo.id)
             if state != prev:
                 self._last_state[repo.id] = state
                 self.table.setCellWidget(i, 0, self._dot_widget(STATE_DOT_COLORS[state]))
                 if state == STATE_READY:
-                    commit = self.git.current_commit(repo.path)
-                    self.table.setItem(i, 4, QTableWidgetItem(commit))
+                    self.table.setItem(i, 4, QTableWidgetItem(self._cached_commit(repo)))
 
     # ---- 동작 ----
     def _add_clone(self):
@@ -161,10 +172,17 @@ class RepoManagerDialog(QDialog):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._reload()
 
+    def _is_cloning(self, repo: RepoMeta) -> bool:
+        return clone_state(self.reg, self.git, repo, self._state_cache) == STATE_CLONING
+
     def _update_selected(self):
         repo = self._selected_repo()
         if repo is None:
             QMessageBox.information(self, "업데이트", "먼저 프로젝트를 선택하세요")
+            return
+        if self._is_cloning(repo):
+            QMessageBox.warning(self, "업데이트 불가",
+                                "클론이 진행 중입니다. 먼저 완료되기를 기다리세요.")
             return
         if not self.git.is_repo(repo.path):
             QMessageBox.warning(self, "업데이트 불가", "아직 클론되지 않았거나 저장소가 아닙니다")
@@ -205,13 +223,17 @@ class RepoManagerDialog(QDialog):
         repo = self._selected_repo()
         if repo is None:
             return
+        if self._is_cloning(repo):
+            QMessageBox.warning(self, "삭제 불가",
+                                "클론이 진행 중입니다. 먼저 완료되기를 기다리세요.")
+            return
         ok = QMessageBox.question(
             self, "폴더까지 삭제",
             f"'{repo.path}'\n\n이 폴더가 대상 머신에서 영구 삭제됩니다. 계속할까요?")
         if ok != QMessageBox.StandardButton.Yes:
             return
         try:
-            self.ctx.runner.run(["rm", "-rf", repo.path])
+            self.ctx.runner.remove_tree(repo.path)
         except Exception as ex:
             QMessageBox.critical(self, "삭제 실패", str(ex))
             return
@@ -223,6 +245,8 @@ class RepoManagerDialog(QDialog):
         self.ctx.store.settings.repos[self.ctx.runner.name] = [
             r for r in repos if r.id != repo.id]
         self.ctx.store.save()
+        self._state_cache.pop(repo.id, None)
+        self._last_state.pop(repo.id, None)
         # 클론/업데이트 로그·PID 파일도 정리한다
         unit = self.reg.unit_clone(repo.id)
         self.reg.clear_pid(unit)

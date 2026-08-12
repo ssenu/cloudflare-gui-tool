@@ -67,6 +67,16 @@ class CommandRunner(ABC):
     def remove_file(self, path: str) -> None: ...
 
     @abstractmethod
+    def remove_tree(self, path: str) -> None:
+        """path와 그 안의 모든 내용을 재귀적으로 삭제한다.
+
+        POSIX 전용 ``rm -rf`` 인자 목록을 UI 코드가 직접 조립하지 않게
+        하기 위한 러너 메서드 - 로컬(Windows 포함)에서는 ``rm``이 없으므로
+        shutil.rmtree를, 원격에서는 ``rm -rf``를 쓴다.
+        """
+        ...
+
+    @abstractmethod
     def home_dir(self) -> str: ...
 
     @abstractmethod
@@ -225,6 +235,11 @@ class LocalRunner(CommandRunner):
 
     def remove_file(self, path: str) -> None:
         os.remove(os.path.expanduser(path))
+
+    def remove_tree(self, path: str) -> None:
+        import shutil
+
+        shutil.rmtree(os.path.expanduser(path), ignore_errors=False)
 
     def home_dir(self) -> str:
         return os.path.expanduser("~")
