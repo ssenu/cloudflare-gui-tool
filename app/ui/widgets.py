@@ -220,6 +220,13 @@ class ModalOverlay(QWidget):
     finished 시그널에 연결).
     """
 
+    # 닫기 버튼 크기와 내용 카드 모서리로부터의 안쪽 여백, 그리고 버튼 아래로
+    # 내용이 시작하기까지 두는 간격. _reserve_close_space()가 이 값들로 필요한
+    # 위 여백을 계산한다.
+    CLOSE_BTN_SIZE = 26
+    CLOSE_BTN_INSET = 8
+    CLOSE_BTN_GAP = 6
+
     def __init__(self, parent: QWidget, content: QWidget, palette: dict | None = None):
         super().__init__(parent)
         # 자식 생성 과정에서 resizeEvent가 먼저 올 수 있어 미리 선언해 둔다.
@@ -243,7 +250,7 @@ class ModalOverlay(QWidget):
         from app.ui.icons import make_icon  # 순환 import 방지를 위한 지연 로드
 
         self.close_btn = QPushButton(self)
-        self.close_btn.setFixedSize(26, 26)
+        self.close_btn.setFixedSize(self.CLOSE_BTN_SIZE, self.CLOSE_BTN_SIZE)
         self.close_btn.setToolTip("닫기")
         self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         if palette:
@@ -316,8 +323,9 @@ class ModalOverlay(QWidget):
         # 닫기 버튼을 내용 카드의 오른쪽 위 모서리 안쪽에 붙인다.
         if self.close_btn is None:
             return
-        self.close_btn.move(c.x() + c.width() - self.close_btn.width() - 8,
-                            c.y() + 8)
+        self.close_btn.move(
+            c.x() + c.width() - self.close_btn.width() - self.CLOSE_BTN_INSET,
+            c.y() + self.CLOSE_BTN_INSET)
         self.close_btn.raise_()
 
     def resizeEvent(self, event) -> None:
@@ -341,16 +349,28 @@ class ModalOverlay(QWidget):
         event.accept()
 
     def _reserve_close_space(self) -> None:
-        """닫기 버튼이 내용 위젯의 상단 요소와 겹치지 않도록 위 여백을 준다."""
+        """닫기 버튼이 내용 위젯의 상단 요소와 겹치지 않도록 위 여백을 준다.
+
+        예전에는 기존 여백에 20px을 더했는데, 그 값이 버튼이 실제로 차지하는
+        높이(위 여백 8 + 버튼 26 = 34)보다 작아 첫 줄과 몇 px 겹쳤다. 더하지
+        않고 "필요한 만큼"으로 끌어올린다 - 이미 충분한 여백이 있는 내용은
+        그대로 두어 불필요하게 벌어지지 않게 한다.
+        """
         if self._close_space_reserved:
             return
         layout = self._content.layout()
         if layout is None:
             return
         margins = layout.contentsMargins()
-        layout.setContentsMargins(margins.left(), margins.top() + 20,
+        layout.setContentsMargins(margins.left(),
+                                  max(margins.top(), self.close_space_needed()),
                                   margins.right(), margins.bottom())
         self._close_space_reserved = True
+
+    @classmethod
+    def close_space_needed(cls) -> int:
+        """닫기 버튼 아래로 내용이 시작해야 하는 최소 위 여백(px)."""
+        return cls.CLOSE_BTN_INSET + cls.CLOSE_BTN_SIZE + cls.CLOSE_BTN_GAP
 
     def _recompute_pref(self) -> None:
         """내용의 자연스러운 크기를 다시 계산해 적용한다.
