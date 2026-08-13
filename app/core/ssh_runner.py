@@ -9,7 +9,8 @@ import threading
 
 import paramiko
 
-from app.core.runner import CommandRunner, ManagedProcess, OnExit, OnLine, RunResult, decode_tail
+from app.core.runner import (CommandRunner, ManagedProcess, OnExit, OnLine,
+                              RunResult, decode_tail, resumes_mid_character)
 from app.core.store import SshProfile
 
 
@@ -308,6 +309,11 @@ class SshRunner(CommandRunner):
         with self._sftp.open(remote_path, "rb") as f:
             f.seek(offset)
             data = f.read()
+            if resumes_mid_character(data):
+                # 로컬 러너와 같은 규칙(runner.resumes_mid_character 주석 참고)
+                offset = 0
+                f.seek(0)
+                data = f.read()
         text, consumed = decode_tail(data)
         return offset + consumed, text
 

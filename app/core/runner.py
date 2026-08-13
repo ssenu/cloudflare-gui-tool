@@ -139,6 +139,17 @@ class CommandRunner(ABC):
         ...
 
 
+def resumes_mid_character(data: bytes) -> bool:
+    """읽기 시작 지점이 UTF-8 글자 중간인지 판정한다.
+
+    첫 바이트가 이어짐 바이트(10xxxxxx)면 offset이 글자 경계가 아니라는 뜻이다.
+    로그가 지워지고 다시 쓰였는데(로테이션) 새 크기가 옛 offset보다 커서
+    "줄어들었다" 검사에 걸리지 않은 경우가 이렇게 나타난다 - 그대로 이어
+    읽으면 화면에 깨진 글자가 찍힌다.
+    """
+    return bool(data) and 0x80 <= data[0] <= 0xBF
+
+
 def decode_tail(data: bytes) -> tuple[str, int]:
     """말미에 잘린 UTF-8 시퀀스는 남겨두고 (텍스트, 소비한 바이트 수)를 반환한다.
 
@@ -385,6 +396,11 @@ class LocalRunner(CommandRunner):
         with open(path, "rb") as f:
             f.seek(offset)
             data = f.read()
+            if resumes_mid_character(data):
+                # 로테이션으로 내용이 통째로 바뀌었다 - 처음부터 다시 읽는다.
+                offset = 0
+                f.seek(0)
+                data = f.read()
         text, consumed = decode_tail(data)
         return offset + consumed, text
 
