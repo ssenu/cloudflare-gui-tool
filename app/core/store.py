@@ -267,17 +267,24 @@ class SettingsStore:
                     targets["local"] = _parse_tunnels_dict(raw.get("tunnels", {}))
                     migrated_any = True
 
-                # 유효한 SSH 프로필만 로드
+                # 유효한 SSH 프로필만 로드. 이름은 대상 키(ssh:<이름>)로 쓰이므로
+                # 중복되면 같은 대상이 목록에 두 번 나오고 카드도 그만큼 겹쳐
+                # 보인다. 먼저 나온 것만 남긴다.
                 ssh_profiles = []
+                seen_profile_names: set[str] = set()
                 ssh_profiles_data = raw.get("ssh_profiles", [])
                 if isinstance(ssh_profiles_data, list):
                     for p in ssh_profiles_data:
                         try:
                             profile_data = _filter_dataclass_kwargs(SshProfile, p)
-                            ssh_profiles.append(SshProfile(**profile_data))
+                            profile = SshProfile(**profile_data)
                         except (TypeError, ValueError):
                             # 유효하지 않은 항목은 스킵
                             continue
+                        if profile.name in seen_profile_names:
+                            continue
+                        seen_profile_names.add(profile.name)
+                        ssh_profiles.append(profile)
 
                 theme = raw.get("theme", "dark")
                 if theme not in ("dark", "light"):
@@ -348,7 +355,10 @@ class SettingsStore:
         return self.settings
 
     def save(self) -> None:
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        # dirname이 빈 문자열이면(파일명만 준 상대 경로) makedirs가 실패한다.
+        parent = os.path.dirname(self.path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         raw = {
             "root_domain": self.settings.root_domain,
             "cloudflared_path": self.settings.cloudflared_path,

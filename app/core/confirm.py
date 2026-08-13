@@ -62,7 +62,15 @@ def group_by_owner(pairs, preferred_order):
     groups: dict[str, list] = {}
     for key, value in pairs:
         groups.setdefault(key, []).append(value)
-    ordered = [k for k in preferred_order if k in groups]
+    # preferred_order에 같은 키가 두 번 들어 있으면 그 그룹이 두 번 그려진다
+    # (같은 이름의 SSH 프로필이 설정 파일에 중복으로 있는 경우 등).
+    # 순서는 유지하면서 중복만 걷어낸다.
+    seen_keys: set[str] = set()
+    ordered = []
+    for k in preferred_order:
+        if k in groups and k not in seen_keys:
+            seen_keys.add(k)
+            ordered.append(k)
     ordered += [k for k in groups if k not in ordered and k != ""]
     if "" in groups:
         ordered.append("")

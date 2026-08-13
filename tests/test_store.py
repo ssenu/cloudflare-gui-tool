@@ -797,3 +797,28 @@ def test_missing_prereq_skip_field_loads_as_empty(tmp_path):
     settings = SettingsStore(path=str(path)).load()
 
     assert settings.prereq_skip == []
+
+
+def test_duplicate_ssh_profile_names_are_dropped(tmp_path):
+    """이름이 대상 키라서, 중복되면 같은 기기가 목록에 두 번 나온다."""
+    import json
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({"ssh_profiles": [
+        {"name": "pi", "host": "10.0.0.1"},
+        {"name": "pi", "host": "10.0.0.2"},
+        {"name": "other", "host": "10.0.0.3"},
+    ]}), encoding="utf-8")
+
+    settings = SettingsStore(path=str(path)).load()
+
+    assert [p.name for p in settings.ssh_profiles] == ["pi", "other"]
+    assert settings.ssh_profiles[0].host == "10.0.0.1"  # 먼저 나온 것을 남긴다
+
+
+def test_save_works_with_bare_filename(tmp_path, monkeypatch):
+    """상대 경로(파일명만)로도 저장이 되어야 한다 - dirname이 빈 문자열이다."""
+    monkeypatch.chdir(tmp_path)
+    store = SettingsStore(path="only-name.json")
+    store.load()
+    store.save()
+    assert (tmp_path / "only-name.json").exists()

@@ -88,3 +88,14 @@ def test_owner_label_unknown_is_empty():
 
 def test_owner_label_ssh_prefix_only_is_empty():
     assert owner_label("ssh:") == ""
+
+
+def test_group_by_owner_ignores_duplicate_keys_in_order():
+    """순서 목록에 같은 키가 두 번 있으면 그 그룹이 두 번 그려지면 안 된다.
+
+    설정 파일에 같은 이름의 SSH 프로필이 중복으로 들어 있을 때 실제로
+    카드가 두 벌씩 보이는 문제가 있었다.
+    """
+    pairs = [("ssh:pi", "a"), ("ssh:pi", "b")]
+    assert group_by_owner(pairs, ["local", "ssh:pi", "ssh:pi"]) == [
+        ("ssh:pi", ["a", "b"])]
