@@ -75,6 +75,19 @@ class Settings:
     # 변경에도 안전)를 키로 쓰는 단일 맵으로 둔다. 값은 CommandRunner.name
     # ("local" 또는 "ssh:<프로필명>").
     tunnel_owners: dict[str, str] = field(default_factory=dict)
+    # 준비물 점검(cloudflared/git/docker)을 더 이상 보지 않기로 한 대상 키 목록.
+    # 사용자가 "모두 정상"인 상태에서 직접 체크했을 때만 들어간다 - 그래서 새
+    # 기기는 최초 1회 반드시 점검을 거친다.
+    prereq_skip: list[str] = field(default_factory=list)
+
+    def skip_prereq_check(self, target_key: str) -> bool:
+        return target_key in self.prereq_skip
+
+    def set_skip_prereq_check(self, target_key: str, skip: bool) -> None:
+        if skip and target_key not in self.prereq_skip:
+            self.prereq_skip.append(target_key)
+        elif not skip and target_key in self.prereq_skip:
+            self.prereq_skip.remove(target_key)
 
     def tunnels_for(self, target_key: str) -> dict[str, TunnelMeta]:
         """target_key에 해당하는 터널 dict를 돌려준다. 없으면 새로 만들어 등록한다."""
@@ -286,6 +299,11 @@ class SettingsStore:
                         if isinstance(tid, str) and isinstance(owner, str):
                             tunnel_owners[tid] = owner
 
+                # 점검 생략 목록: 문자열만 받아들인다(옛 파일에는 없는 필드).
+                skip_raw = raw.get("prereq_skip", [])
+                prereq_skip = ([k for k in skip_raw if isinstance(k, str)]
+                               if isinstance(skip_raw, list) else [])
+
                 self.settings = Settings(
                     root_domain=raw.get("root_domain", ""),
                     cloudflared_path=raw.get("cloudflared_path", ""),
@@ -295,6 +313,7 @@ class SettingsStore:
                     repos=repos,
                     repo_root=repo_root,
                     tunnel_owners=tunnel_owners,
+                    prereq_skip=prereq_skip,
                 )
 
                 # v1 형식에서 실제로 마이그레이션이 일어난 경우에만 재저장.
@@ -330,6 +349,7 @@ class SettingsStore:
             },
             "repo_root": self.settings.repo_root,
             "tunnel_owners": dict(self.settings.tunnel_owners),
+            "prereq_skip": list(self.settings.prereq_skip),
         }
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump(raw, f, ensure_ascii=False, indent=2)

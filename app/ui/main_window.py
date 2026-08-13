@@ -770,6 +770,21 @@ class MainWindow(QWidget):
         self._close_all_log_viewers()
         self._reset_group_collapse()
         self.refresh()
+        self._maybe_check_prereqs()
+
+    def _maybe_check_prereqs(self):
+        """SSH 대상으로 바뀌었으면 준비물(cloudflared/git/docker)을 점검한다.
+
+        "다음부터 보지 않기"를 체크해 둔 기기는 건너뛴다. 그 체크는 셋 다
+        정상일 때만 가능하므로, 새 기기는 최초 1회 반드시 이 화면을 본다.
+        """
+        if not self.ctx.is_remote:
+            return
+        if self.ctx.store.settings.skip_prereq_check(self.ctx.runner.name):
+            return
+        from app.ui.prereq_dialog import PrereqDialog
+        dlg = PrereqDialog(self.ctx, self._target_display_name(), self)
+        self._open_modal(dlg)
 
     def _close_all_log_viewers(self):
         for viewer in list(self._log_viewers.values()):

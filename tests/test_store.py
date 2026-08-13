@@ -755,3 +755,45 @@ def test_repos_bad_entries_skipped(tmp_path):
     repos = s.repos_for("local")
     assert len(repos) == 1
     assert repos[0].name == "good"
+
+
+# ---- 준비물 점검 생략 목록 ----
+
+def test_prereq_skip_round_trips(tmp_path):
+    store = SettingsStore(path=str(tmp_path / "s.json"))
+    store.load()
+    store.settings.set_skip_prereq_check("ssh:webPi", True)
+    store.save()
+
+    reloaded = SettingsStore(path=str(tmp_path / "s.json")).load()
+    assert reloaded.prereq_skip == ["ssh:webPi"]
+    assert reloaded.skip_prereq_check("ssh:webPi")
+
+
+def test_prereq_skip_can_be_turned_off(tmp_path):
+    store = SettingsStore(path=str(tmp_path / "s.json"))
+    store.load()
+    store.settings.set_skip_prereq_check("ssh:a", True)
+    store.settings.set_skip_prereq_check("ssh:a", False)
+    assert store.settings.prereq_skip == []
+
+
+def test_prereq_skip_ignores_non_string_entries(tmp_path):
+    import json
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({"prereq_skip": ["ssh:ok", 3, None]}),
+                    encoding="utf-8")
+
+    settings = SettingsStore(path=str(path)).load()
+
+    assert settings.prereq_skip == ["ssh:ok"]
+
+
+def test_missing_prereq_skip_field_loads_as_empty(tmp_path):
+    import json
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({"root_domain": "example.com"}), encoding="utf-8")
+
+    settings = SettingsStore(path=str(path)).load()
+
+    assert settings.prereq_skip == []

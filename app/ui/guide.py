@@ -15,6 +15,28 @@ from app.context import AppContext
 from app.ui.theme import current_palette
 from app.ui.winutil import apply_titlebar_theme
 
+# "필요한 프로그램" 절 - 이 앱이 대신 실행해 주는 것들이라 없으면 기능이
+# 통째로 안 된다. 내 PC와 원격 기기에 각각 무엇이 필요한지 한곳에 모은다.
+PREREQ_ITEMS = [
+    ("cloudflared — 터널을 만들고 실행",
+     "내 PC와 원격 기기 양쪽 모두 필요합니다. 터널을 만든 기기에서만 그 터널을 "
+     "켤 수 있어서, 파이에서 운영할 거라면 파이에도 설치하고 그 기기에서 "
+     "cloudflared tunnel login 까지 해야 합니다.",
+     "윈도우: winget install --id Cloudflare.cloudflared\n"
+     "라즈베리파이/우분투(arm64): cloudflared 릴리스의 .deb 설치 후\n"
+     "                            sudo dpkg -i cloudflared-linux-arm64.deb"),
+    ("git — 프로젝트 내려받기·업데이트",
+     "'프로젝트' 기능이 대상 기기에서 git을 실행합니다. 원격 기기에만 있으면 "
+     "되고, 없으면 클론이 실패합니다. 라즈베리파이 OS Lite나 우분투 서버 "
+     "최소 설치에는 들어 있지 않을 수 있습니다.",
+     "sudo apt update && sudo apt install -y git"),
+    ("docker — 컨테이너로 띄우는 서버",
+     "서비스 종류를 '도커 컴포즈'로 등록할 때만 필요합니다. 명령으로 직접 "
+     "서버를 켠다면 없어도 됩니다. compose 플러그인까지 있어야 합니다.",
+     "curl -fsSL https://get.docker.com | sudo sh\n"
+     "sudo usermod -aG docker $USER   # 다시 로그인해야 적용"),
+]
+
 SETUP_STEPS = [
     ("도메인 준비",
      "원하는 등록업체에서 도메인을 구입합니다."),
@@ -126,6 +148,12 @@ class GuideDialog(QDialog):
         content_lay.setContentsMargins(0, 0, 8, 0)  # 세로 스크롤바 자리
         content_lay.setSpacing(10)
 
+        content_lay.addWidget(self._heading("필요한 프로그램"))
+        content_lay.addWidget(self._prereq_note())
+        for title, desc, install in PREREQ_ITEMS:
+            content_lay.addWidget(self._prereq_row(title, desc, install))
+
+        content_lay.addSpacing(6)
         content_lay.addWidget(self._heading("사전 준비 (최초 1회)"))
         for i, (title, desc) in enumerate(SETUP_STEPS, start=1):
             content_lay.addWidget(self._step_row(i, title, desc))
@@ -188,6 +216,38 @@ class GuideDialog(QDialog):
         lbl.setStyleSheet(
             f"font-size: 14px; font-weight: 700; color: {self.p['accent']};")
         return lbl
+
+    def _prereq_note(self) -> QLabel:
+        lbl = QLabel("원격 기기는 SSH로 접속할 때마다 자동으로 점검합니다. "
+                     "셋 다 정상이면 점검 창에서 '다음부터 보지 않기'를 켤 수 "
+                     "있습니다.")
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet(f"color: {self.p['muted']}; font-size: 12px;")
+        return lbl
+
+    def _prereq_row(self, title: str, desc: str, install: str) -> QWidget:
+        frame = QFrame()
+        frame.setObjectName("card")
+        title_lbl = QLabel(title)
+        title_lbl.setStyleSheet("font-weight: 700;")
+        title_lbl.setWordWrap(True)
+        desc_lbl = QLabel(desc)
+        desc_lbl.setWordWrap(True)
+        desc_lbl.setStyleSheet(f"color: {self.p['muted']}; font-size: 12px;")
+        cmd_lbl = QLabel(install)
+        cmd_lbl.setWordWrap(True)
+        cmd_lbl.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        cmd_lbl.setStyleSheet(
+            f"font-family: Consolas; font-size: 11px; color: {self.p['preview_text']};"
+            f"background: {self.p['panel2']}; padding: 6px; border-radius: 4px;")
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(4)
+        lay.addWidget(title_lbl)
+        lay.addWidget(desc_lbl)
+        lay.addWidget(cmd_lbl)
+        return frame
 
     def _step_row(self, num: int, title: str, desc: str) -> QWidget:
         """번호 배지 + (제목/설명) 한 줄. 카드 테두리를 두르지 않아 가볍게 읽힌다."""
