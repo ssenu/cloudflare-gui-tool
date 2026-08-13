@@ -7,6 +7,7 @@ PID/로그 파일 방식(터널/서비스와 동일)으로 처리한다.
 from __future__ import annotations
 
 import re
+import shlex
 
 from app.core.run_registry import RunRegistry
 from app.core.runner import CommandRunner
@@ -147,6 +148,24 @@ class GitClient:
 
     def pull_argv(self, path: str) -> list[str]:
         return ["git", "-C", path, "pull", "--ff-only"]
+
+
+def deploy_argv(path: str, compose: bool) -> list[str]:
+    """배포 한 줄: 최신 코드를 받고 서버를 다시 띄운다.
+
+    지금까지는 '업데이트 -> 서버 토글 끄기 -> 켜기'로 세 곳을 오가야 했다.
+    한 번의 원격 명령으로 묶으면 중간에 실패했을 때 로그도 한자리에 남는다.
+
+    - `git pull --ff-only`: 대상에서 커밋을 만들지 않는다는 전제. 로컬 수정이
+      있으면 병합하지 않고 실패하는 편이 안전하다(조용한 충돌 방지).
+    - `--build`: 코드가 바뀌었으니 이미지를 다시 굽는다.
+    - `&&`로 이어 붙여, pull이 실패하면 재배포하지 않는다(옛 코드로 재시작해
+      "고쳤는데 그대로"가 되는 상황을 막는다).
+    """
+    steps = [f"cd {shlex.quote(path)}", "git pull --ff-only"]
+    if compose:
+        steps.append("docker compose up --build -d")
+    return ["sh", "-c", " && ".join(steps)]
 
 
 def clone_state(reg: RunRegistry, git: GitClient, repo,

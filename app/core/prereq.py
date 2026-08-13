@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 PROBE_TIMEOUT = 8.0
@@ -116,3 +117,25 @@ def summary(results: list[PrereqResult]) -> str:
     if has_warning(results):
         return "설치는 되어 있지만 마무리할 준비물이 있습니다."
     return "필요한 프로그램이 모두 준비되어 있습니다."
+
+
+# ---- 라우트 서비스 주소 <-> compose 공개 포트 대조 ----
+
+def service_port(url: str) -> str:
+    """http://localhost:8001 -> "8001". 못 찾으면 빈 문자열."""
+    m = re.search(r":(\d+)(?:/|$)", (url or "").strip())
+    return m.group(1) if m else ""
+
+
+def port_mismatch(service_url: str, detected_port: str) -> str:
+    """서비스 주소의 포트와 compose가 실제로 여는 포트가 다르면 경고 문구.
+
+    다르면 터널은 붙는데 그 포트에 아무도 없어 502가 난다 - 저장하기 전에
+    잡는 편이 훨씬 싸다(실제로 이 불일치로 사이트가 안 뜬 적이 있다).
+    """
+    have = service_port(service_url)
+    if not have or not detected_port or have == detected_port:
+        return ""
+    return (f"서비스 주소는 {have}번 포트를 가리키는데, 이 프로젝트가 실제로 "
+            f"여는 포트는 {detected_port}번입니다.\n"
+            f"이대로 저장하면 접속했을 때 502가 납니다.")

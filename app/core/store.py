@@ -28,6 +28,9 @@ class RouteMeta:
 class TunnelMeta:
     name: str
     routes: list[RouteMeta] = field(default_factory=list)
+    # 대상 기기가 재부팅돼도 systemd가 이 터널을 다시 띄우게 할지.
+    # 켜면 상태 판정과 시작/정지도 systemd에 맡긴다(app/core/autostart.py).
+    boot_autostart: bool = False
 
 
 def new_route_id() -> str:
@@ -155,9 +158,10 @@ def _parse_tunnel_meta(v) -> tuple[TunnelMeta, bool]:
     if not isinstance(name, str):
         raise TypeError("name must be str")
 
+    boot = bool(v.get("boot_autostart", False))
     if "routes" in v:
         routes = _parse_routes_list(v.get("routes"))
-        return TunnelMeta(name=name, routes=routes), False
+        return TunnelMeta(name=name, routes=routes, boot_autostart=boot), False
 
     # v1 형식 마이그레이션
     hostname = v.get("hostname", "") or ""

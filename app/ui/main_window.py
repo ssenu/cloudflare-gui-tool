@@ -190,6 +190,11 @@ class RouteRow(QWidget):
         win = self.card.win
         palette = current_palette(win.ctx.store.settings.theme)
         m = QMenu(self)
+        check = QAction("접속 확인", m)
+        check.setEnabled(bool(self.route.hostname))
+        check.setToolTip("실제로 그 주소를 열어 보고 결과를 알려줍니다")
+        check.triggered.connect(lambda: win._check_site(self.route))
+        m.addAction(check)
         edit_action = QAction("편집", m)
         edit_action.triggered.connect(self._edit_route)
         m.addAction(edit_action)
@@ -392,10 +397,23 @@ class TunnelCard(QFrame):
         # I1: 로그 버튼은 아이콘 없이 텍스트만 (사용자가 "이모지"라 부르는 그림 아이콘 제거)
         log_btn.setToolTip("터널과 모든 라우트의 로그를 탭으로 봅니다")
         log_btn.clicked.connect(lambda: win._open_log_tunnel(self))
-        delete_btn = QPushButton("삭제")
-        delete_btn.setObjectName("danger")
-        delete_btn.setToolTip("터널 삭제")
-        delete_btn.clicked.connect(lambda: win._delete_tunnel(self))
+
+        # 부팅 시 자동 실행 중이면 헤더에 표시한다. 켜고 끄는 것은 ⋮ 메뉴에서
+        # 하고, 여기서는 "이 터널은 기기가 켜지면 알아서 뜬다"만 알린다.
+        self.boot_badge = QLabel("부팅 시 자동 실행")
+        self.boot_badge.setStyleSheet(
+            f"color: {palette['accent2']}; font-size: 11px;")
+        self.boot_badge.setToolTip(
+            "대상 기기가 재부팅돼도 systemd가 이 터널을 다시 띄웁니다.")
+        self.boot_badge.setVisible(bool(getattr(meta, "boot_autostart", False)))
+
+        # 라우트 행과 같은 방식의 ⋮ 메뉴로 통일한다(삭제 버튼이 항상 노출돼
+        # 있는 것도 위험해서 메뉴 안으로 넣는다).
+        menu_btn = QPushButton()
+        menu_btn.setIcon(make_icon("dots", icon_color))
+        menu_btn.setFixedWidth(34)
+        menu_btn.setToolTip(f"{info.name} 동작")
+        menu_btn.clicked.connect(lambda: self._menu(menu_btn))
 
         header = QHBoxLayout()
         header.addWidget(self.dot)
@@ -403,11 +421,12 @@ class TunnelCard(QFrame):
         header.addWidget(self.state_label)
         header.addWidget(self.no_route_label)
         header.addWidget(self.cannot_run_label)
+        header.addWidget(self.boot_badge)
         header.addStretch(1)
         header.addWidget(_toggle_label("터널", palette))
         header.addWidget(self.tunnel_switch)
         header.addWidget(log_btn)
-        header.addWidget(delete_btn)
+        header.addWidget(menu_btn)
 
         # I3: 터널(상위)과 라우트(하위) 목록을 시각적으로 구분하는 얇은 구분선.
         separator = QFrame()
@@ -440,6 +459,32 @@ class TunnelCard(QFrame):
 
         self.update_state()
 
+    # ---- 메뉴 ----
+    def _menu(self, anchor: QPushButton):
+        win = self.win
+        palette = current_palette(win.ctx.store.settings.theme)
+        m = QMenu(self)
+
+        restart = QAction("터널 재시작", m)
+        restart.setToolTip("라우트를 바꾼 뒤 변경을 적용합니다")
+        restart.triggered.connect(lambda: win._restart_tunnel(self))
+        m.addAction(restart)
+
+        boot = QAction("부팅 시 자동 실행", m)
+        boot.setCheckable(True)
+        boot.setChecked(bool(getattr(self.meta, "boot_autostart", False)))
+        # 로컬(윈도우)에는 systemd가 없다 - 원격 대상에서만 제공한다.
+        boot.setEnabled(win.ctx.is_remote)
+        if not win.ctx.is_remote:
+            boot.setToolTip("SSH로 연결한 리눅스 대상에서만 설정할 수 있습니다")
+        boot.triggered.connect(lambda checked: win._set_boot_autostart(self, checked))
+        m.addAction(boot)
+
+        m.addSeparator()
+        danger_menu_action(m, "터널 삭제", palette,
+                           lambda: win._delete_tunnel(self))
+        m.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
     # ---- 동작 ----
     def _on_tunnel_toggled(self, checked: bool):
         ctx = self.win.ctx
@@ -451,17 +496,23 @@ class TunnelCard(QFrame):
                                         "라우트를 먼저 추가하세요.")
                     self.tunnel_switch.sync(False)
                     return
-                ctx.manager.start_tunnel(self.tunnel_name, ctx.client)
+                ctx.manager.start_tunnel(self.tunnel_name, ctx.client,
+                                         boot_managed=self.boot_managed())
                 for route in self.meta.routes:
                     if route.server.autostart and route.server.start_cmd \
                             and not ctx.manager.service_running(self.tunnel_name, route):
                         ctx.manager.start_service(self.tunnel_name, route)
             else:
-                ctx.manager.stop_tunnel(self.tunnel_name)
+                ctx.manager.stop_tunnel(self.tunnel_name,
+                                        boot_managed=self.boot_managed())
         except Exception as ex:
             QMessageBox.critical(self, "오류", str(ex))
         self.win.info_banner.hide()
         self.update_state()
+
+    def boot_managed(self) -> bool:
+        """systemd가 이 터널을 관리하는가(시작/정지/상태를 그쪽에 맡길지)."""
+        return bool(getattr(self.meta, "boot_autostart", False))
 
     # ---- 표시 갱신 ----
     def update_state(self):
@@ -515,6 +566,8 @@ class MainWindow(QWidget):
         # 마지막 tunnel list 결과와 마지막으로 그린 내용의 지문(성능).
         self._tunnel_cache = None
         self._render_sig: tuple | None = None
+        # 접속 확인 워커들(요청이 끝날 때까지 참조를 유지해야 GC되지 않는다)
+        self._site_pollers: list[BackgroundPoller] = []
         self._log_viewers: dict[str, "LogViewer"] = {}
         # B3: 인덱스가 아니라 현재 대상의 식별자로 콤보를 재선택한다. None이면
         # 로컬, 문자열이면 SSH 프로필 이름. 인덱스만 쓰면 프로필이 삭제됐을 때
@@ -593,7 +646,23 @@ class MainWindow(QWidget):
         self._style_banner()
         self.banner.hide()
 
-        self.info_banner = QLabel()
+        # 안내 배너: 문구만 띄우면 사용자가 그 다음에 무엇을 해야 하는지
+        # 직접 찾아가야 한다. 바로 실행할 수 있는 버튼을 같은 줄에 둔다.
+        self.info_banner = QWidget()
+        # 스타일을 이 위젯에만 건다 - objectName 없이 QWidget에 걸면 안에 있는
+        # 버튼까지 같은 배경/테두리를 뒤집어써 primary 버튼이 회색이 된다.
+        self.info_banner.setObjectName("infoBanner")
+        self.info_label = QLabel()
+        self.info_label.setWordWrap(True)
+        self.info_action_btn = QPushButton()
+        self.info_action_btn.setObjectName("primary")
+        self.info_action_btn.setFixedHeight(26)
+        self.info_action_btn.hide()
+        info_lay = QHBoxLayout(self.info_banner)
+        info_lay.setContentsMargins(10, 6, 10, 6)
+        info_lay.setSpacing(8)
+        info_lay.addWidget(self.info_label, 1)
+        info_lay.addWidget(self.info_action_btn)
         self._style_info_banner()
         self.info_banner.hide()
 
@@ -648,8 +717,25 @@ class MainWindow(QWidget):
     def _style_info_banner(self):
         p = current_palette(self.ctx.store.settings.theme)
         self.info_banner.setStyleSheet(
-            f"background:{p['panel2']};color:{p['accent2']};"
-            f"padding:6px;border-radius:6px;border:1px solid {p['border']};")
+            f"QWidget#infoBanner {{ background:{p['panel2']};"
+            f"border-radius:6px;border:1px solid {p['border']}; }}")
+        self.info_label.setStyleSheet(
+            f"color:{p['accent2']}; border: none; background: transparent;")
+
+    def _show_info(self, text: str, action: str = "", on_action=None):
+        """안내 배너를 띄운다. action이 있으면 그 자리에서 실행할 버튼도 함께."""
+        self.info_label.setText(text)
+        try:
+            self.info_action_btn.clicked.disconnect()
+        except TypeError:
+            pass  # 연결된 슬롯이 없을 때
+        if action and on_action is not None:
+            self.info_action_btn.setText(action)
+            self.info_action_btn.clicked.connect(on_action)
+            self.info_action_btn.show()
+        else:
+            self.info_action_btn.hide()
+        self.info_banner.show()
 
     def _style_signature(self):
         p = current_palette(self.ctx.store.settings.theme)
@@ -1039,6 +1125,97 @@ class MainWindow(QWidget):
         wiz.finished.connect(_on_finished)
         self._open_modal(wiz)
 
+    def _check_site(self, route: RouteMeta):
+        """공개 주소를 실제로 열어보고 결과를 배너로 알려준다.
+
+        네트워크 요청이라 워커에서 돌린다 - GUI에서 하면 응답이 올 때까지
+        창이 멈춘다.
+        """
+        from app.core.sitecheck import check_site
+        host = route.hostname
+        if not host:
+            return
+        self._show_info(f"{host} 확인 중...")
+        poller = BackgroundPoller(self)
+
+        def done(ok, result, error):
+            poller.deleteLater()
+            if not ok:
+                self._show_info(f"확인 실패: {error}")
+                return
+            text = f"{result.url} → {result.headline}"
+            if result.hint:
+                text += f"  ({result.hint.splitlines()[0]})"
+            # 404는 대개 터널 재시작으로 해결된다 - 그 버튼을 함께 준다.
+            card = next((c for c in self.cards
+                         if any(r.id == route.id for r in c.meta.routes)), None)
+            if result.status == 404 and card is not None:
+                self._show_info(text, "터널 재시작",
+                                lambda: self._restart_tunnel(card))
+            else:
+                self._show_info(text)
+
+        poller.finished.connect(done)
+        poller.run(lambda: check_site(host))
+        self._site_pollers.append(poller)
+
+    def _restart_tunnel(self, card: TunnelCard):
+        """껐다 켠다. 라우트를 바꾼 뒤 변경을 적용하는 가장 흔한 동작이라,
+        배너와 메뉴에서 한 번으로 끝낼 수 있게 한다."""
+        boot = card.boot_managed()
+        try:
+            self.ctx.manager.stop_tunnel(card.tunnel_name, boot_managed=boot)
+            if not self.ctx.runner.file_exists(
+                    self.ctx.client.config_path(card.tunnel_name)):
+                QMessageBox.warning(self, "설정 없음",
+                                    "설정 파일이 없어 다시 켤 수 없습니다.\n"
+                                    "라우트를 먼저 추가하세요.")
+                return
+            self.ctx.manager.start_tunnel(card.tunnel_name, self.ctx.client,
+                                          boot_managed=boot)
+        except Exception as ex:
+            QMessageBox.critical(self, "재시작 실패", str(ex))
+            return
+        self.info_banner.hide()
+        card.update_state()
+
+    def _set_boot_autostart(self, card: TunnelCard, enabled: bool):
+        """부팅 시 자동 실행(systemd 사용자 유닛)을 켜고 끈다."""
+        from app.core import autostart
+        ctx = self.ctx
+        name = card.tunnel_name
+        try:
+            if enabled:
+                if not autostart.is_supported(ctx.runner):
+                    QMessageBox.warning(
+                        self, "지원하지 않음",
+                        "이 대상에서는 systemd 사용자 유닛을 쓸 수 없습니다.")
+                    return
+                # 앱이 띄워 둔 프로세스가 있으면 먼저 정리한다 - 그러지 않으면
+                # systemd가 띄운 것과 겹쳐 같은 터널이 두 번 뜬다.
+                try:
+                    ctx.manager.stop_tunnel(name)
+                except Exception:
+                    pass
+                autostart.enable(ctx.runner, name, ctx.client.run_args(name))
+                if not autostart.linger_enabled(ctx.runner):
+                    QMessageBox.information(
+                        self, "한 가지 더",
+                        "자동 실행은 등록했지만 linger가 꺼져 있어 로그아웃 시 "
+                        "멈출 수 있습니다. 대상 기기에서 한 번 실행하세요:\n\n"
+                        "sudo loginctl enable-linger $USER")
+            else:
+                autostart.disable(ctx.runner, name)
+        except Exception as ex:
+            QMessageBox.critical(self, "자동 실행 설정 실패", str(ex))
+            return
+
+        card.meta.boot_autostart = enabled
+        self.ctx.store.settings.tunnels_for(ctx.runner.name)[name] = card.meta
+        self.ctx.store.save()
+        card.boot_badge.setVisible(enabled)
+        self.refresh(fetch=False)
+
     def _delete_tunnel(self, card: TunnelCard):
         name = card.tunnel_name
         hostnames = [r.hostname for r in card.meta.routes if r.hostname]
@@ -1178,8 +1355,11 @@ class MainWindow(QWidget):
     def _notify_restart_needed(self, tunnel_name: str):
         if self.ctx.manager.tunnel_state(tunnel_name) in (
                 TunnelState.RUNNING, TunnelState.STARTING):
-            self.info_banner.setText("변경을 적용하려면 터널을 껐다 켜야 합니다.")
-            self.info_banner.show()
+            card = next((c for c in self.cards if c.tunnel_name == tunnel_name), None)
+            self._show_info(
+                "변경을 적용하려면 터널을 껐다 켜야 합니다.",
+                "지금 재시작",
+                (lambda: self._restart_tunnel(card)) if card else None)
 
     # ---- 로그 ----
     def _open_log_tunnel(self, card: TunnelCard):

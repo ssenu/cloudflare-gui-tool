@@ -12,7 +12,7 @@ from app.context import AppContext
 from app.core.git_repo import STATE_CLONING, STATE_NONE, STATE_READY
 from app.core.runner import RunResult
 from app.core.store import RepoMeta, SettingsStore
-from app.ui.repo_manager import (PULLING_LABEL, STATE_DOT_COLORS, RepoCard,
+from app.ui.repo_manager import (DEPLOYING_LABEL, PULLING_LABEL, STATE_DOT_COLORS, RepoCard,
                                  RepoManagerDialog)
 from tests.fake_runner import FakeRunner
 
@@ -79,7 +79,7 @@ def test_card_has_menu_button(qapp, tmp_path):
 def test_ready_card_shows_commit(qapp, tmp_path):
     dlg = make_dialog(tmp_path, count=1)
     card = dlg.cards[0]
-    card.update_state(STATE_READY, "7fd1a60abcdef", pulling=False)
+    card.update_state(STATE_READY, "7fd1a60abcdef")
     assert "준비됨" in card.state_label.text()
     assert "7fd1a60" in card.state_label.text()
 
@@ -87,7 +87,7 @@ def test_ready_card_shows_commit(qapp, tmp_path):
 def test_cloning_card_uses_progress_color(qapp, tmp_path):
     dlg = make_dialog(tmp_path, count=1)
     card = dlg.cards[0]
-    card.update_state(STATE_CLONING, "", pulling=False)
+    card.update_state(STATE_CLONING, "")
     assert card.state_label.text() == "클론 중"
     assert STATE_DOT_COLORS[STATE_CLONING] in card.dot.styleSheet()
 
@@ -96,7 +96,7 @@ def test_pull_shows_update_label_and_orange_dot(qapp, tmp_path):
     """git pull 중에는 왼쪽 동그라미가 진행 색(주황)이어야 한다."""
     dlg = make_dialog(tmp_path, count=1)
     card = dlg.cards[0]
-    card.update_state(STATE_CLONING, "", pulling=True)
+    card.update_state(STATE_CLONING, "", PULLING_LABEL)
 
     assert card.state_label.text() == PULLING_LABEL
     assert STATE_DOT_COLORS[STATE_CLONING] in card.dot.styleSheet()
@@ -136,5 +136,55 @@ def test_pulling_flag_cleared_when_process_finishes(qapp, tmp_path):
 def test_none_state_dot_is_grey(qapp, tmp_path):
     dlg = make_dialog(tmp_path, count=1)
     card = dlg.cards[0]
-    card.update_state(STATE_NONE, "", pulling=False)
+    card.update_state(STATE_NONE, "")
     assert STATE_DOT_COLORS[STATE_NONE] in card.dot.styleSheet()
+
+
+# ---- 배포(pull + 재시작) ----
+
+def test_deploy_runs_pull_and_compose_in_one_command(qapp, tmp_path, monkeypatch):
+    dlg = make_dialog(tmp_path, count=1)
+    repo = dlg.cards[0].repo
+    runner = dlg.ctx.runner
+    runner.files[f"{repo.path}/.git"] = ""
+    runner.files[f"{repo.path}/docker-compose.yml"] = "services: {}"
+
+    dlg._deploy_repo(repo)
+
+    argv = runner.spawn_detached_calls[-1][0]
+    line = argv[-1]
+    assert "git pull --ff-only" in line
+    assert "docker compose up --build -d" in line
+    assert line.index("git pull") < line.index("docker compose")  # 받고 나서 띄운다
+    assert repo.id in dlg._deploying
+    assert dlg.cards[0].state_label.text() == DEPLOYING_LABEL
+
+
+def test_deploy_without_compose_asks_and_pulls_only(qapp, tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+
+    dlg = make_dialog(tmp_path, count=1)
+    repo = dlg.cards[0].repo
+    dlg.ctx.runner.files[f"{repo.path}/.git"] = ""   # compose 파일은 없음
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *a, **k: QMessageBox.StandardButton.Yes)
+
+    dlg._deploy_repo(repo)
+
+    line = dlg.ctx.runner.spawn_detached_calls[-1][0][-1]
+    assert "git pull --ff-only" in line
+    assert "docker compose" not in line
+
+
+def test_deploy_can_be_cancelled_when_no_compose(qapp, tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+
+    dlg = make_dialog(tmp_path, count=1)
+    repo = dlg.cards[0].repo
+    dlg.ctx.runner.files[f"{repo.path}/.git"] = ""
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *a, **k: QMessageBox.StandardButton.No)
+
+    dlg._deploy_repo(repo)
+
+    assert dlg.ctx.runner.spawn_detached_calls == []

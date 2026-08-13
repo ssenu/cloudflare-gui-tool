@@ -9,7 +9,8 @@ from app.core.config_yml import set_routes
 from app.core.store import RouteMeta, ServiceSpec, TunnelMeta, new_route_id
 from app.core.wizard_logic import (ConfigRecoveryError, ensure_config,
                                    validate_service, validate_subdomain)
-from app.ui.repo_picker import CwdPickerRow
+from app.core.prereq import port_mismatch
+from app.ui.repo_picker import CwdPickerRow, detect_service_port
 from app.ui.theme import current_palette
 from app.ui.winutil import apply_titlebar_theme
 
@@ -150,6 +151,19 @@ class RouteDialog(QDialog):
 
         hostname = f"{self.sub_edit.text().strip()}.{self.domain_edit.text().strip()}"
         service = self.service_edit.text().strip()
+
+        # 도커라면 compose가 실제로 여는 포트와 대조한다. 다르면 터널은 붙는데
+        # 그 포트에 아무도 없어 502가 난다 - 저장 전에 알려준다.
+        if self.kind_combo.currentData() == "docker" and self.cwd_edit.text().strip():
+            detected = detect_service_port(self.ctx, self.cwd_edit.text().strip())
+            warn = port_mismatch(service, detected)
+            if warn:
+                ok = QMessageBox.question(
+                    self, "포트가 다릅니다",
+                    warn + "\n\n그래도 이대로 저장할까요?")
+                if ok != QMessageBox.StandardButton.Yes:
+                    return
+
         label = self.label_edit.text().strip()
         kind = self.kind_combo.currentData()
         start_cmd = self.start_cmd_edit.text().strip()

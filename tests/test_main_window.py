@@ -1089,3 +1089,102 @@ def test_target_switch_waits_for_in_flight_poll(qapp, tmp_path):
     win._switch_target()  # 로컬 -> 로컬이지만 정리 경로는 같다
 
     assert not win._poller.is_busy()
+
+
+# ---- 0군/1군: 재시작 버튼 · 부팅 자동 실행 · 접속 확인 ----
+
+def _card_window(qapp, tmp_path, routes=None):
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    runner.files["/home/fake/.cloudflared/tid1.json"] = "{}"
+    runner.files["/home/fake/.cloudflared/config-t1.yml"] = "tunnel: tid1\n"
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
+        name="t1", routes=routes or [])
+    win.refresh()
+    return win
+
+
+def test_restart_banner_offers_button_that_restarts(qapp, tmp_path):
+    """라우트를 바꾼 뒤 '껐다 켜야 한다'는 안내에서 바로 재시작할 수 있어야 한다."""
+    from app.core.process_mgr import TunnelState
+
+    win = _card_window(qapp, tmp_path)
+    calls = []
+    win.ctx.manager.tunnel_state = lambda _n: TunnelState.RUNNING
+    win.ctx.manager.stop_tunnel = lambda n, boot_managed=False: calls.append(("stop", n))
+    win.ctx.manager.start_tunnel = lambda n, c, boot_managed=False: calls.append(("start", n))
+
+    win._notify_restart_needed("t1")
+
+    assert not win.info_banner.isHidden()
+    assert not win.info_action_btn.isHidden()
+    assert win.info_action_btn.text() == "지금 재시작"
+
+    win.info_action_btn.click()
+
+    assert calls == [("stop", "t1"), ("start", "t1")]
+    assert win.info_banner.isHidden()   # 처리했으니 안내를 닫는다
+
+
+def test_boot_autostart_enables_unit_and_persists(qapp, tmp_path, monkeypatch):
+    win = _card_window(qapp, tmp_path)
+    card = win.cards[0]
+    remote = FakeRunner(home="/home/pi")
+    remote.name = "ssh:webPi"
+    remote.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    remote.run_results[("systemctl", "--user", "is-system-running")] = RunResult(
+        0, "running", "")
+    remote.run_results[("loginctl", "show-user", "--property=Linger")] = RunResult(
+        0, "Linger=yes", "")
+    win.ctx.runner = remote
+
+    win._set_boot_autostart(card, True)
+
+    assert card.meta.boot_autostart is True
+    assert not card.boot_badge.isHidden()
+    assert "~/.config/systemd/user/cft-tunnel-t1.service" in remote.files
+    reloaded = SettingsStore(path=win.ctx.store.path).load()
+    assert reloaded.tunnels_for("ssh:webPi")["t1"].boot_autostart is True
+
+
+def test_boot_autostart_is_disabled_on_local_target(qapp, tmp_path, monkeypatch):
+    """윈도우(로컬)에는 systemd가 없다 - 메뉴 항목이 잠겨 있어야 한다."""
+    from PyQt6.QtWidgets import QMenu, QPushButton
+
+    win = _card_window(qapp, tmp_path)
+    captured = {}
+    monkeypatch.setattr(QMenu, "exec", lambda self, *a: captured.setdefault(
+        "actions", [(a.text(), a.isEnabled()) for a in self.actions()]))
+
+    win.cards[0]._menu(win.cards[0].findChild(QPushButton))
+
+    boot = [enabled for text, enabled in captured["actions"] if "부팅" in text]
+    assert boot == [False]
+
+
+def test_site_check_shows_result_and_restart_for_404(qapp, tmp_path, monkeypatch):
+    import time as _time
+    from app.core.sitecheck import SiteCheckResult
+
+    route = RouteMeta(id=new_route_id(), hostname="a.example.com",
+                      service="http://localhost:8000")
+    win = _card_window(qapp, tmp_path, [route])
+
+    monkeypatch.setattr(
+        "app.core.sitecheck.check_site",
+        lambda host: SiteCheckResult(url=f"https://{host}", status=404, ok=False,
+                                     headline="404 - 받을 곳이 없습니다",
+                                     hint="터널을 껐다 켜야 반영됩니다."))
+
+    win._check_site(route)
+    deadline = _time.monotonic() + 3
+    while win._site_pollers[-1].is_busy() and _time.monotonic() < deadline:
+        QApplication.processEvents()
+        _time.sleep(0.005)
+    QApplication.processEvents()
+
+    assert "404" in win.info_label.text()
+    assert win.info_action_btn.text() == "터널 재시작"

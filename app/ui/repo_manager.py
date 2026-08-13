@@ -15,11 +15,12 @@ from PyQt6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QLabel, QMenu,
 
 from app.context import AppContext
 from app.core.git_repo import (STATE_CLONING, STATE_FAILED, STATE_NONE,
-                               STATE_READY, GitClient, clone_state)
+                               STATE_READY, GitClient, clone_state, deploy_argv)
 from app.core.process_mgr import TunnelState
 from app.core.run_registry import RunRegistry
 from app.core.store import RepoMeta
 from app.ui.icons import make_icon
+from app.ui.repo_picker import COMPOSE_NAMES
 from app.ui.theme import STATE_COLORS, current_palette
 from app.ui.widgets import danger_menu_action
 from app.ui.winutil import apply_titlebar_theme
@@ -34,6 +35,7 @@ STATE_LABELS = {
 # git pull도 클론과 같은 유닛(clone-<id>)으로 돌기 때문에 상태값은 CLONING으로
 # 같다. 사용자에게는 다른 일이므로 문구만 바꿔 보여준다.
 PULLING_LABEL = "업데이트 중"
+DEPLOYING_LABEL = "배포 중"
 
 STATE_DOT_COLORS = {
     STATE_CLONING: STATE_COLORS[TunnelState.STARTING],  # 주황: 진행 중
@@ -106,14 +108,14 @@ class RepoCard(QFrame):
         meta_row.addStretch(1)
         lay.addLayout(meta_row)
 
-    def update_state(self, state: str, commit: str, pulling: bool) -> None:
+    def update_state(self, state: str, commit: str, busy_label: str = "") -> None:
         color = STATE_DOT_COLORS.get(state, STATE_DOT_COLORS[STATE_NONE])
         self.dot.setStyleSheet(
             f"background: {color}; border-radius: {DOT_SIZE // 2}px;")
 
         text = STATE_LABELS.get(state, state)
-        if state == STATE_CLONING and pulling:
-            text = PULLING_LABEL
+        if state == STATE_CLONING and busy_label:
+            text = busy_label
         if state == STATE_READY and commit:
             text = f"{text} · {commit[:7]}"
         self.state_label.setText(text)
@@ -141,6 +143,8 @@ class RepoManagerDialog(QDialog):
         self._state_cache: dict[str, dict] = {}
         # 지금 git pull을 돌린 프로젝트. 상태값은 클론과 같아서 문구 구분용이다.
         self._pulling: set[str] = set()
+        # 배포(pull + 재시작) 중인 프로젝트. 상태값은 같지만 문구를 구분한다.
+        self._deploying: set[str] = set()
 
         target_name = "이 PC" if not ctx.is_remote else ctx.runner.name.split(":", 1)[-1]
         title = QLabel(f"프로젝트 — 대상: {target_name}")
@@ -215,14 +219,20 @@ class RepoManagerDialog(QDialog):
             state = clone_state(self.reg, self.git, card.repo, self._state_cache)
             if state != STATE_CLONING:
                 self._pulling.discard(card.repo.id)
-            card.update_state(state, self._cached_commit(card.repo),
-                              card.repo.id in self._pulling)
+                self._deploying.discard(card.repo.id)
+            busy = ""
+            if card.repo.id in self._deploying:
+                busy = DEPLOYING_LABEL
+            elif card.repo.id in self._pulling:
+                busy = PULLING_LABEL
+            card.update_state(state, self._cached_commit(card.repo), busy)
 
     # ---- 프로젝트별 메뉴 ----
     def _open_menu(self, anchor: QPushButton, repo: RepoMeta):
         palette = current_palette(self.ctx.store.settings.theme)
         menu = QMenu(self)
-        for text, handler in (("환경설정", self._edit_env),
+        for text, handler in (("배포 (pull + 재시작)", self._deploy_repo),
+                              ("환경설정", self._edit_env),
                               ("로그", self._show_log),
                               ("업데이트 (git pull)", self._update_repo)):
             action = QAction(text, menu)
@@ -251,6 +261,44 @@ class RepoManagerDialog(QDialog):
         from app.ui.env_editor import EnvEditorDialog
         dlg = EnvEditorDialog(self.ctx, repo, self)
         dlg.exec()
+
+    def _deploy_repo(self, repo: RepoMeta):
+        """최신 코드를 받고 컨테이너를 다시 띄운다(한 번에).
+
+        compose 파일이 없으면 pull만 한다 - 그때는 '업데이트'와 같다.
+        """
+        if self._is_cloning(repo):
+            QMessageBox.warning(self, "배포 불가",
+                                "이미 다른 작업이 진행 중입니다. 끝난 뒤 다시 시도하세요.")
+            return
+        if not self.git.is_repo(repo.path):
+            QMessageBox.warning(self, "배포 불가", "아직 클론되지 않았거나 저장소가 아닙니다")
+            return
+
+        compose = any(self.ctx.runner.file_exists(f"{repo.path}/{name}")
+                      for name in COMPOSE_NAMES)
+        if not compose:
+            ok = QMessageBox.question(
+                self, "compose 파일 없음",
+                "docker-compose.yml을 찾지 못했습니다.\n"
+                "코드만 받아올까요? (서버는 다시 뜨지 않습니다)")
+            if ok != QMessageBox.StandardButton.Yes:
+                return
+
+        unit = self.reg.unit_clone(repo.id)
+        try:
+            self.reg.runner.ensure_dir(self.reg.run_dir())
+            self.reg.rotate_log_if_big(unit)
+            pid = self.reg.runner.spawn_detached(
+                deploy_argv(repo.path, compose), None, self.reg.log_path(unit))
+            self.reg.write_pid(unit, pid, cmd="sh")
+        except Exception as ex:
+            QMessageBox.critical(self, "배포 실패", str(ex))
+            return
+        self._state_cache.get(repo.id, {}).pop("ready", None)
+        self._deploying.add(repo.id)
+        self._pulling.discard(repo.id)
+        self._tick()
 
     def _update_repo(self, repo: RepoMeta):
         if self._is_cloning(repo):

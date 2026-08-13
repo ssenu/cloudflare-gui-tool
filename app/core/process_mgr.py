@@ -6,6 +6,7 @@ import time
 from enum import Enum, auto
 from typing import Callable
 
+from app.core import autostart
 from app.core.cloudflared import CloudflaredClient
 from app.core.run_registry import RunRegistry
 from app.core.store import RouteMeta, TunnelMeta
@@ -209,9 +210,18 @@ class ProcessManager:
         return None if entry is None else entry[0]
 
     # ---- 터널 ----
-    def start_tunnel(self, name: str, client: CloudflaredClient) -> None:
+    def start_tunnel(self, name: str, client: CloudflaredClient,
+                     boot_managed: bool = False) -> None:
         reg = self._registry()
         unit = reg.unit_tunnel(name)
+        if boot_managed:
+            # systemd가 관리하는 터널은 우리가 프로세스를 띄우지 않는다 -
+            # 두 번 뜨는 것을 막기 위해 시작/정지도 systemd에 맡긴다.
+            autostart.start(reg.runner, name)
+            self._alive[unit] = (True, True)
+            self._marker_seen[unit] = True
+            self._set_pending(unit, True, PENDING_TIMEOUT_COMMAND)
+            return
         reg.rotate_log_if_big(unit)
         log_path = reg.log_path(unit)
         args = client.run_args(name)
@@ -229,9 +239,15 @@ class ProcessManager:
         self._mismatch_reason.pop(unit, None)
         self._set_pending(unit, True, PENDING_TIMEOUT_COMMAND)
 
-    def stop_tunnel(self, name: str) -> None:
+    def stop_tunnel(self, name: str, boot_managed: bool = False) -> None:
         reg = self._registry()
         unit = reg.unit_tunnel(name)
+        if boot_managed:
+            autostart.stop(reg.runner, name)
+            self._alive[unit] = (False, False)
+            self._marker_seen[unit] = False
+            self._set_pending(unit, False, PENDING_TIMEOUT_COMMAND)
+            return
         pid = reg.read_pid(unit)
         # D2: 명령 불일치로 확정된(PID 재사용 의심) 유닛은 kill_pid를 호출하지
         # 않는다 - 이 PID가 우리가 시작한 프로세스라는 보장이 없으므로, 남의
@@ -408,6 +424,20 @@ class ProcessManager:
     def refresh(self, tunnels: list[TunnelMeta]) -> None:
         """단위 수와 무관하게 PID 생존 확인은 pids_alive() 한 번으로 끝낸다."""
         reg = self._registry()  # 대상 전환 시 _ensure_target()이 캐시를 비운다
+
+        # systemd가 관리하는 터널은 PID 파일이 없다(부팅 때 systemd가 띄운다).
+        # 상태는 systemctl is-active 한 번으로 일괄 확인한다.
+        boot_tunnels = [t for t in tunnels if getattr(t, "boot_autostart", False)]
+        tunnels = [t for t in tunnels if not getattr(t, "boot_autostart", False)]
+        if boot_tunnels:
+            units = [autostart.unit_name(t.name) for t in boot_tunnels]
+            active = autostart.active_units(reg.runner, units)
+            for t, unit_file in zip(boot_tunnels, units):
+                unit = reg.unit_tunnel(t.name)
+                running = unit_file in active
+                self._alive[unit] = (running, running)
+                self._marker_seen[unit] = running
+                self._resolve_pending(unit, running)
 
         tunnel_units = [reg.unit_tunnel(t.name) for t in tunnels]
         command_units: list[str] = []
