@@ -154,16 +154,6 @@ class RouteRow(QWidget):
             self.register_btn = QPushButton("서버 등록")
             self.register_btn.clicked.connect(self._edit_route)
 
-        # 배포: 이 서버가 쓰는 프로젝트를 최신 코드로 받고 다시 띄운다.
-        # 작업 폴더가 있어야 어느 저장소인지 알 수 있어 그때만 보여준다.
-        self.deploy_btn = QPushButton("배포")
-        self.deploy_btn.setToolTip(
-            "git pull 후 이 서버를 다시 시작합니다" if route.server.cwd
-            else "작업 폴더가 지정된 서버에서만 쓸 수 있습니다")
-        self.deploy_btn.setEnabled(bool(route.server.cwd) and self.has_service)
-        self.deploy_btn.clicked.connect(
-            lambda: card.win._deploy_route(card, route))
-
         menu_btn = QPushButton()
         menu_btn.setIcon(make_icon("dots", icon_color))
         menu_btn.setFixedWidth(28)  # 터널 메뉴(34px)보다 작게: 하위 위계 표현
@@ -180,7 +170,6 @@ class RouteRow(QWidget):
         lay.addWidget(self.service_label, 1)
         lay.addWidget(toggle_label)
         lay.addWidget(self.server_switch if self.server_switch else self.register_btn)
-        lay.addWidget(self.deploy_btn)
         lay.addWidget(menu_btn)
 
         self.update_state()
@@ -201,6 +190,15 @@ class RouteRow(QWidget):
         win = self.card.win
         palette = current_palette(win.ctx.store.settings.theme)
         m = QMenu(self)
+        # 배포는 자주 쓰지만 한 줄에 버튼을 더 얹으면 행이 빡빡해진다.
+        # 접속 확인과 함께 메뉴 맨 위에 둔다.
+        deploy = QAction("배포 (pull + 재시작)", m)
+        deploy.setEnabled(bool(self.route.server.cwd) and self.has_service)
+        deploy.setToolTip(
+            "최신 코드를 받고 이 서버를 다시 시작합니다" if self.route.server.cwd
+            else "작업 폴더가 지정된 서버에서만 쓸 수 있습니다")
+        deploy.triggered.connect(lambda: win._deploy_route(self.card, self.route))
+        m.addAction(deploy)
         check = QAction("접속 확인", m)
         check.setEnabled(bool(self.route.hostname))
         check.setToolTip("실제로 그 주소를 열어 보고 결과를 알려줍니다")
@@ -367,6 +365,14 @@ class TunnelCard(QFrame):
         palette = current_palette(win.ctx.store.settings.theme)
         icon_color = palette["text"]
 
+        # Ctrl+N 단축키가 몇 번인지 카드에 보여준다. 번호가 없으면 단축키를
+        # 알아도 어느 카드가 1번인지 알 수 없어 사실상 못 쓴다.
+        self.index_label = QLabel()
+        self.index_label.setFixedWidth(14)
+        self.index_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.index_label.setStyleSheet(
+            f"color: {palette['muted']}; font-size: 11px;")
+
         self.dot = QLabel()
         self.dot.setFixedSize(12, 12)
         self._last_state = None  # 상태가 바뀔 때만 색/문구를 다시 넣는다
@@ -436,6 +442,7 @@ class TunnelCard(QFrame):
         menu_btn.clicked.connect(lambda: self._menu(menu_btn))
 
         header = QHBoxLayout()
+        header.addWidget(self.index_label)
         header.addWidget(self.dot)
         header.addWidget(title)
         header.addWidget(self.state_label)
@@ -531,6 +538,16 @@ class TunnelCard(QFrame):
         self.win.info_banner.hide()
         self.update_state()
 
+    def set_shortcut_index(self, index: int) -> None:
+        """1~9번이면 번호를 보여준다(그 밖에는 단축키가 없으므로 비운다)."""
+        if 1 <= index <= 9:
+            self.index_label.setText(str(index))
+            self.index_label.setToolTip(
+                f"Ctrl+{index} 터널 켜기/끄기, Ctrl+Shift+{index} 첫 서버")
+        else:
+            self.index_label.setText("")
+            self.index_label.setToolTip("")
+
     def set_restart_needed(self, needed: bool) -> None:
         """라우트가 바뀌어 재시작해야 하는 상태인지 표시한다."""
         self._restart_needed = needed
@@ -607,7 +624,7 @@ class MainWindow(QWidget):
         # 콤보 항목이 밀려서 엉뚱한 대상을 가리키게 된다.
         self._current_target_key: str | None = None
         self.setWindowTitle("Cloudflare Tunnel GUI")
-        self.resize(820, 620)
+        self._restore_geometry()
 
         # 상단 바
         self.target_combo = QComboBox()
@@ -740,6 +757,40 @@ class MainWindow(QWidget):
             sc.activated.connect(lambda n=i - 1: self._shortcut_tunnel(n))
             sc2 = QShortcut(QKeySequence(f"Ctrl+Shift+{i}"), self)
             sc2.activated.connect(lambda n=i - 1: self._shortcut_server(n))
+
+    # ---- 창 크기/위치 기억 ----
+    DEFAULT_SIZE = (820, 620)
+    MIN_SIZE = (600, 400)
+
+    def _restore_geometry(self):
+        """지난번 크기/위치로 연다. 화면 밖으로 나가는 값은 무시한다."""
+        geo = self.ctx.store.settings.window_geometry
+        self.resize(*self.DEFAULT_SIZE)
+        if len(geo) != 4:
+            return
+        x, y, w, h = geo
+        if w < self.MIN_SIZE[0] or h < self.MIN_SIZE[1]:
+            return
+        from PyQt6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            # 모니터를 뺐거나 해상도가 바뀌어 창이 화면 밖에 있으면 기본값으로.
+            if not area.intersects(type(area)(x, y, w, h)):
+                return
+            w = min(w, area.width())
+            h = min(h, area.height())
+        self.resize(w, h)
+        self.move(x, y)
+
+    def _save_geometry(self):
+        if self.isMaximized() or self.isMinimized():
+            return  # 최대화 상태를 저장하면 다음에 그 크기로 고정돼 보인다
+        # pos()/size()로 저장한다 - geometry()는 창틀을 뺀 안쪽 좌표라
+        # move()로 복원하면 창틀 두께만큼 매번 밀린다.
+        pos, size = self.pos(), self.size()
+        self.ctx.store.settings.window_geometry = [
+            pos.x(), pos.y(), size.width(), size.height()]
 
     def _style_banner(self):
         p = current_palette(self.ctx.store.settings.theme)
@@ -1061,6 +1112,7 @@ class MainWindow(QWidget):
             for info, meta, has_creds in group:
                 card = TunnelCard(self, info, meta, has_creds, owner_key)
                 card.set_restart_needed(info.name in self._restart_needed)
+                card.set_shortcut_index(len(self.cards) + 1)
                 self.list_lay.insertWidget(self.list_lay.count() - 1, card)
                 self.cards.append(card)
 
@@ -1470,7 +1522,15 @@ class MainWindow(QWidget):
         log_paths = {"터널": self.ctx.manager.log_path_for_tunnel(name)}
         for i, route in enumerate(card.meta.routes, start=1):
             tab_name = route.hostname or f"서버 {i}"
-            log_paths[tab_name] = self.ctx.manager.log_path_for_service(name, route)
+            path = self.ctx.manager.log_path_for_service(name, route)
+            if route.server.kind == "docker" and route.server.cwd:
+                # 도커는 두 종류가 다 필요하다: 빌드/기동 출력(우리 파일)과
+                # 컨테이너 안에서 앱이 뱉는 로그(docker compose logs).
+                # 500 오류를 볼 때 필요한 건 후자인데 파일에는 없다.
+                log_paths[f"{tab_name} (빌드)"] = path
+                log_paths[f"{tab_name} (앱)"] = ("compose", route.server.cwd)
+            else:
+                log_paths[tab_name] = path
         self._open_log_viewer(f"tunnel:{target}:{name}", title, log_paths)
 
     def _open_log_viewer(self, key: str, title: str, log_paths: dict[str, str]):
@@ -1612,6 +1672,11 @@ class MainWindow(QWidget):
             QMessageBox.information(
                 self, "종료",
                 "터널과 서버는 계속 실행됩니다.\n다시 실행하면 상태를 이어서 표시합니다.")
+        self._save_geometry()
+        try:
+            self.ctx.store.save()
+        except OSError:
+            pass  # 저장 실패로 종료가 막히면 안 된다
         # 워커가 돌고 있는 채로 연결을 닫으면 그 안에서 예외가 난다.
         self._timer.stop()
         self._poller.stop()

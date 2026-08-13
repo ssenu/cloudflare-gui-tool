@@ -1225,10 +1225,20 @@ def _route_window(qapp, tmp_path, kind="docker", cwd="/srv/apps/app"):
     return win, win.cards[0], route
 
 
-def test_deploy_button_disabled_without_working_dir(qapp, tmp_path):
+def test_deploy_menu_item_disabled_without_working_dir(qapp, tmp_path, monkeypatch):
     """작업 폴더가 없으면 어느 저장소를 받아올지 알 수 없다."""
+    from PyQt6.QtWidgets import QMenu, QPushButton
+
     win, card, _route = _route_window(qapp, tmp_path, cwd="")
-    assert not card.route_rows[0].deploy_btn.isEnabled()
+    captured = {}
+    monkeypatch.setattr(QMenu, "exec", lambda self, *a: captured.setdefault(
+        "actions", [(a.text(), a.isEnabled()) for a in self.actions()]))
+
+    row = card.route_rows[0]
+    row._menu(row.findChildren(QPushButton)[-1])
+
+    deploy = [enabled for text, enabled in captured["actions"] if "배포" in text]
+    assert deploy == [False]
 
 
 def test_deploy_pulls_then_restarts_that_server(qapp, tmp_path):
@@ -1239,7 +1249,7 @@ def test_deploy_pulls_then_restarts_that_server(qapp, tmp_path):
     win.ctx.manager.stop_service = lambda t, r: calls.append(("stop", r.id))
     win.ctx.manager.start_service = lambda t, r: calls.append(("start", r.id))
 
-    card.route_rows[0].deploy_btn.click()
+    win._deploy_route(card, card.route_rows[0].route)
     deadline = _time.monotonic() + 3
     while win._site_pollers[-1].is_busy() and _time.monotonic() < deadline:
         QApplication.processEvents()
@@ -1262,7 +1272,7 @@ def test_deploy_does_not_restart_when_pull_fails(qapp, tmp_path):
     win.ctx.manager.stop_service = lambda t, r: calls.append("stop")
     win.ctx.manager.start_service = lambda t, r: calls.append("start")
 
-    card.route_rows[0].deploy_btn.click()
+    win._deploy_route(card, card.route_rows[0].route)
     deadline = _time.monotonic() + 3
     while win._site_pollers[-1].is_busy() and _time.monotonic() < deadline:
         QApplication.processEvents()
@@ -1282,7 +1292,7 @@ def test_deploy_writes_pull_output_to_service_log(qapp, tmp_path):
     win.ctx.manager.stop_service = lambda t, r: None
     win.ctx.manager.start_service = lambda t, r: None
 
-    card.route_rows[0].deploy_btn.click()
+    win._deploy_route(card, card.route_rows[0].route)
     deadline = _time.monotonic() + 3
     while win._site_pollers[-1].is_busy() and _time.monotonic() < deadline:
         QApplication.processEvents()
@@ -1292,3 +1302,43 @@ def test_deploy_writes_pull_output_to_service_log(qapp, tmp_path):
     log_path = win.ctx.manager.log_path_for_service("t1", route)
     text = win.ctx.runner.files.get(log_path, "")
     assert "git pull" in text and "Fast-forward" in text
+
+
+# ---- 창 크기 기억 · 단축키 번호 ----
+
+def test_window_geometry_is_saved_and_restored(qapp, tmp_path):
+    # 화면보다 크면 화면 크기로 줄이므로(오프스크린은 800x600) 그 안쪽 값을 쓴다
+    win = make_window(qapp, tmp_path)
+    win.resize(700, 500)
+    win.move(40, 30)
+
+    win._save_geometry()
+    win.ctx.store.save()
+
+    reloaded = SettingsStore(path=win.ctx.store.path).load()
+    assert reloaded.window_geometry == [40, 30, 700, 500]
+
+    win2 = MainWindow(make_ctx(tmp_path))
+    win2._timer.stop()
+    assert (win2.width(), win2.height()) == (700, 500)
+
+
+def test_absurd_geometry_falls_back_to_default(qapp, tmp_path):
+    ctx = make_ctx(tmp_path)
+    ctx.store.settings.window_geometry = [0, 0, 50, 20]  # 너무 작음
+
+    win = MainWindow(ctx)
+    win._timer.stop()
+
+    assert (win.width(), win.height()) == MainWindow.DEFAULT_SIZE
+
+
+def test_cards_show_shortcut_numbers(qapp, tmp_path):
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(0, """[
+        {"id":"a","name":"t1","created_at":"","connections":[]},
+        {"id":"b","name":"t2","created_at":"","connections":[]}]""", "")
+    win = make_window(qapp, tmp_path, runner)
+
+    assert [c.index_label.text() for c in win.cards] == ["1", "2"]
+    assert "Ctrl+1" in win.cards[0].index_label.toolTip()

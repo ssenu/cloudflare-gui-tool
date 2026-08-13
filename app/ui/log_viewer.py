@@ -5,8 +5,9 @@ import re
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QCloseEvent
-from PyQt6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QPlainTextEdit,
-                             QPushButton, QTabWidget, QVBoxLayout, QWidget)
+from PyQt6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel,
+                             QPlainTextEdit, QPushButton, QTabWidget,
+                             QVBoxLayout, QWidget)
 
 from app.context import AppContext
 from app.core.runner import CommandRunner
@@ -93,6 +94,65 @@ class _LogTab(QWidget):
         self.view.clear()
 
 
+class _ComposeLogTab(QWidget):
+    """도커 컨테이너의 로그(`docker compose logs`)를 보여주는 탭.
+
+    왜 별도인가: 우리가 남기는 서비스 로그 파일에는 `docker compose up`의
+    출력(빌드·기동 메시지)만 들어간다. 정작 앱이 뱉는 트레이스백은 컨테이너
+    안에 있어 파일에는 없다. 사이트가 500을 뱉을 때 필요한 것은 이쪽이다.
+
+    파일이 아니라 명령이라 "이어 읽기"가 없다. 매번 마지막 N줄을 통째로
+    가져와 내용이 바뀌었을 때만 다시 그린다(스크롤 위치는 유지).
+    """
+
+    TAIL_LINES = 200
+
+    def __init__(self, runner: CommandRunner, cwd: str, error_color: str):
+        super().__init__()
+        self.runner = runner
+        self.cwd = cwd
+        self.error_color = error_color
+        self._last_text = ""
+
+        self.view = QPlainTextEdit()
+        self.view.setReadOnly(True)
+        self.view.setMaximumBlockCount(2000)
+        self.follow = QCheckBox("자동 스크롤")
+        self.follow.setChecked(True)
+        hint = QLabel(f"docker compose logs --tail {self.TAIL_LINES}")
+        hint.setStyleSheet("color: gray; font-size: 11px;")
+
+        bar = QHBoxLayout()
+        bar.addWidget(self.follow)
+        bar.addStretch(1)
+        bar.addWidget(hint)
+        lay = QVBoxLayout(self)
+        lay.addLayout(bar)
+        lay.addWidget(self.view, 1)
+
+    def read_new(self):
+        """워커 스레드에서 호출된다(위젯 접근 금지)."""
+        return self.runner.run(
+            ["docker", "compose", "logs", "--tail", str(self.TAIL_LINES),
+             "--no-color"], cwd=self.cwd, timeout=20.0)
+
+    def apply_new(self, result) -> None:
+        text = (result.stdout or "") + (result.stderr or "")
+        if result.exit_code != 0 and not text.strip():
+            text = f"(컨테이너 로그를 읽지 못했습니다. 종료 코드 {result.exit_code})"
+        if text == self._last_text:
+            return
+        self._last_text = text
+        bar = self.view.verticalScrollBar()
+        at_bottom = self.follow.isChecked() or bar.value() >= bar.maximum() - 4
+        pos = bar.value()
+        self.view.setPlainText(text.rstrip("\n"))
+        bar.setValue(bar.maximum() if at_bottom else min(pos, bar.maximum()))
+
+    def show_error(self, message: str) -> None:
+        self.view.setPlainText(f"[로그 읽기 실패] {message}")
+
+
 class LogViewer(QDialog):
     def __init__(self, ctx: AppContext, title: str, log_paths: dict[str, str], parent=None):
         super().__init__(parent)
@@ -104,8 +164,11 @@ class LogViewer(QDialog):
         error_color = current_palette(ctx.store.settings.theme)["danger"]
         tabs = QTabWidget()
         self._tabs: list[_LogTab] = []
-        for name, path in log_paths.items():
-            tab = _LogTab(ctx.runner, path, error_color)
+        for name, source in log_paths.items():
+            if isinstance(source, tuple) and source[0] == "compose":
+                tab = _ComposeLogTab(ctx.runner, source[1], error_color)
+            else:
+                tab = _LogTab(ctx.runner, source, error_color)
             self._tabs.append(tab)
             tabs.addTab(tab, name)
 
@@ -126,9 +189,9 @@ class LogViewer(QDialog):
 
         apply_titlebar_theme(self, ctx.store.settings.theme == "dark")
 
-    def _current_tab(self) -> _LogTab | None:
+    def _current_tab(self):
         widget = self._tab_widget.currentWidget()
-        return widget if isinstance(widget, _LogTab) else None
+        return widget if isinstance(widget, (_LogTab, _ComposeLogTab)) else None
 
     def _poll(self):
         tab = self._current_tab()
@@ -142,8 +205,11 @@ class LogViewer(QDialog):
         if tab is None:
             return
         if ok:
-            offset, text = result
-            tab.apply_new(offset, text)
+            if isinstance(tab, _ComposeLogTab):
+                tab.apply_new(result)
+            else:
+                offset, text = result
+                tab.apply_new(*result)
         else:
             tab.show_error(error)
 

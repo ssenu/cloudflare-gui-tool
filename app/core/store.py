@@ -82,6 +82,9 @@ class Settings:
     # 사용자가 "모두 정상"인 상태에서 직접 체크했을 때만 들어간다 - 그래서 새
     # 기기는 최초 1회 반드시 점검을 거친다.
     prereq_skip: list[str] = field(default_factory=list)
+    # 마지막 창 크기/위치 (x, y, w, h). 비어 있으면 기본값으로 연다.
+    # 매번 같은 크기로 시작하면 넓게 놓고 쓰는 사람은 켤 때마다 다시 늘려야 한다.
+    window_geometry: list[int] = field(default_factory=list)
 
     def skip_prereq_check(self, target_key: str) -> bool:
         return target_key in self.prereq_skip
@@ -304,6 +307,13 @@ class SettingsStore:
                             tunnel_owners[tid] = owner
 
                 # 점검 생략 목록: 문자열만 받아들인다(옛 파일에는 없는 필드).
+                geo_raw = raw.get("window_geometry", [])
+                window_geometry = (
+                    [int(v) for v in geo_raw]
+                    if isinstance(geo_raw, list) and len(geo_raw) == 4
+                    and all(isinstance(v, (int, float)) for v in geo_raw)
+                    else [])
+
                 skip_raw = raw.get("prereq_skip", [])
                 prereq_skip = ([k for k in skip_raw if isinstance(k, str)]
                                if isinstance(skip_raw, list) else [])
@@ -318,6 +328,7 @@ class SettingsStore:
                     repo_root=repo_root,
                     tunnel_owners=tunnel_owners,
                     prereq_skip=prereq_skip,
+                    window_geometry=window_geometry,
                 )
 
                 # v1 형식에서 실제로 마이그레이션이 일어난 경우에만 재저장.
@@ -354,6 +365,7 @@ class SettingsStore:
             "repo_root": self.settings.repo_root,
             "tunnel_owners": dict(self.settings.tunnel_owners),
             "prereq_skip": list(self.settings.prereq_skip),
+            "window_geometry": list(self.settings.window_geometry),
         }
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump(raw, f, ensure_ascii=False, indent=2)
