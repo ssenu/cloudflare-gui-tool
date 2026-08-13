@@ -217,9 +217,13 @@ class RouteRow(QWidget):
         if self.server_switch is not None:
             pending = ctx.manager.service_pending(self.card.tunnel_name, self.route)
             running = ctx.manager.service_running(self.card.tunnel_name, self.route)
-            # 화면(노브 위치 + 색)은 여기서만 바뀐다. 클릭으로는 움직이지 않아
-            # "눌렀다가 도로 돌아오는" 튕김이 없다.
-            self.server_switch.sync(running, pending)
+            # 전이 중에는 "가는 방향"에 노브를 고정한다. 실제 상태로 그리면
+            # 시작 직후 살아있다고 나왔다가 폴링 결과가 도착하며 꺼진 자리로
+            # 되돌아오는 식으로 노브가 왔다 갔다 한다.
+            desired = ctx.manager.service_pending_desired(self.card.tunnel_name,
+                                                          self.route)
+            shown = desired if (pending and desired is not None) else running
+            self.server_switch.sync(shown, pending)
             if self.route.server.kind == "docker":
                 # I5: 도커 조회 실패 사유를 토글 툴팁으로 보여준다.
                 err = ctx.manager.docker_error(self.card.tunnel_name, self.route)
@@ -470,7 +474,10 @@ class TunnelCard(QFrame):
                 # stop_tunnel(kill_pid 없이 PID 파일만 정리)을 호출할 수
                 # 있다. 죽은 PID로 인한 ERROR(사유 없음)는 그대로 OFF.
                 running = True
-        self.tunnel_switch.sync(running, pending)
+        # 라우트 행과 같은 규칙: 전이 중에는 가는 방향에 노브를 고정한다.
+        desired = ctx.manager.tunnel_pending_desired(self.tunnel_name)
+        shown = desired if (pending and desired is not None) else running
+        self.tunnel_switch.sync(shown, pending)
         if mismatch_reason:
             # 도커 오류 툴팁과 같은 자리를 재사용한다: update_tooltip()이
             # 기본 켜기/끄기 문구로 덮어쓴 뒤 사유로 다시 덮어쓴다.

@@ -49,6 +49,50 @@ PUBLISH_STEPS = [
      "라우트 줄의 도메인을 누르면 그 주소가 브라우저에서 열립니다."),
 ]
 
+REMOTE_STEPS = [
+    ("공개키 만들기",
+     "PC에서 ssh-keygen -t ed25519 로 키를 만들고, 공개키(.pub)를 대상 기기의 "
+     "~/.ssh/authorized_keys 에 넣습니다. 이 앱은 키 인증만 지원하며 비밀번호는 "
+     "저장하지 않습니다."),
+    ("대상 추가",
+     "상단 '대상' 목록에서 'SSH 대상 추가...'를 고르고 이름·호스트·사용자·키 "
+     "파일을 입력합니다. 호스트는 Tailscale 주소나 LAN IP를 넣습니다."),
+    ("바깥에서도 접속하려면",
+     "Tailscale 같은 메시 VPN을 깔면 공유기 설정 없이 어디서나 같은 주소로 "
+     "붙을 수 있습니다. 자세한 절차는 docs/rpi-selfhost-setup.md 에 있습니다."),
+    ("대상 전환",
+     "대상을 바꾸면 터널·서버·프로젝트·로그가 모두 그 기기 것으로 바뀝니다. "
+     "이전 대상에서 돌던 것은 계속 실행된 채 화면에서만 사라집니다."),
+    ("그 기기에서도 로그인",
+     "원격 기기에서 터널을 만들려면 그 기기에서도 cloudflared tunnel login 을 "
+     "한 번 해야 합니다. 자격증명이 없는 터널은 '이 대상에서 실행 불가'로 "
+     "표시되고 토글이 잠깁니다."),
+]
+
+PROJECT_STEPS = [
+    ("클론 추가",
+     "SSH 대상을 고른 뒤 '프로젝트' 버튼을 누르고 Git 주소를 넣으면 대상 "
+     "기기에 내려받습니다(내 PC에서는 쓰지 않는 기능이라 잠겨 있습니다). "
+     "비공개 저장소는 git@github.com:이름/저장소.git 형식과 대상 기기에 등록한 "
+     "키가 필요합니다."),
+    ("진행 확인",
+     "받는 동안 왼쪽 동그라미가 주황색이 되고, 끝나면 초록색 '준비됨 · 커밋'이 "
+     "됩니다. ⋮ → 로그에서 진행 내용을 볼 수 있습니다."),
+    ("환경설정(.env)",
+     "⋮ → 환경설정에서 비밀번호 같은 값을 넣습니다. 비밀번호류는 가려서 "
+     "보여주고, 내 PC에 있던 .env를 '파일에서 불러오기'로 올릴 수도 있습니다."),
+    ("포트 정하기",
+     "여러 프로젝트를 올릴 땐 호스트 포트를 다르게 줍니다. compose에 "
+     "\"127.0.0.1:${HOST_PORT:-8000}:8000\" 처럼 적어 두면 .env의 HOST_PORT만 "
+     "바꾸면 되고, compose 파일을 건드리지 않아 git pull과 충돌하지 않습니다."),
+    ("서버로 등록",
+     "라우트 편집창의 '프로젝트에서 선택'으로 그 폴더를 작업 폴더에 넣고 종류를 "
+     "'도커 컴포즈'로 고릅니다. 포트도 자동으로 채워집니다."),
+    ("업데이트",
+     "코드를 고친 뒤에는 ⋮ → 업데이트(git pull)로 받아오고, 서버 토글을 껐다 "
+     "켜면 새 코드로 다시 뜹니다."),
+]
+
 NOTES = [
     "공유기 포트포워딩이나 방화벽 개방이 필요 없습니다. cloudflared가 바깥으로 "
     "나가는 연결만 만들기 때문입니다.",
@@ -89,6 +133,16 @@ class GuideDialog(QDialog):
         content_lay.addSpacing(6)
         content_lay.addWidget(self._heading("사이트 하나 올리기"))
         for i, (title, desc) in enumerate(PUBLISH_STEPS, start=1):
+            content_lay.addWidget(self._step_row(i, title, desc))
+
+        content_lay.addSpacing(6)
+        content_lay.addWidget(self._heading("원격 기기 관리 (SSH)"))
+        for i, (title, desc) in enumerate(REMOTE_STEPS, start=1):
+            content_lay.addWidget(self._step_row(i, title, desc))
+
+        content_lay.addSpacing(6)
+        content_lay.addWidget(self._heading("프로젝트 올리기 (Git 클론)"))
+        for i, (title, desc) in enumerate(PROJECT_STEPS, start=1):
             content_lay.addWidget(self._step_row(i, title, desc))
 
         content_lay.addSpacing(6)

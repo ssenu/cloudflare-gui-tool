@@ -194,6 +194,16 @@ class ProcessManager:
     def _is_pending(self, unit: str) -> bool:
         return unit in self._pending
 
+    def _pending_desired(self, unit: str) -> bool | None:
+        """전이 중이라면 "무엇으로 가는 중인지"(켜는 중=True/끄는 중=False).
+
+        전이가 아니면 None. UI가 전이 중 토글을 어느 쪽에 그릴지 정하는 데
+        쓴다 - 실제 상태로 그리면 시작 직후 잠깐 켜졌다가 폴링 결과가 도착하며
+        꺼진 자리로 되돌아오는 등 눈에 띄게 흔들린다.
+        """
+        entry = self._pending.get(unit)
+        return None if entry is None else entry[0]
+
     # ---- 터널 ----
     def start_tunnel(self, name: str, client: CloudflaredClient) -> None:
         reg = self._registry()
@@ -235,6 +245,10 @@ class ProcessManager:
     def tunnel_pending(self, name: str) -> bool:
         reg = self._registry()
         return self._is_pending(reg.unit_tunnel(name))
+
+    def tunnel_pending_desired(self, name: str) -> bool | None:
+        reg = self._registry()
+        return self._pending_desired(reg.unit_tunnel(name))
 
     def tunnel_state(self, name: str) -> TunnelState:
         reg = self._registry()
@@ -331,6 +345,10 @@ class ProcessManager:
     def service_pending(self, tunnel: str, route: RouteMeta) -> bool:
         reg = self._registry()
         return self._is_pending(reg.unit_service(tunnel, route.id))
+
+    def service_pending_desired(self, tunnel: str, route: RouteMeta) -> bool | None:
+        reg = self._registry()
+        return self._pending_desired(reg.unit_service(tunnel, route.id))
 
     def service_running(self, tunnel: str, route: RouteMeta) -> bool:
         reg = self._registry()

@@ -835,11 +835,11 @@ def test_pending_knob_stays_at_destination(qapp, tmp_path):
     assert sw.isChecked()
 
 
-def test_click_does_not_move_knob_until_state_catches_up(qapp, tmp_path):
-    """누른 즉시 노브가 건너갔다가 도로 돌아오는 튕김이 없어야 한다.
+def test_pending_knob_shows_requested_direction_and_stays(qapp, tmp_path):
+    """전이 중 노브는 '가는 방향'에 고정되어야 한다.
 
-    도커처럼 시작에 시간이 걸리는 서비스가 이 상황이다: 클릭 직후에는 아직
-    실행 중이 아니므로, 노브는 꺼짐 자리에 있고 색만 pending이어야 한다.
+    실제 상태로 그리면 시작 직후 살아있다고 나왔다가(명령형 서비스) 폴링
+    결과가 도착하며 꺼진 자리로 되돌아와 노브가 왔다 갔다 한다.
     """
     runner = FakeRunner(home="/home/fake")
     runner.run_results[LIST_TUNNELS_CMD] = RunResult(
@@ -853,26 +853,69 @@ def test_click_does_not_move_knob_until_state_catches_up(qapp, tmp_path):
         name="t1", routes=[route])
     win.refresh()
     row = win.cards[0].route_rows[0]
+    switch = row.server_switch
 
-    # 시작은 걸었지만 아직 안 올라온 상태를 흉내낸다
-    started = []
-    win.ctx.manager.start_service = lambda t, r: started.append(r.id)
-    win.ctx.manager.service_running = lambda t, r: False
+    # 켜는 중: 실제로는 아직 안 올라왔어도 노브는 켜짐 자리에 있어야 한다
     win.ctx.manager.service_pending = lambda t, r: True
+    win.ctx.manager.service_pending_desired = lambda t, r: True
+    win.ctx.manager.service_running = lambda t, r: False
+    row.update_state()
+    assert switch.is_pending()
+    assert switch._display_checked is True
 
-    row.server_switch.click()  # 사용자가 실제로 누른 것과 같은 경로
+    # 폴링이 몇 번 돌아도 흔들리지 않는다
+    for _ in range(3):
+        row.update_state()
+        assert switch._display_checked is True
 
-    assert started == [route.id]                       # 요청은 나갔고
-    assert row.server_switch.is_pending()              # 색은 전이 중
-    assert row.server_switch._display_checked is False  # 노브는 아직 꺼짐 자리
-
-    # 실제로 올라오면 그때 노브가 건너간다
-    win.ctx.manager.service_running = lambda t, r: True
+    # 완료되면 색만 바뀐다 (노브는 이미 그 자리)
     win.ctx.manager.service_pending = lambda t, r: False
+    win.ctx.manager.service_pending_desired = lambda t, r: None
+    win.ctx.manager.service_running = lambda t, r: True
+    row.update_state()
+    assert switch._display_checked is True
+    assert not switch.is_pending()
+
+
+def test_pending_stop_keeps_knob_on_off_side(qapp, tmp_path):
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    route = RouteMeta(id=new_route_id(), hostname="a.example.com",
+                      service="http://localhost:8000",
+                      server=ServiceSpec(kind="command", start_cmd="myserver"))
+
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
+        name="t1", routes=[route])
+    win.refresh()
+    row = win.cards[0].route_rows[0]
+
+    # 끄는 중: 프로세스가 아직 살아있어도 노브는 꺼짐 자리로 간다
+    win.ctx.manager.service_pending = lambda t, r: True
+    win.ctx.manager.service_pending_desired = lambda t, r: False
+    win.ctx.manager.service_running = lambda t, r: True
     row.update_state()
 
-    assert row.server_switch._display_checked is True
-    assert not row.server_switch.is_pending()
+    assert row.server_switch._display_checked is False
+    assert row.server_switch.is_pending()
+
+
+def test_tunnel_pending_uses_same_rule(qapp, tmp_path):
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    runner.files["/home/fake/.cloudflared/tid1.json"] = "{}"
+
+    win = make_window(qapp, tmp_path, runner)
+    card = win.cards[0]
+
+    win.ctx.manager.tunnel_pending = lambda _n: True
+    win.ctx.manager.tunnel_pending_desired = lambda _n: True
+    card.update_state()
+
+    assert card.tunnel_switch._display_checked is True
+    assert card.tunnel_switch.is_pending()
 
 
 def test_failed_start_leaves_knob_off(qapp, tmp_path, monkeypatch):
@@ -900,3 +943,31 @@ def test_failed_start_leaves_knob_off(qapp, tmp_path, monkeypatch):
     row.server_switch.click()
 
     assert row.server_switch._display_checked is False
+
+
+def test_real_manager_click_moves_knob_once(qapp, tmp_path):
+    """실제 ProcessManager로 눌렀을 때 노브가 한 번만 움직여야 한다(스텁 없이)."""
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    route = RouteMeta(id=new_route_id(), hostname="a.example.com",
+                      service="http://localhost:8000",
+                      server=ServiceSpec(kind="command", start_cmd="myserver"))
+
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
+        name="t1", routes=[route])
+    win.refresh()
+    row = win.cards[0].route_rows[0]
+    switch = row.server_switch
+    assert switch._display_checked is False
+
+    positions = []
+    switch.click()  # 실제 start_service가 돈다
+    positions.append(switch._display_checked)
+    for _ in range(3):   # 폴링을 여러 번 돌려도
+        win._tick()
+        positions.append(switch._display_checked)
+
+    # 클릭 직후부터 계속 켜짐 자리 - 갔다가 돌아오는 구간이 없어야 한다
+    assert positions == [True, True, True, True], positions
