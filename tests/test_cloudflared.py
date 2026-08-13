@@ -123,22 +123,22 @@ def test_route_dns_overwrite_adds_flag():
 
 def test_route_dns_1003_raises_dns_record_exists_error():
     r = FakeRunner({"tunnel route dns": RunResult(
-        1, "", "code: 1003, reason: Failed to create record test.ssenu.cloud with err\n"
+        1, "", "code: 1003, reason: Failed to create record test.example.com with err\n"
                 "An A, AAAA, or CNAME record with that host already exists.")})
     with pytest.raises(DnsRecordExistsError):
-        CloudflaredClient(r).route_dns("mysite", "test.ssenu.cloud")
+        CloudflaredClient(r).route_dns("mysite", "test.example.com")
 
 
 def test_route_dns_already_exists_case_insensitive_raises_dns_record_exists_error():
     r = FakeRunner({"tunnel route dns": RunResult(1, "", "record ALREADY EXISTS here")})
     with pytest.raises(DnsRecordExistsError):
-        CloudflaredClient(r).route_dns("mysite", "test.ssenu.cloud")
+        CloudflaredClient(r).route_dns("mysite", "test.example.com")
 
 
 def test_route_dns_other_failure_raises_plain_cloudflared_error():
     r = FakeRunner({"tunnel route dns": RunResult(1, "", "some other failure")})
     with pytest.raises(CloudflaredError) as exc_info:
-        CloudflaredClient(r).route_dns("mysite", "test.ssenu.cloud")
+        CloudflaredClient(r).route_dns("mysite", "test.example.com")
     assert not isinstance(exc_info.value, DnsRecordExistsError)
 
 

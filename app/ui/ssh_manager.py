@@ -37,7 +37,7 @@ class SshManagerDialog(QDialog):
         self.name_edit.setPlaceholderText("예: webPi (목록에서 구분할 이름)")
         self.host_edit = QLineEdit()
         self.host_edit.setPlaceholderText(
-            "예: 100.78.119.115 또는 webpi — Tailscale 주소나 LAN IP")
+            "예: 100.101.102.103 또는 mypi — Tailscale 주소나 LAN IP")
         self.port_spin = QSpinBox()
         self.port_spin.setRange(1, 65535)
         self.port_spin.setValue(22)
