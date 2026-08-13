@@ -696,3 +696,121 @@ def test_refresh_button_actually_refetches(qapp, tmp_path):
     after = sum(1 for c, _ in runner.run_calls if c == LIST_TUNNELS_CMD)
 
     assert after == before + 1
+
+
+# ---- 전이 중 표시: 스피너 대신 토글 색 ----
+
+def test_tunnel_toggle_shows_pending_instead_of_spinner(qapp, tmp_path):
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    runner.files["/home/fake/.cloudflared/tid1.json"] = "{}"
+
+    win = make_window(qapp, tmp_path, runner)
+    card = win.cards[0]
+    assert not hasattr(card, "spinner")  # 스피너는 더 이상 쓰지 않는다
+    assert not card.tunnel_switch.is_pending()
+
+    win.ctx.manager.tunnel_pending = lambda _name: True
+    card.update_state()
+    assert card.tunnel_switch.is_pending()
+    assert "처리 중" in card.tunnel_switch.toolTip()
+
+    win.ctx.manager.tunnel_pending = lambda _name: False
+    card.update_state()
+    assert not card.tunnel_switch.is_pending()
+
+
+def test_server_toggle_shows_pending(qapp, tmp_path):
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    route = RouteMeta(id=new_route_id(), hostname="a.example.com",
+                      service="http://localhost:8000",
+                      server=ServiceSpec(kind="command", start_cmd="myserver"))
+
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
+        name="t1", routes=[route])
+    win.refresh()
+    row = win.cards[0].route_rows[0]
+
+    win.ctx.manager.service_pending = lambda _t, _r: True
+    row.update_state()
+    assert row.server_switch.is_pending()
+
+
+def test_pending_color_differs_from_on_color_in_both_themes():
+    from app.ui.theme import current_palette
+    for mode in ("dark", "light"):
+        p = current_palette(mode)
+        assert p["pending"] != p["accent"], f"{mode}: 전이 중 색이 켜짐 색과 같다"
+
+
+# ---- 도메인 클릭 -> 브라우저 열기 ----
+
+def test_clicking_domain_opens_site(qapp, tmp_path, monkeypatch):
+    from PyQt6.QtCore import QEvent, QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
+
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    route = RouteMeta(id=new_route_id(), hostname="portfolio.example.com",
+                      service="http://localhost:8001")
+
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
+        name="t1", routes=[route])
+    win.refresh()
+
+    opened = []
+    monkeypatch.setattr("app.ui.main_window.webbrowser.open", opened.append)
+
+    row = win.cards[0].route_rows[0]
+    click = QMouseEvent(QEvent.Type.MouseButtonRelease, QPointF(1, 1),
+                        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                        Qt.KeyboardModifier.NoModifier)
+    row.domain_label.mouseReleaseEvent(click)
+
+    assert opened == ["https://portfolio.example.com"]
+
+
+def test_right_click_on_domain_does_not_open(qapp, tmp_path, monkeypatch):
+    from PyQt6.QtCore import QEvent, QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
+
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    route = RouteMeta(id=new_route_id(), hostname="a.example.com",
+                      service="http://localhost:8000")
+
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
+        name="t1", routes=[route])
+    win.refresh()
+
+    opened = []
+    monkeypatch.setattr("app.ui.main_window.webbrowser.open", opened.append)
+    click = QMouseEvent(QEvent.Type.MouseButtonRelease, QPointF(1, 1),
+                        Qt.MouseButton.RightButton, Qt.MouseButton.RightButton,
+                        Qt.KeyboardModifier.NoModifier)
+    win.cards[0].route_rows[0].domain_label.mouseReleaseEvent(click)
+
+    assert opened == []
+
+
+def test_route_without_hostname_is_not_a_link(qapp, tmp_path):
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    route = RouteMeta(id=new_route_id(), hostname="", service="http://localhost:8000")
+
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
+        name="t1", routes=[route])
+    win.refresh()
+
+    label = win.cards[0].route_rows[0].domain_label
+    assert "underline" not in label.styleSheet()

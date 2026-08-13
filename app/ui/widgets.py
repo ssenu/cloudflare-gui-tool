@@ -20,8 +20,17 @@ from PyQt6.QtWidgets import (
 
 
 class ToggleSwitch(QAbstractButton):
-    """체크형 스위치 위젯. 켜짐: accent 배경 + 오른쪽 흰 노브.
-    꺼짐: border 색 배경 + panel 색 노브(왼쪽)."""
+    """체크형 스위치 위젯.
+
+    - 켜짐: accent 배경 + 오른쪽 흰 노브
+    - 꺼짐: border 색 배경 + panel 색 노브(왼쪽)
+    - 전이 중(pending): pending 색 배경 + 가운데 노브
+
+    전이 중 표시를 별도 스피너가 아니라 토글 자체로 하는 이유: 상태를 바꾸는
+    대상과 그 진행을 알리는 곳이 같아야 눈이 한 곳만 보면 된다. 노브를 가운데
+    두는 것은 색과 별개인 신호라, accent와 pending 색이 비슷한 테마(다크)에서도
+    "이동 중"이 분명하게 읽힌다.
+    """
 
     WIDTH = 44
     HEIGHT = 24
@@ -29,6 +38,7 @@ class ToggleSwitch(QAbstractButton):
     def __init__(self, palette: dict, parent: QWidget | None = None):
         super().__init__(parent)
         self._palette = palette
+        self._pending = False
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -38,6 +48,17 @@ class ToggleSwitch(QAbstractButton):
     def set_palette(self, palette: dict) -> None:
         self._palette = palette
         self.update()
+
+    def set_pending(self, pending: bool) -> None:
+        """켜지는/꺼지는 중임을 색과 노브 위치로 표시한다."""
+        if self._pending == pending:
+            return
+        self._pending = pending
+        self._update_tooltip()
+        self.update()
+
+    def is_pending(self) -> bool:
+        return self._pending
 
     def sizeHint(self):
         from PyQt6.QtCore import QSize
@@ -57,6 +78,9 @@ class ToggleSwitch(QAbstractButton):
         self._update_tooltip()
 
     def _update_tooltip(self) -> None:
+        if self._pending:
+            self.setToolTip("처리 중...")
+            return
         self.setToolTip("켜기" if not self.isChecked() else "끄기")
 
     def paintEvent(self, _event) -> None:
@@ -70,6 +94,8 @@ class ToggleSwitch(QAbstractButton):
 
         checked = self.isChecked()
         track_color = QColor(p["accent"] if checked else p["border"])
+        if self._pending:
+            track_color = QColor(p.get("pending", p["accent"]))
         if not self.isEnabled():
             # O2: 자격증명이 없어 토글이 비활성화된 경우, 켜짐/꺼짐과 무관하게
             # muted 색으로 눌러 "지금은 조작할 수 없다"는 것을 시각적으로 드러낸다.
@@ -86,8 +112,12 @@ class ToggleSwitch(QAbstractButton):
 
         knob_d = h - 6
         knob_y = 3
-        knob_x = w - knob_d - 3 if checked else 3
-        knob_color = QColor(p["on_accent"]) if checked else QColor(p["panel"])
+        if self._pending:
+            knob_x = (w - knob_d) / 2  # 가운데 = 이동 중
+        else:
+            knob_x = w - knob_d - 3 if checked else 3
+        knob_color = (QColor(p["on_accent"]) if (checked or self._pending)
+                      else QColor(p["panel"]))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(knob_color)
         painter.drawEllipse(QRectF(knob_x, knob_y, knob_d, knob_d))

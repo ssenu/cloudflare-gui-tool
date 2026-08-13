@@ -29,6 +29,9 @@ PALETTES = {
         "danger": "#f85149",
         "preview_text": "#ffd28e",
         "on_accent": "#ffffff",
+        # 전이 중(켜지는/꺼지는 중) 토글 색. 다크는 accent가 이미 주황이라
+        # 한 톤 어두운 호박색을 써서 "켜짐"과 구분한다(노브 위치가 주 신호).
+        "pending": "#d29922",
     },
     "light": {
         "bg": "#f5f6f8",
@@ -45,6 +48,8 @@ PALETTES = {
         "danger": "#c62828",
         "preview_text": "#1B4F9C",
         "on_accent": "#ffffff",
+        # 라이트는 accent가 파랑이라 주황이 명확히 대비된다.
+        "pending": "#f6821f",
     },
 }
 

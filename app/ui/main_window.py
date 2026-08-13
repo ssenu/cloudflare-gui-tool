@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import webbrowser
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction
@@ -17,7 +18,7 @@ from app.core.confirm import (group_by_owner, owner_group_label, owner_label,
 from app.core.store import RouteMeta, SshProfile, TunnelMeta, new_route_id
 from app.ui.icons import make_icon
 from app.ui.theme import STATE_COLORS, build_qss, current_palette, ensure_qss_icons
-from app.ui.widgets import ModalOverlay, Spinner, ToggleSwitch, danger_menu_action
+from app.ui.widgets import ModalOverlay, ToggleSwitch, danger_menu_action
 from app.ui.winutil import apply_titlebar_theme
 from app.ui.wizard import TunnelWizard
 
@@ -108,13 +109,25 @@ class RouteRow(QWidget):
         if is_placeholder:
             self.name_label.setStyleSheet(f"color: {palette['muted']};")
 
+        # 도메인은 눌러서 브라우저로 여는 링크다. 라우트를 만든 직후 "실제로
+        # 열리나" 확인하는 것이 가장 흔한 다음 행동이라, 주소를 복사해 붙여넣는
+        # 과정을 없앤다. hostname이 없으면 링크가 아니라 안내 문구로 둔다.
         hostname = route.hostname or "(hostname 미설정)"
         self.domain_label = QLabel()
         self.domain_label.setFixedWidth(ROUTE_DOMAIN_COL_WIDTH)
         domain_metrics = self.domain_label.fontMetrics()
-        self.domain_label.setText(_elide(hostname, domain_metrics,
-                                         ROUTE_DOMAIN_COL_WIDTH - 8))
-        self.domain_label.setToolTip(hostname)
+        elided = _elide(hostname, domain_metrics, ROUTE_DOMAIN_COL_WIDTH - 8)
+        if route.hostname:
+            self.domain_label.setText(elided)
+            self.domain_label.setStyleSheet(
+                f"color: {palette['accent2']}; text-decoration: underline;")
+            self.domain_label.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.domain_label.setToolTip(f"https://{hostname} 열기")
+            self.domain_label.mouseReleaseEvent = self._open_site
+        else:
+            self.domain_label.setText(elided)
+            self.domain_label.setStyleSheet(f"color: {palette['muted']};")
+            self.domain_label.setToolTip(hostname)
 
         service = route.service or "(서비스 미설정)"
         self.service_label = QLabel()
@@ -130,8 +143,6 @@ class RouteRow(QWidget):
         self.has_service = bool(route.server.start_cmd) or route.server.kind == "docker"
         self.server_switch: ToggleSwitch | None = None
         self.register_btn: QPushButton | None = None
-        self.spinner = Spinner(palette)
-        self.spinner.hide()
         toggle_label = _toggle_label("서버", palette)
         if self.has_service:
             self.server_switch = ToggleSwitch(palette)
@@ -156,7 +167,6 @@ class RouteRow(QWidget):
         lay.addWidget(_route_vline(palette))
         lay.addWidget(self.service_label, 1)
         lay.addWidget(toggle_label)
-        lay.addWidget(self.spinner)
         lay.addWidget(self.server_switch if self.server_switch else self.register_btn)
         lay.addWidget(menu_btn)
 
@@ -185,6 +195,14 @@ class RouteRow(QWidget):
         danger_menu_action(m, "삭제", palette, self._delete_route)
         m.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
+    def _open_site(self, event):
+        """도메인 클릭 -> 기본 브라우저로 그 주소를 연다."""
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if not self.route.hostname:
+            return
+        webbrowser.open(f"https://{self.route.hostname}")
+
     def _edit_route(self):
         self.card.win._edit_route(self.card, self.route)
 
@@ -198,11 +216,8 @@ class RouteRow(QWidget):
         running = False
         if self.server_switch is not None:
             pending = ctx.manager.service_pending(self.card.tunnel_name, self.route)
-            self.spinner.setVisible(pending)
-            if pending:
-                self.spinner.start()
-            else:
-                self.spinner.stop()
+            # 전이 중 표시는 별도 스피너가 아니라 토글 자체의 색/노브로 한다.
+            self.server_switch.set_pending(pending)
             running = ctx.manager.service_running(self.card.tunnel_name, self.route)
             self.server_switch.blockSignals(True)
             self.server_switch.setChecked(running)
@@ -367,8 +382,6 @@ class TunnelCard(QFrame):
 
         self.tunnel_switch = ToggleSwitch(palette)
         self.tunnel_switch.toggled.connect(self._on_tunnel_toggled)
-        self.spinner = Spinner(palette)
-        self.spinner.hide()
         log_btn = QPushButton("로그")
         # I1: 로그 버튼은 아이콘 없이 텍스트만 (사용자가 "이모지"라 부르는 그림 아이콘 제거)
         log_btn.setToolTip("터널과 모든 라우트의 로그를 탭으로 봅니다")
@@ -386,7 +399,6 @@ class TunnelCard(QFrame):
         header.addWidget(self.cannot_run_label)
         header.addStretch(1)
         header.addWidget(_toggle_label("터널", palette))
-        header.addWidget(self.spinner)
         header.addWidget(self.tunnel_switch)
         header.addWidget(log_btn)
         header.addWidget(delete_btn)
@@ -455,11 +467,7 @@ class TunnelCard(QFrame):
             f"background: {STATE_COLORS[st]}; border-radius: 6px;")
         self.state_label.setText(STATE_LABELS[st])
         pending = st == TunnelState.STARTING or ctx.manager.tunnel_pending(self.tunnel_name)
-        self.spinner.setVisible(pending)
-        if pending:
-            self.spinner.start()
-        else:
-            self.spinner.stop()
+        self.tunnel_switch.set_pending(pending)
         running = st in (TunnelState.STARTING, TunnelState.RUNNING)
         mismatch_reason = None
         if st == TunnelState.ERROR:
@@ -1228,11 +1236,6 @@ class MainWindow(QWidget):
         self._style_signature()
         icon_color = current_palette(mode)["text"]
         self.refresh_btn.setIcon(make_icon("refresh", icon_color))
-        new_palette = current_palette(mode)
-        for c in self.cards:
-            c.spinner.set_palette(new_palette)
-            for row in c.route_rows:
-                row.spinner.set_palette(new_palette)
         self._reload_targets()
         # 표시 내용은 그대로여도 팔레트가 달라졌으므로 지문을 비워 강제로
         # 다시 그리게 한다(그러지 않으면 이전 색의 카드가 남는다).
