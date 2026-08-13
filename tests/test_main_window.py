@@ -1106,26 +1106,51 @@ def _card_window(qapp, tmp_path, routes=None):
     return win
 
 
-def test_restart_banner_offers_button_that_restarts(qapp, tmp_path):
-    """라우트를 바꾼 뒤 '껐다 켜야 한다'는 안내에서 바로 재시작할 수 있어야 한다."""
+def test_restart_button_appears_on_that_tunnel_card(qapp, tmp_path):
+    """재시작 안내는 바뀐 터널의 카드에 떠야 한다.
+
+    창 위쪽 배너 하나로 알리면 터널이 여러 개일 때 어느 것을 재시작하라는
+    것인지 알 수 없다.
+    """
     from app.core.process_mgr import TunnelState
 
     win = _card_window(qapp, tmp_path)
+    card = win.cards[0]
+    assert not card.restart_needed()
+
     calls = []
     win.ctx.manager.tunnel_state = lambda _n: TunnelState.RUNNING
     win.ctx.manager.stop_tunnel = lambda n, boot_managed=False: calls.append(("stop", n))
     win.ctx.manager.start_tunnel = lambda n, c, boot_managed=False: calls.append(("start", n))
 
     win._notify_restart_needed("t1")
+    assert card.restart_needed()
 
-    assert not win.info_banner.isHidden()
-    assert not win.info_action_btn.isHidden()
-    assert win.info_action_btn.text() == "지금 재시작"
-
-    win.info_action_btn.click()
+    card.restart_btn.click()
 
     assert calls == [("stop", "t1"), ("start", "t1")]
-    assert win.info_banner.isHidden()   # 처리했으니 안내를 닫는다
+    assert not card.restart_needed()   # 처리했으니 버튼을 숨긴다
+
+
+def test_restart_flag_survives_card_rebuild(qapp, tmp_path):
+    """새로고침으로 카드를 다시 만들어도 재시작 안내가 사라지면 안 된다."""
+    from app.core.process_mgr import TunnelState
+
+    win = _card_window(qapp, tmp_path)
+    win.ctx.manager.tunnel_state = lambda _n: TunnelState.RUNNING
+    win._notify_restart_needed("t1")
+
+    win._render_sig = None      # 강제로 다시 그리게 한다
+    win.refresh(fetch=False)
+
+    assert win.cards[0].restart_needed()
+
+
+def test_restart_button_hidden_when_tunnel_is_stopped(qapp, tmp_path):
+    """꺼져 있는 터널은 다음에 켤 때 새 설정을 읽으므로 재시작할 것이 없다."""
+    win = _card_window(qapp, tmp_path)
+    win._notify_restart_needed("t1")   # 기본 상태는 STOPPED
+    assert not win.cards[0].restart_needed()
 
 
 def test_boot_autostart_enables_unit_and_persists(qapp, tmp_path, monkeypatch):
@@ -1188,3 +1213,82 @@ def test_site_check_shows_result_and_restart_for_404(qapp, tmp_path, monkeypatch
 
     assert "404" in win.info_label.text()
     assert win.info_action_btn.text() == "터널 재시작"
+
+
+# ---- 서버별 배포 버튼 ----
+
+def _route_window(qapp, tmp_path, kind="docker", cwd="/srv/apps/app"):
+    route = RouteMeta(id=new_route_id(), hostname="a.example.com",
+                      service="http://localhost:8000",
+                      server=ServiceSpec(kind=kind, start_cmd="myserver", cwd=cwd))
+    win = _card_window(qapp, tmp_path, [route])
+    return win, win.cards[0], route
+
+
+def test_deploy_button_disabled_without_working_dir(qapp, tmp_path):
+    """작업 폴더가 없으면 어느 저장소를 받아올지 알 수 없다."""
+    win, card, _route = _route_window(qapp, tmp_path, cwd="")
+    assert not card.route_rows[0].deploy_btn.isEnabled()
+
+
+def test_deploy_pulls_then_restarts_that_server(qapp, tmp_path):
+    import time as _time
+
+    win, card, route = _route_window(qapp, tmp_path)
+    calls = []
+    win.ctx.manager.stop_service = lambda t, r: calls.append(("stop", r.id))
+    win.ctx.manager.start_service = lambda t, r: calls.append(("start", r.id))
+
+    card.route_rows[0].deploy_btn.click()
+    deadline = _time.monotonic() + 3
+    while win._site_pollers[-1].is_busy() and _time.monotonic() < deadline:
+        QApplication.processEvents()
+        _time.sleep(0.005)
+    QApplication.processEvents()
+
+    ran = [c for c, _ in win.ctx.runner.run_calls]
+    assert ("git", "-C", "/srv/apps/app", "pull", "--ff-only") in ran
+    assert calls == [("stop", route.id), ("start", route.id)]  # 받은 뒤에 재시작
+
+
+def test_deploy_does_not_restart_when_pull_fails(qapp, tmp_path):
+    """pull이 실패했는데 재시작하면 옛 코드로 다시 떠서 '고쳤는데 그대로'가 된다."""
+    import time as _time
+
+    win, card, _route = _route_window(qapp, tmp_path)
+    win.ctx.runner.run_results[("git", "-C", "/srv/apps/app", "pull", "--ff-only")] = \
+        RunResult(1, "", "error: local changes")
+    calls = []
+    win.ctx.manager.stop_service = lambda t, r: calls.append("stop")
+    win.ctx.manager.start_service = lambda t, r: calls.append("start")
+
+    card.route_rows[0].deploy_btn.click()
+    deadline = _time.monotonic() + 3
+    while win._site_pollers[-1].is_busy() and _time.monotonic() < deadline:
+        QApplication.processEvents()
+        _time.sleep(0.005)
+    QApplication.processEvents()
+
+    assert calls == []
+    assert "실패" in win.info_label.text()
+
+
+def test_deploy_writes_pull_output_to_service_log(qapp, tmp_path):
+    import time as _time
+
+    win, card, route = _route_window(qapp, tmp_path)
+    win.ctx.runner.run_results[("git", "-C", "/srv/apps/app", "pull", "--ff-only")] = \
+        RunResult(0, "Fast-forward 3 files changed", "")
+    win.ctx.manager.stop_service = lambda t, r: None
+    win.ctx.manager.start_service = lambda t, r: None
+
+    card.route_rows[0].deploy_btn.click()
+    deadline = _time.monotonic() + 3
+    while win._site_pollers[-1].is_busy() and _time.monotonic() < deadline:
+        QApplication.processEvents()
+        _time.sleep(0.005)
+    QApplication.processEvents()
+
+    log_path = win.ctx.manager.log_path_for_service("t1", route)
+    text = win.ctx.runner.files.get(log_path, "")
+    assert "git pull" in text and "Fast-forward" in text

@@ -579,5 +579,17 @@ class ProcessManager:
         for unit, _cwd in docker_units:
             self._resolve_pending(unit, self._docker_running.get(unit, False))
 
+    def mark_service_pending(self, tunnel: str, route: RouteMeta) -> None:
+        """전이 중(배포 등)임을 표시한다. 실제 상태는 폴링이 곧 확정한다."""
+        reg = self._registry()
+        unit = reg.unit_service(tunnel, route.id)
+        desired = self._docker_running.get(unit, False) if route.server.kind == "docker" else True
+        self._set_pending(unit, desired, PENDING_TIMEOUT_DOCKER)
+
+    def append_service_log(self, tunnel: str, route: RouteMeta, text: str) -> None:
+        """서비스 로그에 한 줄 남긴다(배포 진행 상황 등을 로그 탭에서 보게)."""
+        reg = self._registry()
+        self._append_log(reg, reg.unit_service(tunnel, route.id), text)
+
     def _append_log(self, reg: RunRegistry, unit: str, text: str) -> None:
         reg.runner.append_file(reg.log_path(unit), text + "\n")

@@ -161,7 +161,7 @@ class RepoManagerDialog(QDialog):
         head.addStretch(1)
         head.addWidget(add_btn)
 
-        hint = QLabel("각 프로젝트의 ⋮ 에서 환경설정 · 로그 · 업데이트 · 삭제를 할 수 있습니다")
+        hint = QLabel("각 프로젝트의 ⋮ 에서 배포 · 환경설정 · 로그 · 업데이트 · 삭제를 할 수 있습니다")
         hint.setStyleSheet(f"color: {palette['muted']}; font-size: 11px;")
 
         self.list_lay = QVBoxLayout()

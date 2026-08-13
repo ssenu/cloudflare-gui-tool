@@ -154,6 +154,16 @@ class RouteRow(QWidget):
             self.register_btn = QPushButton("서버 등록")
             self.register_btn.clicked.connect(self._edit_route)
 
+        # 배포: 이 서버가 쓰는 프로젝트를 최신 코드로 받고 다시 띄운다.
+        # 작업 폴더가 있어야 어느 저장소인지 알 수 있어 그때만 보여준다.
+        self.deploy_btn = QPushButton("배포")
+        self.deploy_btn.setToolTip(
+            "git pull 후 이 서버를 다시 시작합니다" if route.server.cwd
+            else "작업 폴더가 지정된 서버에서만 쓸 수 있습니다")
+        self.deploy_btn.setEnabled(bool(route.server.cwd) and self.has_service)
+        self.deploy_btn.clicked.connect(
+            lambda: card.win._deploy_route(card, route))
+
         menu_btn = QPushButton()
         menu_btn.setIcon(make_icon("dots", icon_color))
         menu_btn.setFixedWidth(28)  # 터널 메뉴(34px)보다 작게: 하위 위계 표현
@@ -170,6 +180,7 @@ class RouteRow(QWidget):
         lay.addWidget(self.service_label, 1)
         lay.addWidget(toggle_label)
         lay.addWidget(self.server_switch if self.server_switch else self.register_btn)
+        lay.addWidget(self.deploy_btn)
         lay.addWidget(menu_btn)
 
         self.update_state()
@@ -393,6 +404,15 @@ class TunnelCard(QFrame):
 
         self.tunnel_switch = ToggleSwitch(palette)
         self.tunnel_switch.toggled.connect(self._on_tunnel_toggled)
+        # 라우트를 바꾸면 이 카드에만 뜨는 버튼. 위쪽 배너 하나로 알리면
+        # 터널이 여러 개일 때 어느 것을 재시작하라는 건지 알 수 없다.
+        self.restart_btn = QPushButton("재시작")
+        self.restart_btn.setObjectName("primary")
+        self.restart_btn.setToolTip("바뀐 라우트를 적용하려면 눌러 주세요")
+        self.restart_btn.clicked.connect(lambda: win._restart_tunnel(self))
+        self.restart_btn.setVisible(False)
+        self._restart_needed = False
+
         log_btn = QPushButton("로그")
         # I1: 로그 버튼은 아이콘 없이 텍스트만 (사용자가 "이모지"라 부르는 그림 아이콘 제거)
         log_btn.setToolTip("터널과 모든 라우트의 로그를 탭으로 봅니다")
@@ -425,6 +445,7 @@ class TunnelCard(QFrame):
         header.addStretch(1)
         header.addWidget(_toggle_label("터널", palette))
         header.addWidget(self.tunnel_switch)
+        header.addWidget(self.restart_btn)
         header.addWidget(log_btn)
         header.addWidget(menu_btn)
 
@@ -510,6 +531,15 @@ class TunnelCard(QFrame):
         self.win.info_banner.hide()
         self.update_state()
 
+    def set_restart_needed(self, needed: bool) -> None:
+        """라우트가 바뀌어 재시작해야 하는 상태인지 표시한다."""
+        self._restart_needed = needed
+        self.restart_btn.setVisible(needed)
+
+    def restart_needed(self) -> bool:
+        # isVisible()은 창이 아직 표시되기 전이면 False라 상태를 따로 들고 있는다.
+        return self._restart_needed
+
     def boot_managed(self) -> bool:
         """systemd가 이 터널을 관리하는가(시작/정지/상태를 그쪽에 맡길지)."""
         return bool(getattr(self.meta, "boot_autostart", False))
@@ -568,6 +598,9 @@ class MainWindow(QWidget):
         self._render_sig: tuple | None = None
         # 접속 확인 워커들(요청이 끝날 때까지 참조를 유지해야 GC되지 않는다)
         self._site_pollers: list[BackgroundPoller] = []
+        # 라우트가 바뀌어 재시작이 필요한 터널 이름. 카드를 다시 그려도
+        # 버튼이 사라지지 않도록 창이 들고 있는다.
+        self._restart_needed: set[str] = set()
         self._log_viewers: dict[str, "LogViewer"] = {}
         # B3: 인덱스가 아니라 현재 대상의 식별자로 콤보를 재선택한다. None이면
         # 로컬, 문자열이면 SSH 프로필 이름. 인덱스만 쓰면 프로필이 삭제됐을 때
@@ -1027,6 +1060,7 @@ class MainWindow(QWidget):
             self.group_headers.append(header)
             for info, meta, has_creds in group:
                 card = TunnelCard(self, info, meta, has_creds, owner_key)
+                card.set_restart_needed(info.name in self._restart_needed)
                 self.list_lay.insertWidget(self.list_lay.count() - 1, card)
                 self.cards.append(card)
 
@@ -1125,6 +1159,61 @@ class MainWindow(QWidget):
         wiz.finished.connect(_on_finished)
         self._open_modal(wiz)
 
+    def _deploy_route(self, card: TunnelCard, route: RouteMeta):
+        """이 서버의 프로젝트를 최신 코드로 받고 다시 띄운다.
+
+        순서를 지키는 것이 중요하다: git pull이 실패하면 재시작하지 않는다.
+        옛 코드로 다시 떠서 "고쳤는데 그대로"가 되는 상황을 막는다.
+
+        pull은 원격 왕복이라 워커에서 돌리고, 끝난 뒤 서버 재시작만 GUI에서
+        한다(서비스 상태는 ProcessManager가 들고 있어 한 곳에서 다뤄야 한다).
+        """
+        cwd = route.server.cwd
+        if not cwd:
+            return
+        ctx = self.ctx
+        name = card.tunnel_name
+        self._show_info(f"{cwd} 최신 코드를 받는 중...")
+        ctx.manager.append_service_log(name, route, "[배포] git pull --ff-only")
+        # 전이 중임을 토글 색으로 알린다(스피너를 없앤 뒤의 공통 표시 방식).
+        if route.server.kind == "docker":
+            card.win.ctx.manager.mark_service_pending(name, route)
+        row = next((r for r in card.route_rows if r.route.id == route.id), None)
+        if row is not None:
+            row.update_state()
+
+        poller = BackgroundPoller(self)
+        runner = ctx.runner
+
+        def done(ok, result, error):
+            poller.deleteLater()
+            if not ok:
+                self._show_info(f"배포 실패: {error}")
+                ctx.manager.append_service_log(name, route, f"[배포] 실패: {error}")
+                return
+            res = result
+            output = (res.stdout or res.stderr).strip()
+            ctx.manager.append_service_log(name, route, output or "(출력 없음)")
+            if res.exit_code != 0:
+                self._show_info(
+                    f"git pull 실패 - 서버는 그대로 둡니다. 로그를 확인하세요.")
+                return
+            try:
+                ctx.manager.stop_service(name, route)
+                ctx.manager.start_service(name, route)
+            except Exception as ex:
+                self._show_info(f"서버 재시작 실패: {ex}")
+                return
+            self._show_info(f"{route.hostname or cwd} 배포를 시작했습니다. "
+                            "진행 상황은 로그에서 볼 수 있습니다.")
+            if row is not None:
+                row.update_state()
+
+        poller.finished.connect(done)
+        poller.run(lambda: runner.run(["git", "-C", cwd, "pull", "--ff-only"],
+                                      timeout=120.0))
+        self._site_pollers.append(poller)
+
     def _check_site(self, route: RouteMeta):
         """공개 주소를 실제로 열어보고 결과를 배너로 알려준다.
 
@@ -1176,6 +1265,8 @@ class MainWindow(QWidget):
         except Exception as ex:
             QMessageBox.critical(self, "재시작 실패", str(ex))
             return
+        self._restart_needed.discard(card.tunnel_name)
+        card.set_restart_needed(False)
         self.info_banner.hide()
         card.update_state()
 
@@ -1353,13 +1444,18 @@ class MainWindow(QWidget):
         self.refresh(fetch=False)
 
     def _notify_restart_needed(self, tunnel_name: str):
-        if self.ctx.manager.tunnel_state(tunnel_name) in (
+        """그 터널 카드에 재시작 버튼을 띄운다.
+
+        예전에는 창 위쪽 배너 하나로 알렸는데, 터널이 여러 개면 어느 것을
+        재시작하라는 것인지 알 수 없었다. 바뀐 터널의 카드에만 표시한다.
+        """
+        if self.ctx.manager.tunnel_state(tunnel_name) not in (
                 TunnelState.RUNNING, TunnelState.STARTING):
-            card = next((c for c in self.cards if c.tunnel_name == tunnel_name), None)
-            self._show_info(
-                "변경을 적용하려면 터널을 껐다 켜야 합니다.",
-                "지금 재시작",
-                (lambda: self._restart_tunnel(card)) if card else None)
+            return
+        self._restart_needed.add(tunnel_name)
+        for card in self.cards:
+            if card.tunnel_name == tunnel_name:
+                card.set_restart_needed(True)
 
     # ---- 로그 ----
     def _open_log_tunnel(self, card: TunnelCard):
