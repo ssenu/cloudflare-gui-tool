@@ -1,3 +1,10 @@
+"""상단 '?' 버튼의 사용 흐름 안내.
+
+이 창은 메인 창 안에 모달로 얹히므로 부모의 90%를 넘을 수 없다. 예전에는
+1040x780으로 잡고 4개짜리 가로 단계 상자(각 200px 고정)를 늘어놓아, 실제로
+표시되는 폭보다 내용이 넓어 좌우 스크롤이 생겼다. 지금은 한 줄에 한 단계씩
+쌓는 단일 열 구성이라 폭이 얼마든 줄바꿈으로 흡수된다.
+"""
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
@@ -5,36 +12,94 @@ from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QFrame, QHBoxLayout,
                              QLabel, QScrollArea, QVBoxLayout, QWidget)
 
 from app.context import AppContext
-from app.ui.icons import make_icon
 from app.ui.theme import current_palette
 from app.ui.winutil import apply_titlebar_theme
 
+SETUP_STEPS = [
+    ("도메인 준비",
+     "원하는 등록업체에서 도메인을 구입합니다."),
+    ("Cloudflare에 등록",
+     "대시보드에 사이트를 추가하고, 등록업체에서 네임서버를 Cloudflare 주소로 "
+     "바꿉니다. 상태가 Active가 되어야 합니다."),
+    ("cloudflared 설치",
+     "터널을 연결해 주는 프로그램입니다. PATH에 없으면 설정에서 경로를 지정할 "
+     "수 있습니다."),
+    ("로그인",
+     "cloudflared tunnel login 으로 인증서(cert.pem)를 받습니다. 원격 기기에서 "
+     "터널을 만들 거라면 그 기기에서도 한 번 해야 합니다."),
+]
+
+PUBLISH_STEPS = [
+    ("터널 생성",
+     "'＋터널 생성'을 누릅니다. 터널 이름은 목록에서 구분하기 위한 것이라 "
+     "접속 주소와는 상관없습니다."),
+    ("도메인 연결",
+     "서브도메인과 루트 도메인을 넣으면 CNAME이 자동으로 만들어집니다. "
+     "나중에 붙이려면 '터널만 만들기'를 고르고 뒤에 '라우트 추가'로 연결합니다."),
+    ("로컬 서비스 주소",
+     "서버가 실제로 듣고 있는 주소입니다(예: http://localhost:8000). "
+     "도커라면 compose에 공개한 호스트 포트와 반드시 같아야 합니다."),
+    ("서버 등록 (선택)",
+     "실행 명령을 적거나 종류를 '도커 컴포즈'로 고르면, 그다음부터 카드의 "
+     "'서버' 토글로 켜고 끌 수 있습니다."),
+    ("켜기",
+     "서버를 먼저, 터널을 나중에 켜는 편이 로그가 깨끗합니다. 라우트를 "
+     "추가·수정한 뒤에는 터널을 껐다 켜야 반영됩니다."),
+    ("접속 확인",
+     "라우트 줄의 도메인을 누르면 그 주소가 브라우저에서 열립니다."),
+]
+
+NOTES = [
+    "공유기 포트포워딩이나 방화벽 개방이 필요 없습니다. cloudflared가 바깥으로 "
+    "나가는 연결만 만들기 때문입니다.",
+    "HTTPS는 Cloudflare가 처리합니다. 로컬 서버는 http로 두어도 됩니다.",
+    "웹서버는 127.0.0.1에만 바인딩하는 것이 안전합니다(도커라면 "
+    "\"127.0.0.1:8000:8000\").",
+    "앱을 종료해도 터널과 서버는 대상 머신에서 계속 실행됩니다. 24시간 "
+    "운영하려면 라즈베리파이에 올리고 SSH 원격 모드로 관리하세요.",
+    "404가 뜨면 그 주소가 ingress에 없는 것입니다 - 라우트를 추가했는데도 "
+    "그렇다면 터널을 껐다 켜세요. 502는 반대로 라우트는 맞는데 그 포트에 "
+    "서버가 없다는 뜻입니다.",
+    "터널을 켜는 순간 주소를 아는 누구나 접속할 수 있습니다. 개인용이라면 "
+    "Cloudflare Access로 제한을 거세요.",
+]
+
 
 class GuideDialog(QDialog):
+    # 모달은 부모의 90%까지만 커진다. 그보다 작게 잡아 클램프에 걸리지 않게 한다.
+    PREFERRED_WIDTH = 520
+    PREFERRED_HEIGHT = 560
+
     def __init__(self, ctx: AppContext, parent=None):
         super().__init__(parent)
         self.ctx = ctx
         self.p = current_palette(ctx.store.settings.theme)
         self.setWindowTitle("사용 흐름 안내")
-        self.resize(1040, 780)
+        self.resize(self.PREFERRED_WIDTH, self.PREFERRED_HEIGHT)
 
         content = QWidget()
         content_lay = QVBoxLayout(content)
-        content_lay.setSpacing(16)
+        content_lay.setContentsMargins(0, 0, 8, 0)  # 세로 스크롤바 자리
+        content_lay.setSpacing(10)
 
         content_lay.addWidget(self._heading("사전 준비 (최초 1회)"))
-        content_lay.addLayout(self._section1())
+        for i, (title, desc) in enumerate(SETUP_STEPS, start=1):
+            content_lay.addWidget(self._step_row(i, title, desc))
 
-        content_lay.addWidget(self._heading("사이트마다 반복"))
-        content_lay.addLayout(self._section2())
+        content_lay.addSpacing(6)
+        content_lay.addWidget(self._heading("사이트 하나 올리기"))
+        for i, (title, desc) in enumerate(PUBLISH_STEPS, start=1):
+            content_lay.addWidget(self._step_row(i, title, desc))
 
+        content_lay.addSpacing(6)
         content_lay.addWidget(self._heading("알아두기"))
-        content_lay.addWidget(self._section3())
-
+        content_lay.addWidget(self._notes())
         content_lay.addStretch(1)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        # 좌우 스크롤은 만들지 않는다. 모든 글자는 줄바꿈으로 흡수한다.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(content)
         self._content = content
 
@@ -48,114 +113,36 @@ class GuideDialog(QDialog):
 
         apply_titlebar_theme(self, ctx.store.settings.theme == "dark")
 
-    # ---- 섹션 구성 ----
+    def fit_to_content(self) -> None:
+        """ModalOverlay가 표시 직후 부르는 훅.
+
+        기본값(sizeHint)대로 두면 스크롤 영역을 품은 다이얼로그가 아주 작게
+        잡혀 몇 줄만 보이고 계속 스크롤해야 한다. 창이 허용하는 만큼 펴 준다
+        (오버레이가 다시 부모의 90%로 제한하므로 넘칠 일은 없다).
+        """
+        parent = self.parentWidget()
+        if parent is None:
+            self.resize(self.PREFERRED_WIDTH, self.PREFERRED_HEIGHT)
+            return
+        area = parent.rect()
+        self.resize(min(self.PREFERRED_WIDTH, int(area.width() * 0.9)),
+                    min(self.PREFERRED_HEIGHT, int(area.height() * 0.9)))
+
+    # ---- 조각 ----
     def _heading(self, text: str) -> QLabel:
         lbl = QLabel(text)
         lbl.setStyleSheet(
-            f"font-size: 16px; font-weight: 700; color: {self.p['accent']};")
+            f"font-size: 14px; font-weight: 700; color: {self.p['accent']};")
         return lbl
 
-    def _section1(self) -> QHBoxLayout:
-        items = [
-            (1, "도메인 구매",
-             "가비아, Namecheap 등 원하는 등록업체에서 도메인을 구입합니다."),
-            (2, "Cloudflare에 도메인 등록",
-             "Cloudflare 대시보드에 사이트를 추가한 뒤, 구매한 곳에서 네임서버를 "
-             "Cloudflare 주소로 변경합니다. 상태가 Active가 되기까지 몇 분에서 몇 "
-             "시간이 걸립니다."),
-            (3, "cloudflared 설치",
-             "터널을 연결해 주는 프로그램입니다. 이 앱을 처음 실행하면 온보딩 화면에서 "
-             "설치를 안내합니다."),
-            (4, "Cloudflare 로그인",
-             "브라우저에서 도메인을 선택하면 인증서(cert.pem)가 저장됩니다. 이 역시 "
-             "온보딩 화면에서 한 번만 진행합니다."),
-        ]
-        lay = QHBoxLayout()
-        for i, (num, title, desc) in enumerate(items):
-            box = self._step_box(num, title, desc)
-            box.setFixedWidth(200)
-            lay.addWidget(box)
-            if i < len(items) - 1:
-                lay.addWidget(self._arrow("arrow_right"))
-        return lay
-
-    def _section2(self) -> QVBoxLayout:
-        items = [
-            (1, "터널 생성",
-             "메인 화면의 '터널 생성' 버튼을 누르고 터널 이름을 입력합니다. 이름은 "
-             "목록에서 구분하기 위한 것으로 접속 주소와는 무관합니다."),
-            (2, "도메인 연결",
-             "서브도메인과 루트 도메인을 입력하면 Cloudflare에 CNAME 레코드가 자동으로 "
-             "만들어집니다. 예를 들어 mysite와 example.com을 넣으면 접속 주소는 "
-             "mysite.example.com이 됩니다."),
-            (3, "로컬 서비스 주소 입력",
-             "내 컴퓨터에서 웹서버가 실제로 듣고 있는 주소를 적습니다. 예: "
-             "http://localhost:8000. 이 내용으로 설정 파일(config.yml)이 자동 "
-             "작성됩니다."),
-            (4, "웹서버 실행 명령 등록 (선택)",
-             "uvicorn main:app --port 8000 처럼 서버를 켜는 명령을 등록해 두면, 카드의 "
-             "서버 토글이나 '함께 시작' 옵션으로 터널과 같이 실행할 수 있습니다. 도커 "
-             "컴포즈로 띄우는 서비스라면 종류를 '도커 컴포즈'로 선택해 등록할 수도 "
-             "있습니다."),
-            (5, "웹서버 실행",
-             "터널보다 웹서버를 먼저 켜는 것이 좋습니다. 순서가 반대여도 서버가 뜨면 "
-             "자동으로 연결되지만, 그 사이 로그에 연결 거부 메시지가 남습니다."),
-            (6, "터널 켜기",
-             "카드의 '터널' 토글을 켭니다. 상태등이 초록색으로 바뀌고 로그에 "
-             "Registered tunnel connection이 보이면 연결된 것입니다. 터널 토글과 라우트의 "
-             "'서버' 토글은 서로 독립적으로 동작하므로, 터널만 켜 두고 서버는 필요할 때만 "
-             "켜는 식으로 따로 관리할 수 있습니다."),
-            (7, "접속 확인",
-             "휴대폰에서 와이파이를 끄고 데이터로 접속 주소에 들어가 보세요. 페이지가 "
-             "뜨면 외부 공개가 완료된 것입니다."),
-        ]
-        lay = QVBoxLayout()
-        for i, (num, title, desc) in enumerate(items):
-            highlight = (num == 7)
-            box = self._step_box(num, title, desc, highlight=highlight)
-            lay.addWidget(box)
-            if i < len(items) - 1:
-                lay.addWidget(self._arrow("arrow_down"))
-        return lay
-
-    def _section3(self) -> QFrame:
-        lines = [
-            "공유기 포트포워딩이나 방화벽 개방이 필요 없습니다. cloudflared가 바깥으로 "
-            "나가는 연결만 만들기 때문입니다.",
-            "HTTPS 인증서는 Cloudflare가 자동으로 처리합니다. 로컬 서버는 http로 두어도 "
-            "됩니다.",
-            "웹서버는 127.0.0.1에만 바인딩하는 것이 안전합니다. 예: uvicorn --host "
-            "127.0.0.1",
-            "이 앱을 종료해도 터널과 서버는 대상 머신에서 계속 실행됩니다. 다시 실행하면 "
-            "그 상태를 그대로 이어서 보여줍니다. 24시간 운영하려면 라즈베리파이에 올리고 "
-            "SSH 원격 모드로 관리하는 것을 권합니다 - 노트북을 꺼도 되기 때문입니다.",
-            "터널을 켜는 순간 주소를 아는 누구나 접속할 수 있습니다. 개인용 페이지라면 "
-            "Cloudflare Access로 접근 제한을 거는 것을 권합니다.",
-        ]
-        frame = QFrame()
-        frame.setObjectName("card")
-        lay = QVBoxLayout(frame)
-        for line in lines:
-            lbl = QLabel(f"· {line}")
-            lbl.setWordWrap(True)
-            lay.addWidget(lbl)
-        return frame
-
-    def _step_box(self, num: int, title: str, desc: str,
-                  highlight: bool = False) -> QFrame:
-        frame = QFrame()
-        frame.setObjectName("card")
-        if highlight:
-            frame.setStyleSheet(
-                f"QFrame#card {{ background: {self.p['panel']}; "
-                f"border: 2px solid {self.p['accent']}; border-radius: 10px; }}")
-
+    def _step_row(self, num: int, title: str, desc: str) -> QWidget:
+        """번호 배지 + (제목/설명) 한 줄. 카드 테두리를 두르지 않아 가볍게 읽힌다."""
         badge = QLabel(str(num))
-        badge.setFixedSize(26, 26)
+        badge.setFixedSize(22, 22)
         badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         badge.setStyleSheet(
             f"background: {self.p['accent']}; color: {self.p['on_accent']}; "
-            "border-radius: 13px; font-weight: 700;")
+            "border-radius: 11px; font-size: 11px; font-weight: 700;")
 
         title_lbl = QLabel(title)
         title_lbl.setStyleSheet("font-weight: 700;")
@@ -163,21 +150,30 @@ class GuideDialog(QDialog):
 
         desc_lbl = QLabel(desc)
         desc_lbl.setWordWrap(True)
-        desc_lbl.setStyleSheet(f"color: {self.p['muted']};")
+        desc_lbl.setStyleSheet(f"color: {self.p['muted']}; font-size: 12px;")
 
-        top = QHBoxLayout()
-        top.addWidget(badge, 0, Qt.AlignmentFlag.AlignTop)
-        top.addWidget(title_lbl, 1)
+        text_col = QVBoxLayout()
+        text_col.setSpacing(1)
+        text_col.addWidget(title_lbl)
+        text_col.addWidget(desc_lbl)
 
+        row = QWidget()
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        lay.addWidget(badge, 0, Qt.AlignmentFlag.AlignTop)
+        lay.addLayout(text_col, 1)
+        return row
+
+    def _notes(self) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("card")
         lay = QVBoxLayout(frame)
-        lay.addLayout(top)
-        lay.addWidget(desc_lbl)
-        # 박스마다 내용 길이가 달라도 위쪽 정렬을 유지
-        lay.addStretch(1)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(6)
+        for line in NOTES:
+            lbl = QLabel(f"· {line}")
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet("font-size: 12px;")
+            lay.addWidget(lbl)
         return frame
-
-    def _arrow(self, direction: str) -> QLabel:
-        lbl = QLabel()
-        lbl.setPixmap(make_icon(direction, self.p["muted"], 24).pixmap(24, 24))
-        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        return lbl

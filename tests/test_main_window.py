@@ -814,3 +814,22 @@ def test_route_without_hostname_is_not_a_link(qapp, tmp_path):
 
     label = win.cards[0].route_rows[0].domain_label
     assert "underline" not in label.styleSheet()
+
+
+def test_pending_knob_stays_at_destination(qapp, tmp_path):
+    """전이 중에도 노브는 목적지에 있어야 한다(가운데로 가면 덜 눌린 것처럼 보임).
+
+    노브 위치는 그리기 시점 계산이라 직접 볼 수 없으므로, 그리기에 쓰이는
+    입력(checked)이 pending 여부와 무관하게 유지되는지로 확인한다.
+    """
+    from app.ui.widgets import ToggleSwitch
+    from app.ui.theme import current_palette
+
+    sw = ToggleSwitch(current_palette("light"))
+    sw.setChecked(True)
+    sw.set_pending(True)
+
+    assert sw.isChecked()          # 켜짐 위치 유지
+    assert sw.is_pending()         # 색만 전이 중
+    sw.set_pending(False)
+    assert sw.isChecked()

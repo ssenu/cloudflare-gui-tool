@@ -24,12 +24,10 @@ class ToggleSwitch(QAbstractButton):
 
     - 켜짐: accent 배경 + 오른쪽 흰 노브
     - 꺼짐: border 색 배경 + panel 색 노브(왼쪽)
-    - 전이 중(pending): pending 색 배경 + 가운데 노브
+    - 전이 중(pending): pending 색 배경 (노브 위치는 목적지 그대로)
 
     전이 중 표시를 별도 스피너가 아니라 토글 자체로 하는 이유: 상태를 바꾸는
-    대상과 그 진행을 알리는 곳이 같아야 눈이 한 곳만 보면 된다. 노브를 가운데
-    두는 것은 색과 별개인 신호라, accent와 pending 색이 비슷한 테마(다크)에서도
-    "이동 중"이 분명하게 읽힌다.
+    대상과 그 진행을 알리는 곳이 같아야 눈이 한 곳만 보면 된다.
     """
 
     WIDTH = 44
@@ -110,12 +108,12 @@ class ToggleSwitch(QAbstractButton):
         painter.setPen(pen_color)
         painter.drawRoundedRect(track_rect, radius, radius)
 
+        # 노브는 전이 중에도 목적지(켜짐이면 오른쪽 끝, 꺼짐이면 왼쪽 끝)에
+        # 둔다. 가운데에 세워 두면 "덜 눌린 것"처럼 보인다는 피드백이 있었다.
+        # 전이 중임은 색으로만 알린다.
         knob_d = h - 6
         knob_y = 3
-        if self._pending:
-            knob_x = (w - knob_d) / 2  # 가운데 = 이동 중
-        else:
-            knob_x = w - knob_d - 3 if checked else 3
+        knob_x = w - knob_d - 3 if checked else 3
         knob_color = (QColor(p["on_accent"]) if (checked or self._pending)
                       else QColor(p["panel"]))
         painter.setPen(Qt.PenStyle.NoPen)
