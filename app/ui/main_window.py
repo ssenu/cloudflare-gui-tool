@@ -17,6 +17,7 @@ from app.core.confirm import (group_by_owner, owner_group_label, owner_label,
                               route_display_label)
 from app.core.store import RouteMeta, SshProfile, TunnelMeta, new_route_id
 from app.ui.icons import make_icon
+from app.ui.poller import BackgroundPoller
 from app.ui.theme import STATE_COLORS, build_qss, current_palette, ensure_qss_icons
 from app.ui.widgets import ModalOverlay, ToggleSwitch, danger_menu_action
 from app.ui.winutil import apply_titlebar_theme
@@ -97,6 +98,7 @@ class RouteRow(QWidget):
 
         self.dot = QLabel()
         self.dot.setFixedSize(ROUTE_DOT_SIZE, ROUTE_DOT_SIZE)
+        self._dot_color = ""  # 마지막으로 적용한 색(같으면 다시 칠하지 않는다)
 
         # I4/I5: 이름 열 - 비어 있으면 hostname의 첫 라벨을 muted 색으로 대신 보여준다.
         label_text, is_placeholder = route_display_label(route.label, route.hostname)
@@ -250,8 +252,12 @@ class RouteRow(QWidget):
             dot_color = STATE_COLORS[TunnelState.RUNNING]
         else:
             dot_color = STATE_COLORS[TunnelState.STOPPED]
-        self.dot.setStyleSheet(
-            f"background: {dot_color}; border-radius: {ROUTE_DOT_SIZE // 2}px;")
+        # 성능: setStyleSheet는 스타일 재계산·리페인트를 부른다. 1초마다 같은
+        # 값을 다시 넣으면 그만큼 헛일이라, 바뀔 때만 적용한다.
+        if dot_color != self._dot_color:
+            self._dot_color = dot_color
+            self.dot.setStyleSheet(
+                f"background: {dot_color}; border-radius: {ROUTE_DOT_SIZE // 2}px;")
 
 
 class OwnerGroupHeader(QWidget):
@@ -347,6 +353,7 @@ class TunnelCard(QFrame):
 
         self.dot = QLabel()
         self.dot.setFixedSize(12, 12)
+        self._last_state = None  # 상태가 바뀔 때만 색/문구를 다시 넣는다
         title = QLabel(info.name)
         title.setObjectName("cardTitle")
         self.state_label = QLabel()
@@ -460,9 +467,11 @@ class TunnelCard(QFrame):
     def update_state(self):
         ctx = self.win.ctx
         st = ctx.manager.tunnel_state(self.tunnel_name)
-        self.dot.setStyleSheet(
-            f"background: {STATE_COLORS[st]}; border-radius: 6px;")
-        self.state_label.setText(STATE_LABELS[st])
+        if st != self._last_state:
+            self._last_state = st
+            self.dot.setStyleSheet(
+                f"background: {STATE_COLORS[st]}; border-radius: 6px;")
+            self.state_label.setText(STATE_LABELS[st])
         pending = st == TunnelState.STARTING or ctx.manager.tunnel_pending(self.tunnel_name)
         running = st in (TunnelState.STARTING, TunnelState.RUNNING)
         mismatch_reason = None
@@ -615,6 +624,8 @@ class MainWindow(QWidget):
         # "켤 때 버벅인다"가 된다. 이벤트 루프에 넘겨 창을 먼저 띄운다.
         QTimer.singleShot(0, self.refresh)
 
+        self._poller = BackgroundPoller(self)
+        self._poller.finished.connect(self._on_poll_done)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(POLL_INTERVAL_NORMAL_MS)
@@ -724,6 +735,9 @@ class MainWindow(QWidget):
                 return
 
         profile = self.target_combo.currentData()
+        # 대상을 바꾸면 연결을 닫는다. 워커가 그 연결로 조회하는 중이면
+        # 파일 핸들이 발밑에서 사라지므로, 먼저 끝나기를 기다린다.
+        self._poller.stop()
         self.banner.hide()
         # D3: 대상을 바꾸면 이전 대상 폴링 실패로 켜졌던 백오프 상태가 새
         # 대상에도 그대로 남아(5초 주기 + 배너 억제) 새 대상 상태가 굼뜨게
@@ -1239,14 +1253,21 @@ class MainWindow(QWidget):
         self.refresh(fetch=False)
 
     def _tick(self):
-        # C1: 이 슬롯은 QTimer에서 호출되는데, PyQt6는 슬롯의 미처리 예외에서
-        # 프로세스를 abort시킨다(실증됨). SSH가 끊기면 refresh() 안에서
-        # paramiko가 OSError/EOFError/ConnectionError 등을 던질 수 있으므로
-        # 전체를 감싸 앱이 죽지 않게 하고, 배너로 사용자에게 알린 뒤 폴링
-        # 주기를 늘려(백오프) 계속 실패하는 원격 호출로 UI를 붙잡지 않는다.
-        try:
-            self.ctx.manager.refresh([c.meta for c in self.cards])
-        except Exception:
+        """폴링 시작만 한다. 실제 조회는 워커 스레드에서 돌고 _on_poll_done이 받는다.
+
+        예전에는 여기서 곧바로 manager.refresh()를 불렀는데, SSH 대상에서는
+        한 번에 100~500ms가 걸려 그동안 창 전체가 멈췄다(도커 조회가 겹치는
+        틱이 특히 길었다). 이제 이 슬롯은 즉시 반환한다.
+        """
+        # 이전 폴링이 아직 안 끝났으면 이번 차례는 건너뛴다. 큐에 쌓으면
+        # 연결이 느릴수록 밀린 폴링이 끝없이 이어진다.
+        metas = [c.meta for c in self.cards]
+        self._poller.run(lambda: self.ctx.manager.refresh(metas))
+
+    def _on_poll_done(self, ok: bool, _result, _error: str):
+        # C1: PyQt6는 슬롯의 미처리 예외에서 프로세스를 abort시킨다(실증됨).
+        # 워커가 예외를 문자열로 넘겨주므로 여기서는 예외가 나지 않는다.
+        if not ok:
             self._poll_failures += 1
             # D3: read_record()가 OSError를 그대로 전파하게 되면서, 로컬의
             # PermissionError(상태 파일 접근 실패) 같은 것도 이 except로
@@ -1300,5 +1321,8 @@ class MainWindow(QWidget):
             QMessageBox.information(
                 self, "종료",
                 "터널과 서버는 계속 실행됩니다.\n다시 실행하면 상태를 이어서 표시합니다.")
+        # 워커가 돌고 있는 채로 연결을 닫으면 그 안에서 예외가 난다.
+        self._timer.stop()
+        self._poller.stop()
         self.ctx.set_local()  # SSH 연결 정리 (원격 프로세스는 그대로 유지됨)
         event.accept()

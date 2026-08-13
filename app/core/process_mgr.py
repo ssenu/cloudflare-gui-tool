@@ -20,6 +20,10 @@ POLL_TIMEOUT = 5.0
 # 도커 compose ps 조회 캐시 유효 시간(초). 1초 폴링마다 매번 원격 명령을
 # 왕복시키지 않기 위해 이 시간 동안은 직전 값을 재사용한다.
 DOCKER_POLL_INTERVAL = 5.0
+# 전이가 끝나 상태가 안정된 도커 유닛의 조회 간격. `docker compose ps`는 원격
+# 왕복이 100ms를 넘기도 해서, 바뀔 일이 없는 동안 5초마다 부르면 주기적인
+# 멈칫거림으로 느껴진다. 사용자가 껐다 켜는 동안(pending)에는 위 간격을 쓴다.
+DOCKER_POLL_IDLE_INTERVAL = 20.0
 
 DOCKER_START_DEFAULT = ["docker", "compose", "up", "--build", "-d"]
 DOCKER_STOP_DEFAULT = ["docker", "compose", "down"]
@@ -508,6 +512,11 @@ class ProcessManager:
             has_pid, alive = self._alive[unit]
             if not (has_pid and alive):
                 continue
+            # 성능: 마커를 이미 본 유닛은 더 읽을 이유가 없다(RUNNING 판정은
+            # _marker_seen만 본다). 예전에는 실행 중인 터널마다 매 틱 로그를
+            # 꼬리부터 읽어, SSH 대상에서 이것만으로 70ms 가까이 썼다.
+            if self._marker_seen.get(unit, False):
+                continue
             base = self._log_offset.get(unit, 0)
             new_offset, text = reg.runner.tail_file(reg.log_path(unit), base)
             if RUNNING_MARKER in text:
@@ -517,7 +526,9 @@ class ProcessManager:
         now = time.time()
         for unit, cwd in docker_units:
             last = self._docker_checked_at.get(unit, 0.0)
-            if now - last < DOCKER_POLL_INTERVAL:
+            interval = (DOCKER_POLL_INTERVAL if self._is_pending(unit)
+                        else DOCKER_POLL_IDLE_INTERVAL)
+            if now - last < interval:
                 continue  # 캐시 유효: 직전 self._docker_running 값을 재사용
             try:
                 res = reg.runner.run(["docker", "compose", "ps", "-q"], cwd=cwd,

@@ -67,6 +67,9 @@ class ToggleSwitch(QAbstractButton):
 
         시그널을 내지 않는다 - 상태를 보여주는 것이지 사용자의 조작이 아니다.
         """
+        if (self._display_checked == checked and self._pending == pending
+                and self.isChecked() == checked):
+            return  # 성능: 1초마다 같은 값으로 리페인트를 부르지 않는다
         self.blockSignals(True)
         self.setChecked(checked)
         self.blockSignals(False)

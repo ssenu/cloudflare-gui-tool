@@ -4,6 +4,9 @@ import shlex
 import socket
 import threading
 
+import functools
+import threading
+
 import paramiko
 
 from app.core.runner import CommandRunner, ManagedProcess, OnExit, OnLine, RunResult, decode_tail
@@ -92,8 +95,28 @@ class SshProcess(ManagedProcess):
         self._ch.close()
 
 
+def _synchronized(method):
+    """SshRunner의 공개 메서드를 인스턴스 락으로 감싼다(클래스 주석 참고)."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class SshRunner(CommandRunner):
+    """SSH/SFTP 러너.
+
+    스레드 안전: 상태 폴링은 워커 스레드에서, 사용자 조작(토글·다이얼로그)은
+    GUI 스레드에서 같은 연결을 쓴다. paramiko의 SFTPClient는 동시 호출에
+    안전하지 않으므로 공개 메서드 전체를 하나의 락으로 직렬화한다. 대기 시간은
+    "다른 쪽 호출 하나가 끝날 때까지"로, 폴링 한 번이 짧아 체감되지 않는다.
+    """
+
     def __init__(self, profile: SshProfile, password: str | None = None):
+        # RLock인 이유: 공개 메서드가 다른 공개 메서드를 부르는 경우가 있다
+        # (예: spawn_detached -> ensure_dir). 같은 스레드의 재진입은 막지 않는다.
+        self._lock = threading.RLock()
         self.profile = profile
         self.password = password
         self.name = f"ssh:{profile.name}"
@@ -101,6 +124,7 @@ class SshRunner(CommandRunner):
         self._sftp: paramiko.SFTPClient | None = None
         self._home: str | None = None
 
+    @_synchronized
     def connect(self) -> None:
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -118,6 +142,7 @@ class SshRunner(CommandRunner):
             raise
         self._client = client
 
+    @_synchronized
     def close(self) -> None:
         if self._sftp:
             self._sftp.close()
@@ -126,6 +151,7 @@ class SshRunner(CommandRunner):
         self._client = self._sftp = None
         self._home = None
 
+    @_synchronized
     def is_connected(self) -> bool:
         t = self._client.get_transport() if self._client else None
         return bool(t and t.is_active())
@@ -135,6 +161,7 @@ class SshRunner(CommandRunner):
             raise ConnectionError("SSH 연결이 없습니다. 먼저 연결하세요.")
         return self._client  # type: ignore[return-value]
 
+    @_synchronized
     def run(self, cmd: list[str], timeout: float = 60.0,
            cwd: str | None = None) -> RunResult:
         command_str = quote_cmd(cmd)
@@ -151,6 +178,7 @@ class SshRunner(CommandRunner):
         except socket.timeout:
             raise TimeoutError(f"SSH 명령 시간 초과: {' '.join(cmd)}")
 
+    @_synchronized
     def spawn(self, cmd, cwd=None, on_line=None, on_exit=None) -> ManagedProcess:
         transport = self._require().get_transport()
         ch = transport.open_session()
@@ -161,21 +189,25 @@ class SshRunner(CommandRunner):
         ch.exec_command(full)
         return SshProcess(ch, on_line, on_exit)
 
+    @_synchronized
     def read_file(self, path: str) -> str:
         assert self._sftp
         with self._sftp.open(self._expand(path)) as f:
             return f.read().decode("utf-8")
 
+    @_synchronized
     def write_file(self, path: str, text: str) -> None:
         assert self._sftp
         with self._sftp.open(self._expand(path), "w") as f:
             f.write(text)
 
+    @_synchronized
     def append_file(self, path: str, text: str) -> None:
         assert self._sftp
         with self._sftp.open(self._expand(path), "a") as f:
             f.write(text)
 
+    @_synchronized
     def file_exists(self, path: str) -> bool:
         assert self._sftp
         try:
@@ -184,14 +216,17 @@ class SshRunner(CommandRunner):
         except FileNotFoundError:
             return False
 
+    @_synchronized
     def remove_file(self, path: str) -> None:
         assert self._sftp
         self._sftp.remove(self._expand(path))
 
+    @_synchronized
     def remove_tree(self, path: str) -> None:
         # run()이 이미 리스트 인자를 shlex.quote로 안전하게 조립해준다.
         self.run(["rm", "-rf", self._expand(path)])
 
+    @_synchronized
     def home_dir(self) -> str:
         assert self._sftp
         if self._home is None:
@@ -203,6 +238,7 @@ class SshRunner(CommandRunner):
             return self.home_dir() + path[1:]
         return path
 
+    @_synchronized
     def spawn_detached(self, cmd: list[str], cwd: str | None, log_path: str) -> int:
         line = build_spawn_detached_command(cmd, cwd, log_path)
         res = self.run(["sh", "-c", line])
@@ -212,6 +248,7 @@ class SshRunner(CommandRunner):
             raise RuntimeError(f"원격 프로세스 시작 실패: PID를 읽을 수 없습니다 ({res.stdout!r}, {res.stderr!r})")
         return int(digit_lines[-1])
 
+    @_synchronized
     def pids_alive(self, pids: list[int], timeout: float = 60.0) -> set[int]:
         cmd = build_pids_alive_command(pids)
         if cmd is None:
@@ -219,6 +256,7 @@ class SshRunner(CommandRunner):
         res = self.run(["sh", "-c", cmd], timeout=timeout)
         return {int(ln) for ln in res.stdout.splitlines() if ln.strip()}
 
+    @_synchronized
     def pid_cmdlines(self, pids: list[int]) -> dict[int, str] | None:
         # D1: comm(실행 이미지 이름)이 아니라 args(전체 커맨드라인)를 쓴다.
         # comm은 인터프리터/래퍼로 실행되는 프로세스에서 실제 실행 파일
@@ -251,10 +289,12 @@ class SshRunner(CommandRunner):
             result[pid] = bits[1]
         return result
 
+    @_synchronized
     def kill_pid(self, pid: int) -> None:
         cmd = build_kill_pid_command(pid)
         self.run(["sh", "-c", cmd], timeout=5.0)
 
+    @_synchronized
     def tail_file(self, path: str, offset: int) -> tuple[int, str]:
         assert self._sftp
         remote_path = self._expand(path)
@@ -271,6 +311,7 @@ class SshRunner(CommandRunner):
         text, consumed = decode_tail(data)
         return offset + consumed, text
 
+    @_synchronized
     def file_size(self, path: str) -> int:
         assert self._sftp
         try:
@@ -279,9 +320,11 @@ class SshRunner(CommandRunner):
             return 0
         return attrs.st_size or 0
 
+    @_synchronized
     def ensure_dir(self, path: str) -> None:
         self.run(["mkdir", "-p", self._expand(path)])
 
+    @_synchronized
     def list_dir(self, path: str) -> list[str]:
         assert self._sftp
         try:

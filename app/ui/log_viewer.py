@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QPlainTextEdit,
 
 from app.context import AppContext
 from app.core.runner import CommandRunner
+from app.ui.poller import BackgroundPoller
 from app.ui.theme import current_palette
 from app.ui.winutil import apply_titlebar_theme
 
@@ -17,6 +18,10 @@ ERROR_RE = re.compile(r"\b(ERR|error|failed|Failed)\b")
 
 # 파일이 이보다 크면 처음부터 읽지 않고 마지막 이만큼만 읽어 시작한다.
 TAIL_START_LIMIT = 1024 * 1024
+
+# 로그 갱신 주기. 원격은 한 번 읽는 데 수십 ms가 걸려 촘촘하게 볼 이유가 없다.
+LOCAL_POLL_MS = 250
+REMOTE_POLL_MS = 700
 
 
 class _LogTab(QWidget):
@@ -55,16 +60,13 @@ class _LogTab(QWidget):
         if size > TAIL_START_LIMIT:
             self.offset = size - TAIL_START_LIMIT
 
-    def poll(self):
-        try:
-            self.offset, text = self.runner.tail_file(self.path, self.offset)
-        except Exception as ex:
-            if not self._error_shown:
-                self.view.appendHtml(
-                    f'<span style="color:{self.error_color}">'
-                    f'[로그 읽기 실패] {html.escape(str(ex))}</span>')
-                self._error_shown = True
-            return
+    def read_new(self) -> tuple[int, str]:
+        """새로 늘어난 부분을 읽는다. 워커 스레드에서 호출된다(위젯 접근 금지)."""
+        return self.runner.tail_file(self.path, self.offset)
+
+    def apply_new(self, offset: int, text: str) -> None:
+        """read_new()의 결과를 화면에 반영한다(GUI 스레드)."""
+        self.offset = offset
         self._error_shown = False
         if not text:
             return
@@ -78,6 +80,14 @@ class _LogTab(QWidget):
         if self.follow.isChecked():
             sb = self.view.verticalScrollBar()
             sb.setValue(sb.maximum())
+
+    def show_error(self, message: str) -> None:
+        if self._error_shown:
+            return
+        self.view.appendHtml(
+            f'<span style="color:{self.error_color}">'
+            f'[로그 읽기 실패] {html.escape(message)}</span>')
+        self._error_shown = True
 
     def _clear(self):
         self.view.clear()
@@ -102,16 +112,42 @@ class LogViewer(QDialog):
         lay = QVBoxLayout(self)
         lay.addWidget(tabs)
 
+        self._tab_widget = tabs
+        # 로그 읽기도 원격 왕복이라 GUI 스레드에서 하면 창이 멈칫한다.
+        # 워커로 돌리고, 결과만 여기서 화면에 붙인다.
+        self._poller = BackgroundPoller(self)
+        self._poller.finished.connect(self._on_read_done)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll)
-        self._timer.start(200)
+        # 예전에는 200ms마다 "모든 탭"을 읽어, 탭이 3개인 SSH 대상에서는
+        # 주기보다 읽는 시간이 더 걸렸다(사실상 계속 멈춰 있는 상태).
+        # 지금은 보이는 탭 하나만, 대상에 맞는 주기로 읽는다.
+        self._timer.start(REMOTE_POLL_MS if ctx.is_remote else LOCAL_POLL_MS)
 
         apply_titlebar_theme(self, ctx.store.settings.theme == "dark")
 
+    def _current_tab(self) -> _LogTab | None:
+        widget = self._tab_widget.currentWidget()
+        return widget if isinstance(widget, _LogTab) else None
+
     def _poll(self):
-        for tab in self._tabs:
-            tab.poll()
+        tab = self._current_tab()
+        if tab is None:
+            return
+        self._pending_tab = tab
+        self._poller.run(tab.read_new)
+
+    def _on_read_done(self, ok: bool, result, error: str):
+        tab = getattr(self, "_pending_tab", None)
+        if tab is None:
+            return
+        if ok:
+            offset, text = result
+            tab.apply_new(offset, text)
+        else:
+            tab.show_error(error)
 
     def closeEvent(self, event: QCloseEvent):
         self._timer.stop()
+        self._poller.stop()
         super().closeEvent(event)

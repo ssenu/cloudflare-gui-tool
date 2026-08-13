@@ -44,7 +44,25 @@ def make_window(qapp, tmp_path, runner: FakeRunner | None = None) -> MainWindow:
     return win
 
 
-# ---- C1: _tick() 예외 방어 + 배너 + 백오프 ----
+
+
+def tick(win, timeout: float = 3.0):
+    """폴링을 한 번 돌리고 결과 반영까지 기다린다.
+
+    폴링은 워커 스레드에서 돌고 결과는 시그널로 GUI 스레드에 돌아온다
+    (창이 멈추지 않게 하려는 구조). 테스트는 이벤트 루프를 돌려 그 왕복을
+    끝까지 진행시킨 뒤에 화면 상태를 확인해야 한다.
+    """
+    import time as _time
+    win._tick()
+    deadline = _time.monotonic() + timeout
+    while win._poller.is_busy() and _time.monotonic() < deadline:
+        QApplication.processEvents()
+        _time.sleep(0.005)
+    QApplication.processEvents()
+
+
+# ---- C1: 폴링 예외 방어 + 배너 + 백오프 ----
 
 def test_tick_exception_shows_banner_and_backs_off_without_crashing(qapp, tmp_path):
     # D3: 로컬 대상은 "연결"이 애초에 없으므로 원격용 연결 문구가 아니라
@@ -58,7 +76,7 @@ def test_tick_exception_shows_banner_and_backs_off_without_crashing(qapp, tmp_pa
 
     win.ctx.manager.refresh = boom
 
-    win._tick()  # 예외가 슬롯 밖으로 새어나가면 안 된다 (PyQt6 abort 방지)
+    tick(win)  # 예외가 워커에서 나도 앱이 죽으면 안 된다 (PyQt6 abort 방지)
 
     assert not win.banner.isHidden()
     assert "상태 파일을 읽지 못했습니다" in win.banner.text()
@@ -73,7 +91,7 @@ def test_tick_exception_on_remote_shows_connection_banner(qapp, tmp_path):
 
     win.ctx.manager.refresh = lambda _t: (_ for _ in ()).throw(ConnectionError("no route"))
 
-    win._tick()
+    tick(win)
 
     assert not win.banner.isHidden()
     assert "연결이 끊겼" in win.banner.text()
@@ -88,7 +106,7 @@ def test_tick_repeated_failures_add_hint_after_threshold(qapp, tmp_path):
     win.ctx.manager.refresh = lambda _t: (_ for _ in ()).throw(OSError("no route"))
 
     for _ in range(4):
-        win._tick()
+        tick(win)
 
     assert "로컬로 전환" in win.banner.text()
 
@@ -98,7 +116,7 @@ def test_tick_repeated_failures_on_local_have_no_reconnect_hint(qapp, tmp_path):
     win.ctx.manager.refresh = lambda _t: (_ for _ in ()).throw(OSError("no route"))
 
     for _ in range(4):
-        win._tick()
+        tick(win)
 
     assert "상태 파일을 읽지 못했습니다" in win.banner.text()
     assert "로컬로 전환" not in win.banner.text()
@@ -113,12 +131,12 @@ def test_tick_recovers_and_returns_to_normal_interval(qapp, tmp_path):
             raise EOFError("연결 끊김")
 
     win.ctx.manager.refresh = maybe_boom
-    win._tick()
+    tick(win)
     assert win._timer.interval() == 5000
     assert not win.banner.isHidden()
 
     fail["on"] = False
-    win._tick()
+    tick(win)
 
     assert win._timer.interval() == 1000
     assert win.banner.isHidden()
@@ -326,8 +344,8 @@ def test_card_shows_cannot_run_and_disables_toggle_without_credentials(qapp, tmp
     assert not card.tunnel_switch.isEnabled()
     assert "자격증명" in card.tunnel_switch.toolTip()
 
-    # _tick()으로 update_state()가 다시 돌아도 비활성 상태가 유지되어야 한다
-    win._tick()
+    # 폴링으로 update_state()가 다시 돌아도 비활성 상태가 유지되어야 한다
+    tick(win)
     assert not card.tunnel_switch.isEnabled()
 
 
@@ -424,6 +442,8 @@ def test_credentials_check_is_one_listing_per_refresh_not_per_tunnel(qapp, tmp_p
         runner.files[f"/home/fake/.cloudflared/{tid}.json"] = "{}"
 
     win = make_window(qapp, tmp_path, runner)
+    # 생성자가 이벤트 루프로 미뤄 둔 첫 조회를 먼저 흘려보낸 뒤에 센다.
+    QApplication.processEvents()
     listings["n"] = 0
     win.refresh()
 
@@ -432,7 +452,7 @@ def test_credentials_check_is_one_listing_per_refresh_not_per_tunnel(qapp, tmp_p
     assert all(c.has_credentials for c in win.cards)
 
     for _ in range(5):
-        win._tick()
+        tick(win)
 
     # _tick()(1초 폴링)에서는 자격증명을 다시 조회하지 않아야 한다
     assert listings["n"] == 1
@@ -966,8 +986,106 @@ def test_real_manager_click_moves_knob_once(qapp, tmp_path):
     switch.click()  # 실제 start_service가 돈다
     positions.append(switch._display_checked)
     for _ in range(3):   # 폴링을 여러 번 돌려도
-        win._tick()
+        tick(win)
         positions.append(switch._display_checked)
 
     # 클릭 직후부터 계속 켜짐 자리 - 갔다가 돌아오는 구간이 없어야 한다
     assert positions == [True, True, True, True], positions
+
+
+# ---- 성능: 폴링이 GUI 스레드를 붙잡지 않아야 한다 ----
+
+def test_tick_returns_immediately_even_when_poll_is_slow(qapp, tmp_path):
+    """느린 대상이어도 _tick()은 즉시 반환해야 한다(창이 멈추지 않도록)."""
+    import time as _time
+
+    win = make_window(qapp, tmp_path)
+
+    def slow_refresh(_metas):
+        _time.sleep(0.4)  # SSH 왕복을 흉내낸다
+
+    win.ctx.manager.refresh = slow_refresh
+
+    t0 = _time.perf_counter()
+    win._tick()
+    elapsed = _time.perf_counter() - t0
+
+    assert elapsed < 0.1, f"_tick()이 {elapsed:.2f}s 동안 GUI를 붙잡았다"
+    assert win._poller.is_busy()
+
+    # 워커가 끝날 때까지 기다렸다가 정리
+    deadline = _time.monotonic() + 3
+    while win._poller.is_busy() and _time.monotonic() < deadline:
+        QApplication.processEvents()
+        _time.sleep(0.005)
+    assert not win._poller.is_busy()
+
+
+def test_overlapping_ticks_do_not_pile_up(qapp, tmp_path):
+    """이전 폴링이 안 끝났으면 새 폴링을 시작하지 않아야 한다."""
+    import time as _time
+
+    win = make_window(qapp, tmp_path)
+    calls = {"n": 0}
+
+    def slow_refresh(_metas):
+        calls["n"] += 1
+        _time.sleep(0.3)
+
+    win.ctx.manager.refresh = slow_refresh
+
+    for _ in range(5):     # 1초에 다섯 번 부른 셈
+        win._tick()
+
+    deadline = _time.monotonic() + 3
+    while win._poller.is_busy() and _time.monotonic() < deadline:
+        QApplication.processEvents()
+        _time.sleep(0.005)
+
+    assert calls["n"] == 1  # 겹친 호출은 버린다
+
+
+def test_dot_style_is_not_rewritten_when_state_is_unchanged(qapp, tmp_path):
+    """같은 상태로 매 초 setStyleSheet를 다시 부르면 헛된 리페인트가 쌓인다."""
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    win = make_window(qapp, tmp_path, runner)
+    card = win.cards[0]
+
+    applied = []
+    card.dot.setStyleSheet = lambda css: applied.append(css)
+
+    for _ in range(5):
+        card.update_state()
+
+    assert applied == []  # 상태가 그대로면 한 번도 다시 칠하지 않는다
+
+
+def test_toggle_sync_skips_repaint_when_nothing_changed(qapp):
+    from app.ui.theme import current_palette
+    from app.ui.widgets import ToggleSwitch
+
+    sw = ToggleSwitch(current_palette("light"))
+    repaints = []
+    sw.update = lambda: repaints.append(1)
+
+    sw.sync(False, False)   # 이미 그 상태
+    assert repaints == []
+
+    sw.sync(True, False)    # 실제로 바뀔 때만 다시 그린다
+    assert len(repaints) == 1
+
+
+def test_target_switch_waits_for_in_flight_poll(qapp, tmp_path):
+    """대상 전환은 연결을 닫으므로, 워커가 그 연결을 쓰는 중이면 안 된다."""
+    import time as _time
+
+    win = make_window(qapp, tmp_path)
+    win.ctx.manager.refresh = lambda _m: _time.sleep(0.2)
+    win._tick()
+    assert win._poller.is_busy()
+
+    win._switch_target()  # 로컬 -> 로컬이지만 정리 경로는 같다
+
+    assert not win._poller.is_busy()
