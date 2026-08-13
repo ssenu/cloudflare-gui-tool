@@ -452,9 +452,11 @@ class ProcessManager:
 
         pid_units = tunnel_units + command_units
         # C3: PID뿐 아니라 기록된 cmd 토큰까지 함께 읽는다 (재사용 검증용).
-        records = {u: reg.read_record(u) for u in pid_units}
-        pids = [rec[0] for rec in records.values() if rec is not None]
-        alive_pids = reg.runner.pids_alive(pids, timeout=POLL_TIMEOUT)  # 호출 1회
+        # 읽기와 생존 확인을 한 번의 원격 호출로 묶는다 - 따로 하면 유닛마다,
+        # 그리고 단계마다 왕복이 생겨 느린 링크에서 폴링 비용의 대부분이 된다.
+        records, alive_units = reg.read_records_alive(pid_units)
+        alive_pids = {rec[0] for unit, rec in records.items()
+                      if rec is not None and unit in alive_units}
 
         # PID는 유닛이 재시작되기 전까지 바뀌지 않으므로, 이미 명령 대조에
         # 성공(캐시됨)한 PID는 다시 조회하지 않는다 - 매 tick tasklist/ps를
@@ -479,7 +481,7 @@ class ProcessManager:
                 self._mismatch_reason.pop(unit, None)
                 continue
             pid, cmd_token = rec
-            alive = pid in alive_pids
+            alive = unit in alive_units
             if alive and cmd_token and self._cmd_verified_pid.get(unit) != pid:
                 if lookup_failed:
                     # 조회 실패(모름): 대조를 건너뛰고 카운터를 리셋한다.

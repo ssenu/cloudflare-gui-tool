@@ -48,6 +48,43 @@ class CommandRunner(ABC):
     @abstractmethod
     def read_file(self, path: str) -> str: ...
 
+    def read_files(self, paths: list[str]) -> dict[str, str | None]:
+        """여러 파일을 한 번에 읽는다. 없는 파일은 None.
+
+        기본 구현은 하나씩 읽는다(로컬은 그래도 충분히 빠르다). 원격 러너는
+        왕복 한 번으로 끝내도록 재정의한다 - 상태 폴링이 매초 유닛 수만큼
+        SFTP 왕복을 만들던 것을 없애기 위해서다.
+        """
+        out: dict[str, str | None] = {}
+        for path in paths:
+            try:
+                out[path] = self.read_file(path)
+            except FileNotFoundError:
+                out[path] = None
+        return out
+
+    def read_pid_files(self, paths: list[str]) -> dict[str, tuple[str | None, bool]]:
+        """PID 파일들을 읽고 그 PID가 살아있는지까지 한 번에 확인한다.
+
+        반환: 경로 -> (파일 내용 또는 None, 살아있음 여부).
+
+        왜 한 메서드인가: 상태 폴링은 "PID 파일을 읽고 -> 그 PID가 사는지
+        본다"가 항상 붙어 다닌다. 따로 부르면 원격에서 왕복이 두 번 되는데,
+        링크가 느리면 그 자체가 폴링 비용의 대부분이다(실측 각 ~67ms).
+        기본 구현은 두 단계를 그대로 수행하고, 원격 러너가 한 번으로 합친다.
+        """
+        contents = self.read_files(paths)
+        pids: dict[str, int] = {}
+        for path, text in contents.items():
+            if not text:
+                continue
+            first = text.splitlines()[0].strip() if text.splitlines() else ""
+            if first.isdigit():
+                pids[path] = int(first)
+        alive = self.pids_alive(list(pids.values())) if pids else set()
+        return {path: (contents.get(path), pids.get(path) in alive)
+                for path in paths}
+
     @abstractmethod
     def write_file(self, path: str, text: str) -> None: ...
 

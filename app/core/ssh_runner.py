@@ -197,6 +197,70 @@ class SshRunner(CommandRunner):
             return f.read().decode("utf-8")
 
     @_synchronized
+    def read_files(self, paths: list[str]) -> dict[str, str | None]:
+        """여러 파일을 셸 한 번으로 읽는다(왕복 N -> 1).
+
+        구분자를 앞에 찍고 cat 하는 방식이다. PID 파일은 우리가 쓰는 3줄짜리
+        파일이라 구분자가 내용에 섞일 일이 없지만, 혹시 모를 충돌을 피하려고
+        일반 텍스트에 나오지 않는 문자열을 쓴다. 파일이 없으면 값은 None.
+        """
+        if not paths:
+            return {}
+        marker = "CFT"
+        parts = []
+        for path in paths:
+            quoted = shlex.quote(self._expand(path))
+            head = shlex.quote(marker + path + chr(1))
+            # 파일이 있을 때만 구분자를 찍는다 - 없는 파일과 빈 파일을
+            # 구분해야 호출측 계약("없으면 None")이 지켜진다.
+            parts.append(f"if [ -f {quoted} ]; then printf '%s' {head}; "
+                         f"cat {quoted} 2>/dev/null; fi")
+        res = self.run(["sh", "-c", "; ".join(parts)], timeout=30.0)
+        out: dict[str, str | None] = {p: None for p in paths}
+        if res.exit_code != 0 and not res.stdout:
+            return out
+        for chunk in res.stdout.split("CFT"):
+            if not chunk:
+                continue
+            path, _, content = chunk.partition("")
+            if path in out:
+                out[path] = content
+        return out
+
+    @_synchronized
+    def read_pid_files(self, paths: list[str]) -> dict[str, tuple[str | None, bool]]:
+        """PID 파일 읽기와 생존 확인을 셸 한 번으로 끝낸다(왕복 2 -> 1).
+
+        유닛마다 `[구분자]경로[구분자]alive|dead[구분자]내용`을 찍는다.
+        파일이 없으면 아무것도 찍지 않아 호출측에서 None으로 남는다.
+        """
+        if not paths:
+            return {}
+        sep = chr(1)
+        parts = []
+        for path in paths:
+            quoted = shlex.quote(self._expand(path))
+            head = shlex.quote(sep + path + sep)
+            parts.append(
+                f"if [ -f {quoted} ]; then "
+                f"pid=$(head -n1 {quoted} 2>/dev/null); "
+                f"st=dead; kill -0 \"$pid\" 2>/dev/null && st=alive; "
+                f"printf '%s%s%s' {head} \"$st\" {shlex.quote(sep)}; "
+                f"cat {quoted} 2>/dev/null; fi")
+        res = self.run(["sh", "-c", "; ".join(parts)], timeout=30.0)
+        out: dict[str, tuple[str | None, bool]] = {p: (None, False) for p in paths}
+        # 형식: sep + 경로 + sep + 상태 + sep + 내용  (유닛마다 반복)
+        pieces = res.stdout.split(sep)
+        i = 1
+        while i + 2 <= len(pieces):
+            path, state = pieces[i], pieces[i + 1]
+            content = pieces[i + 2] if i + 2 < len(pieces) else ""
+            if path in out:
+                out[path] = (content, state == "alive")
+            i += 3
+        return out
+
+    @_synchronized
     def write_file(self, path: str, text: str) -> None:
         assert self._sftp
         with self._sftp.open(self._expand(path), "w") as f:

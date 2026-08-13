@@ -72,6 +72,36 @@ class RunRegistry:
         record = self.read_record(unit)
         return record[0] if record else None
 
+    def read_records_alive(self, units: list[str]) -> tuple[
+            dict[str, tuple[int, str | None] | None], set[str]]:
+        """여러 유닛의 PID 기록과 생존 여부를 한 번에 읽는다.
+
+        반환: ({유닛: (pid, cmd) 또는 None}, 살아있는 유닛 집합)
+        """
+        if not units:
+            return {}, set()
+        paths = [self.pid_path(u) for u in units]
+        probed = self.runner.read_pid_files(paths)
+        records: dict[str, tuple[int, str | None] | None] = {}
+        alive: set[str] = set()
+        for unit, path in zip(units, paths):
+            content, is_alive = probed.get(path, (None, False))
+            records[unit] = self._parse_record(content, path)
+            if is_alive and records[unit] is not None:
+                alive.add(unit)
+        return records, alive
+
+    def read_records(self, units: list[str]) -> dict[str, tuple[int, str | None] | None]:
+        """여러 유닛의 PID 기록을 한 번에 읽는다(원격 왕복 N -> 1)."""
+        if not units:
+            return {}
+        contents = self.runner.read_files([self.pid_path(u) for u in units])
+        out: dict[str, tuple[int, str | None] | None] = {}
+        for unit in units:
+            out[unit] = self._parse_record(contents.get(self.pid_path(unit)),
+                                           self.pid_path(unit))
+        return out
+
     def read_record(self, unit: str) -> tuple[int, str | None] | None:
         """PID 파일을 (pid, cmd 토큰) 형태로 읽는다. cmd가 없으면 None.
 
@@ -90,6 +120,13 @@ class RunRegistry:
             return None
         # socket.timeout 등 다른 OSError는 여기서 삼키지 않고 그대로
         # 올려보낸다 - _tick()이 연결 오류 배너를 띄우고 백오프하도록.
+        return self._parse_record(content, path)
+
+    @staticmethod
+    def _parse_record(content: str | None, path: str) -> tuple[int, str | None] | None:
+        """PID 파일 내용을 (pid, cmd 토큰)으로 해석한다. 무효하면 None."""
+        if not content:
+            return None
         lines = content.splitlines()
         if not lines:
             return None

@@ -703,3 +703,55 @@ def test_service_pending_command_kind_clears_on_match():
     mgr.refresh([meta("t1", [route])])
 
     assert mgr.service_pending("t1", route) is False
+
+
+# ---- 성능: 폴링 한 번의 원격 호출 수 ----
+
+def test_refresh_uses_one_remote_call_for_pid_and_liveness():
+    """PID 읽기와 생존 확인이 따로 나가면 느린 링크에서 왕복이 두 배가 된다."""
+    from app.core.process_mgr import ProcessManager
+    from app.core.run_registry import RunRegistry
+    from app.core.store import RouteMeta, ServiceSpec, TunnelMeta, new_route_id
+
+    class CountingRunner(FakeRunner):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.pid_probe_calls = 0
+
+        def read_pid_files(self, paths):
+            self.pid_probe_calls += 1
+            return super().read_pid_files(paths)
+
+    runner = CountingRunner(home="/home/pi")
+    reg = RunRegistry(runner)
+    mgr = ProcessManager(lambda: RunRegistry(runner))
+
+    routes = [RouteMeta(id=new_route_id(), hostname=f"a{i}.example.com",
+                        service="http://localhost:8000",
+                        server=ServiceSpec(kind="command", start_cmd="run"))
+              for i in range(3)]
+    meta = TunnelMeta(name="t1", routes=routes)
+    for unit in [reg.unit_tunnel("t1")] + [reg.unit_service("t1", r.id) for r in routes]:
+        reg.write_pid(unit, 1000, cmd="run")
+
+    mgr.refresh([meta])
+
+    # 유닛이 4개여도 조회는 한 번
+    assert runner.pid_probe_calls == 1
+
+
+def test_read_records_alive_marks_only_live_units():
+    from app.core.run_registry import RunRegistry
+
+    runner = FakeRunner(home="/home/pi")
+    reg = RunRegistry(runner)
+    reg.write_pid("a", 111, cmd="x")
+    reg.write_pid("b", 222, cmd="x")
+    runner.live_pids = {111}
+
+    records, alive = reg.read_records_alive(["a", "b", "없는유닛"])
+
+    assert records["a"] == (111, "x")
+    assert records["b"] == (222, "x")
+    assert records["없는유닛"] is None
+    assert alive == {"a"}

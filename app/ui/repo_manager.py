@@ -44,6 +44,12 @@ STATE_DOT_COLORS = {
     STATE_NONE: "#888888",
 }
 
+# 폴링 주기: 진행 중인 작업이 있을 때만 촘촘히 본다. 클론이 끝난 프로젝트는
+# 상태가 캐시에서 즉시 나오지만, 실패/미클론 상태는 매번 원격을 두 번씩
+# 조회하므로 가만히 있을 때까지 1초마다 두드릴 이유가 없다.
+POLL_BUSY_MS = 1000
+POLL_IDLE_MS = 4000
+
 DOT_SIZE = 10
 EMPTY_TEXT = ("아직 클론한 프로젝트가 없습니다.\n"
               "'클론 추가'로 Git 주소를 넣어 대상 머신에 내려받으세요.")
@@ -185,12 +191,14 @@ class RepoManagerDialog(QDialog):
 
         apply_titlebar_theme(self, ctx.store.settings.theme == "dark")
 
-        self._reload()
-
+        # 타이머를 먼저 만든다 - _reload()가 _tick()을 부르고, _tick()이
+        # 주기를 조절하면서 타이머를 참조한다.
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(1000)
+        self._timer.start(POLL_BUSY_MS)
         self.finished.connect(lambda _r: self._timer.stop())
+
+        self._reload()
 
     # ---- 데이터 ----
     def _repos(self) -> list[RepoMeta]:
@@ -213,6 +221,7 @@ class RepoManagerDialog(QDialog):
         self._tick()
 
     def _tick(self):
+        busy = False
         for card in self.cards:
             # I2: clone_state()는 ready로 확정된 유닛을 캐시에서 즉시 반환하므로
             # 안정된 항목의 폴링 비용은 사실상 0이다.
@@ -220,12 +229,19 @@ class RepoManagerDialog(QDialog):
             if state != STATE_CLONING:
                 self._pulling.discard(card.repo.id)
                 self._deploying.discard(card.repo.id)
-            busy = ""
+            busy_label = ""
             if card.repo.id in self._deploying:
-                busy = DEPLOYING_LABEL
+                busy_label = DEPLOYING_LABEL
             elif card.repo.id in self._pulling:
-                busy = PULLING_LABEL
-            card.update_state(state, self._cached_commit(card.repo), busy)
+                busy_label = PULLING_LABEL
+            if state == STATE_CLONING:
+                busy = True
+            card.update_state(state, self._cached_commit(card.repo), busy_label)
+
+        # 진행 중인 작업이 없으면 느슨하게 본다(원격 왕복 절약).
+        want = POLL_BUSY_MS if busy else POLL_IDLE_MS
+        if self._timer.interval() != want:
+            self._timer.setInterval(want)
 
     # ---- 프로젝트별 메뉴 ----
     def _open_menu(self, anchor: QPushButton, repo: RepoMeta):
