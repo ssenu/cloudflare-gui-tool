@@ -323,7 +323,7 @@ def test_groups_split_by_owner_and_unknown_goes_last(qapp, tmp_path):
 
     # 이 PC → 등록된 SSH 프로필 순 → 소유 기기를 모르는 것은 항상 마지막
     assert [h.label_text for h in win.group_headers] == ["이 PC", "webPi", "기기 미확인"]
-    # cards 순서도 화면 순서와 같아야 한다 (Ctrl+1~9 단축키가 이 순서를 쓴다)
+    # cards 순서도 화면에 보이는 순서와 같아야 한다
     assert [c.tunnel_name for c in win.cards] == ["t-pc", "t-pi", "t-unknown"]
 
 
@@ -487,56 +487,33 @@ def test_repos_button_enabled_on_remote_target(qapp, tmp_path):
     assert win.repos_btn.toolTip() == ""
 
 
-# ---- I3: 단축키가 비활성화된(자격증명 없는) 토글을 우회하면 안 된다 ----
+# ---- 프로젝트(Git 클론) 버튼은 SSH 대상에서만 활성화 ----
 
-def test_shortcut_tunnel_ignores_disabled_toggle(qapp, tmp_path):
-    runner = FakeRunner(home="/home/fake")
-    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
-        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
-    # 자격증명 없음 -> 토글 비활성화
+def test_repos_button_disabled_on_local_target(qapp, tmp_path):
+    win = make_window(qapp, tmp_path)
+    assert not win.ctx.is_remote
 
-    win = make_window(qapp, tmp_path, runner)
-    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1")
+    assert not win.repos_btn.isEnabled()
+    assert "원격" in win.repos_btn.toolTip()
+
+    # 비활성 버튼을 우회해 호출해도 다이얼로그가 열리면 안 된다
+    opened = []
+    win._open_modal = lambda dlg: opened.append(dlg)
+    win._open_repos()
+    assert opened == []
+
+
+def test_repos_button_enabled_on_remote_target(qapp, tmp_path):
+    win = make_window(qapp, tmp_path)
+    remote = FakeRunner(home="/home/remote")
+    remote.name = "ssh:webPi"
+    remote.run_results[LIST_TUNNELS_CMD] = RunResult(0, "[]", "")
+    win.ctx.runner = remote
+    assert win.ctx.is_remote
     win.refresh()
 
-    card = win.cards[0]
-    assert not card.tunnel_switch.isEnabled()
-
-    calls = []
-    win.ctx.manager.start_tunnel = lambda *a, **k: calls.append(a)
-
-    win._shortcut_tunnel(0)  # Ctrl+1에 해당
-
-    assert calls == []  # 비활성 토글이므로 아무 것도 호출되지 않아야 한다
-    assert not card.tunnel_switch.isChecked()
-
-
-def test_shortcut_server_ignores_disabled_toggle(qapp, tmp_path):
-    from app.core.store import RouteMeta, ServiceSpec
-
-    runner = FakeRunner(home="/home/fake")
-    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
-        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
-    runner.files["/home/fake/.cloudflared/tid1.json"] = "{}"  # 터널 자체는 실행 가능
-
-    route = RouteMeta(id=new_route_id(), hostname="a.example.com",
-                      service="http://localhost:8000",
-                      server=ServiceSpec(kind="command", start_cmd="myserver"))
-    win = make_window(qapp, tmp_path, runner)
-    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1", routes=[route])
-    win.refresh()
-
-    card = win.cards[0]
-    switch = card.route_rows[0].server_switch
-    switch.setEnabled(False)  # 서버 토글이 비활성화된 상황을 흉내낸다
-
-    calls = []
-    win.ctx.manager.start_service = lambda *a, **k: calls.append(a)
-
-    win._shortcut_server(0)  # Ctrl+Shift+1에 해당
-
-    assert calls == []
-    assert not switch.isChecked()
+    assert win.repos_btn.isEnabled()
+    assert win.repos_btn.toolTip() == ""
 
 
 # ---- 라우트 없는 터널 표시 (터널만 먼저 만드는 경로) ----
@@ -1331,14 +1308,3 @@ def test_absurd_geometry_falls_back_to_default(qapp, tmp_path):
     win._timer.stop()
 
     assert (win.width(), win.height()) == MainWindow.DEFAULT_SIZE
-
-
-def test_cards_show_shortcut_numbers(qapp, tmp_path):
-    runner = FakeRunner(home="/home/fake")
-    runner.run_results[LIST_TUNNELS_CMD] = RunResult(0, """[
-        {"id":"a","name":"t1","created_at":"","connections":[]},
-        {"id":"b","name":"t2","created_at":"","connections":[]}]""", "")
-    win = make_window(qapp, tmp_path, runner)
-
-    assert [c.index_label.text() for c in win.cards] == ["1", "2"]
-    assert "Ctrl+1" in win.cards[0].index_label.toolTip()

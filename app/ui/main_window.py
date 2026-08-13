@@ -365,14 +365,6 @@ class TunnelCard(QFrame):
         palette = current_palette(win.ctx.store.settings.theme)
         icon_color = palette["text"]
 
-        # Ctrl+N 단축키가 몇 번인지 카드에 보여준다. 번호가 없으면 단축키를
-        # 알아도 어느 카드가 1번인지 알 수 없어 사실상 못 쓴다.
-        self.index_label = QLabel()
-        self.index_label.setFixedWidth(14)
-        self.index_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.index_label.setStyleSheet(
-            f"color: {palette['muted']}; font-size: 11px;")
-
         self.dot = QLabel()
         self.dot.setFixedSize(12, 12)
         self._last_state = None  # 상태가 바뀔 때만 색/문구를 다시 넣는다
@@ -442,7 +434,6 @@ class TunnelCard(QFrame):
         menu_btn.clicked.connect(lambda: self._menu(menu_btn))
 
         header = QHBoxLayout()
-        header.addWidget(self.index_label)
         header.addWidget(self.dot)
         header.addWidget(title)
         header.addWidget(self.state_label)
@@ -537,16 +528,6 @@ class TunnelCard(QFrame):
             QMessageBox.critical(self, "오류", str(ex))
         self.win.info_banner.hide()
         self.update_state()
-
-    def set_shortcut_index(self, index: int) -> None:
-        """1~9번이면 번호를 보여준다(그 밖에는 단축키가 없으므로 비운다)."""
-        if 1 <= index <= 9:
-            self.index_label.setText(str(index))
-            self.index_label.setToolTip(
-                f"Ctrl+{index} 터널 켜기/끄기, Ctrl+Shift+{index} 첫 서버")
-        else:
-            self.index_label.setText("")
-            self.index_label.setToolTip("")
 
     def set_restart_needed(self, needed: bool) -> None:
         """라우트가 바뀌어 재시작해야 하는 상태인지 표시한다."""
@@ -756,14 +737,10 @@ class MainWindow(QWidget):
         self._timer.timeout.connect(self._tick)
         self._timer.start(POLL_INTERVAL_NORMAL_MS)
 
-        # 단축키 등록
+        # 단축키: 새로고침만 둔다. Ctrl+숫자는 카드 순서에 의존해서 어느 것이
+        # 몇 번인지 늘 헷갈렸고, 실수로 눌렀을 때 엉뚱한 터널이 꺼질 수 있었다.
         from PyQt6.QtGui import QKeySequence, QShortcut
         QShortcut(QKeySequence("F5"), self).activated.connect(self.refresh)
-        for i in range(1, 10):
-            sc = QShortcut(QKeySequence(f"Ctrl+{i}"), self)
-            sc.activated.connect(lambda n=i - 1: self._shortcut_tunnel(n))
-            sc2 = QShortcut(QKeySequence(f"Ctrl+Shift+{i}"), self)
-            sc2.activated.connect(lambda n=i - 1: self._shortcut_server(n))
 
     # ---- 창 크기/위치 기억 ----
     DEFAULT_SIZE = (820, 620)
@@ -1104,7 +1081,7 @@ class MainWindow(QWidget):
         self.group_headers.clear()
 
         # 기기(카테고리)별로 묶어 머리글 아래에 카드를 배치한다. cards는
-        # 화면에 보이는 순서와 같게 유지한다 - Ctrl+1~9 단축키가 이 순서를 쓴다.
+        # 화면에 보이는 순서와 같게 유지한다.
         palette = current_palette(self.ctx.store.settings.theme)
         current_key = self.ctx.runner.name
         pairs = [(owner_key, (info, meta, has_creds))
@@ -1119,7 +1096,6 @@ class MainWindow(QWidget):
             for info, meta, has_creds in group:
                 card = TunnelCard(self, info, meta, has_creds, owner_key)
                 card.set_restart_needed(info.name in self._restart_needed)
-                card.set_shortcut_index(len(self.cards) + 1)
                 self.list_lay.insertWidget(self.list_lay.count() - 1, card)
                 self.cards.append(card)
 
@@ -1652,23 +1628,6 @@ class MainWindow(QWidget):
 
         for c in self.cards:
             c.update_state()
-
-    # ---- 단축키 ----
-    def _shortcut_tunnel(self, idx: int):
-        # I3: QAbstractButton.toggle()은 isEnabled()를 보지 않으므로, 자격증명이
-        # 없어 setEnabled(False)된 토글까지 단축키로 우회해 켜지는 것을 막는다.
-        if idx < len(self.cards):
-            switch = self.cards[idx].tunnel_switch
-            if switch.isEnabled():
-                switch.toggle()
-
-    def _shortcut_server(self, idx: int):
-        if idx < len(self.cards):
-            card = self.cards[idx]
-            if card.route_rows and card.route_rows[0].server_switch is not None:
-                switch = card.route_rows[0].server_switch
-                if switch.isEnabled():
-                    switch.toggle()
 
     # ---- 종료 정리 ----
     def closeEvent(self, event):
