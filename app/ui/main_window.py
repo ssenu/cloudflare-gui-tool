@@ -741,7 +741,14 @@ class MainWindow(QWidget):
         # 첫 조회(cloudflared tunnel list)는 네트워크 왕복이라 수백 ms~수 초가
         # 걸린다. 생성자 안에서 부르면 창이 그려지기도 전에 그 시간만큼 멈춰
         # "켤 때 버벅인다"가 된다. 이벤트 루프에 넘겨 창을 먼저 띄운다.
-        QTimer.singleShot(0, self.refresh)
+        #
+        # QTimer.singleShot(0, self.refresh) 대신 창에 붙인 타이머를 쓴다.
+        # 정적 singleShot은 창이 그 사이에 사라져도 예약이 남아, 이미 파괴된
+        # 객체의 메서드를 호출하며 프로세스가 죽는다(테스트에서 실측).
+        self._first_load = QTimer(self)
+        self._first_load.setSingleShot(True)
+        self._first_load.timeout.connect(self.refresh)
+        self._first_load.start(0)
 
         self._poller = BackgroundPoller(self)
         self._poller.finished.connect(self._on_poll_done)
