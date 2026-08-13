@@ -833,3 +833,70 @@ def test_pending_knob_stays_at_destination(qapp, tmp_path):
     assert sw.is_pending()         # 색만 전이 중
     sw.set_pending(False)
     assert sw.isChecked()
+
+
+def test_click_does_not_move_knob_until_state_catches_up(qapp, tmp_path):
+    """누른 즉시 노브가 건너갔다가 도로 돌아오는 튕김이 없어야 한다.
+
+    도커처럼 시작에 시간이 걸리는 서비스가 이 상황이다: 클릭 직후에는 아직
+    실행 중이 아니므로, 노브는 꺼짐 자리에 있고 색만 pending이어야 한다.
+    """
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    route = RouteMeta(id=new_route_id(), hostname="a.example.com",
+                      service="http://localhost:8000",
+                      server=ServiceSpec(kind="command", start_cmd="myserver"))
+
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
+        name="t1", routes=[route])
+    win.refresh()
+    row = win.cards[0].route_rows[0]
+
+    # 시작은 걸었지만 아직 안 올라온 상태를 흉내낸다
+    started = []
+    win.ctx.manager.start_service = lambda t, r: started.append(r.id)
+    win.ctx.manager.service_running = lambda t, r: False
+    win.ctx.manager.service_pending = lambda t, r: True
+
+    row.server_switch.click()  # 사용자가 실제로 누른 것과 같은 경로
+
+    assert started == [route.id]                       # 요청은 나갔고
+    assert row.server_switch.is_pending()              # 색은 전이 중
+    assert row.server_switch._display_checked is False  # 노브는 아직 꺼짐 자리
+
+    # 실제로 올라오면 그때 노브가 건너간다
+    win.ctx.manager.service_running = lambda t, r: True
+    win.ctx.manager.service_pending = lambda t, r: False
+    row.update_state()
+
+    assert row.server_switch._display_checked is True
+    assert not row.server_switch.is_pending()
+
+
+def test_failed_start_leaves_knob_off(qapp, tmp_path, monkeypatch):
+    """시작이 실패하면 노브가 꺼짐 자리에 그대로 있어야 한다."""
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    route = RouteMeta(id=new_route_id(), hostname="a.example.com",
+                      service="http://localhost:8000",
+                      server=ServiceSpec(kind="command", start_cmd="myserver"))
+
+    win = make_window(qapp, tmp_path, runner)
+    win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
+        name="t1", routes=[route])
+    win.refresh()
+    row = win.cards[0].route_rows[0]
+
+    def boom(_t, _r):
+        raise OSError("실행 실패")
+
+    win.ctx.manager.start_service = boom
+    monkeypatch.setattr("app.ui.main_window.QMessageBox.critical",
+                        staticmethod(lambda *a, **k: None))
+
+    row.server_switch.click()
+
+    assert row.server_switch._display_checked is False

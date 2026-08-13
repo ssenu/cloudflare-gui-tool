@@ -24,10 +24,15 @@ class ToggleSwitch(QAbstractButton):
 
     - 켜짐: accent 배경 + 오른쪽 흰 노브
     - 꺼짐: border 색 배경 + panel 색 노브(왼쪽)
-    - 전이 중(pending): pending 색 배경 (노브 위치는 목적지 그대로)
+    - 전이 중(pending): pending 색 배경, 노브는 "아직 실제 상태" 자리에 그대로
 
-    전이 중 표시를 별도 스피너가 아니라 토글 자체로 하는 이유: 상태를 바꾸는
-    대상과 그 진행을 알리는 곳이 같아야 눈이 한 곳만 보면 된다.
+    화면에 그리는 위치는 사용자의 클릭이 아니라 sync()로만 바뀐다(controlled
+    component). 눌렀다고 노브가 먼저 건너가면, 곧이어 "아직 안 켜졌다"는 실제
+    상태가 들어오면서 도로 돌아와 튕기는 것처럼 보이기 때문이다. 눌렀을 때는
+    색만 pending으로 바뀌고, 실제로 켜지면 그때 노브가 건너간다.
+
+    isChecked()(모델)는 클릭 즉시 바뀐다 - toggled 시그널로 "무엇을 요청했는지"
+    를 알려야 하기 때문이다. 그리기는 _display_checked만 본다.
     """
 
     WIDTH = 44
@@ -37,6 +42,8 @@ class ToggleSwitch(QAbstractButton):
         super().__init__(parent)
         self._palette = palette
         self._pending = False
+        # 화면에 그릴 상태. 클릭으로는 바뀌지 않고 sync()로만 바뀐다.
+        self._display_checked = False
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -48,9 +55,22 @@ class ToggleSwitch(QAbstractButton):
         self.update()
 
     def set_pending(self, pending: bool) -> None:
-        """켜지는/꺼지는 중임을 색과 노브 위치로 표시한다."""
+        """켜지는/꺼지는 중임을 색으로 표시한다."""
         if self._pending == pending:
             return
+        self._pending = pending
+        self._update_tooltip()
+        self.update()
+
+    def sync(self, checked: bool, pending: bool = False) -> None:
+        """실제 상태를 화면에 반영한다(폴링/상태 갱신에서 호출).
+
+        시그널을 내지 않는다 - 상태를 보여주는 것이지 사용자의 조작이 아니다.
+        """
+        self.blockSignals(True)
+        self.setChecked(checked)
+        self.blockSignals(False)
+        self._display_checked = checked
         self._pending = pending
         self._update_tooltip()
         self.update()
@@ -79,7 +99,7 @@ class ToggleSwitch(QAbstractButton):
         if self._pending:
             self.setToolTip("처리 중...")
             return
-        self.setToolTip("켜기" if not self.isChecked() else "끄기")
+        self.setToolTip("켜기" if not self._display_checked else "끄기")
 
     def paintEvent(self, _event) -> None:
         p = self._palette
@@ -90,7 +110,8 @@ class ToggleSwitch(QAbstractButton):
         track_rect = QRectF(1, 1, w - 2, h - 2)
         radius = track_rect.height() / 2
 
-        checked = self.isChecked()
+        # 그리기는 모델(isChecked)이 아니라 화면 상태를 본다 - 클래스 주석 참고.
+        checked = self._display_checked
         track_color = QColor(p["accent"] if checked else p["border"])
         if self._pending:
             track_color = QColor(p.get("pending", p["accent"]))

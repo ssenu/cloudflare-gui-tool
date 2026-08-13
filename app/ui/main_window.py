@@ -216,15 +216,10 @@ class RouteRow(QWidget):
         running = False
         if self.server_switch is not None:
             pending = ctx.manager.service_pending(self.card.tunnel_name, self.route)
-            # 전이 중 표시는 별도 스피너가 아니라 토글 자체의 색/노브로 한다.
-            self.server_switch.set_pending(pending)
             running = ctx.manager.service_running(self.card.tunnel_name, self.route)
-            self.server_switch.blockSignals(True)
-            self.server_switch.setChecked(running)
-            self.server_switch.blockSignals(False)
-            # blockSignals로 setChecked하면 toggled가 안 나가 툴팁이 안
-            # 갱신되므로 직접 호출한다.
-            self.server_switch.update_tooltip()
+            # 화면(노브 위치 + 색)은 여기서만 바뀐다. 클릭으로는 움직이지 않아
+            # "눌렀다가 도로 돌아오는" 튕김이 없다.
+            self.server_switch.sync(running, pending)
             if self.route.server.kind == "docker":
                 # I5: 도커 조회 실패 사유를 토글 툴팁으로 보여준다.
                 err = ctx.manager.docker_error(self.card.tunnel_name, self.route)
@@ -443,9 +438,7 @@ class TunnelCard(QFrame):
                     QMessageBox.warning(self, "설정 없음",
                                         f"config-{self.tunnel_name}.yml 이 없습니다.\n"
                                         "라우트를 먼저 추가하세요.")
-                    self.tunnel_switch.blockSignals(True)
-                    self.tunnel_switch.setChecked(False)
-                    self.tunnel_switch.blockSignals(False)
+                    self.tunnel_switch.sync(False)
                     return
                 ctx.manager.start_tunnel(self.tunnel_name, ctx.client)
                 for route in self.meta.routes:
@@ -467,7 +460,6 @@ class TunnelCard(QFrame):
             f"background: {STATE_COLORS[st]}; border-radius: 6px;")
         self.state_label.setText(STATE_LABELS[st])
         pending = st == TunnelState.STARTING or ctx.manager.tunnel_pending(self.tunnel_name)
-        self.tunnel_switch.set_pending(pending)
         running = st in (TunnelState.STARTING, TunnelState.RUNNING)
         mismatch_reason = None
         if st == TunnelState.ERROR:
@@ -478,10 +470,7 @@ class TunnelCard(QFrame):
                 # stop_tunnel(kill_pid 없이 PID 파일만 정리)을 호출할 수
                 # 있다. 죽은 PID로 인한 ERROR(사유 없음)는 그대로 OFF.
                 running = True
-        self.tunnel_switch.blockSignals(True)
-        self.tunnel_switch.setChecked(running)
-        self.tunnel_switch.blockSignals(False)
-        self.tunnel_switch.update_tooltip()
+        self.tunnel_switch.sync(running, pending)
         if mismatch_reason:
             # 도커 오류 툴팁과 같은 자리를 재사용한다: update_tooltip()이
             # 기본 켜기/끄기 문구로 덮어쓴 뒤 사유로 다시 덮어쓴다.
