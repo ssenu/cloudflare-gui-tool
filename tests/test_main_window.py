@@ -1308,3 +1308,93 @@ def test_absurd_geometry_falls_back_to_default(qapp, tmp_path):
     win._timer.stop()
 
     assert (win.width(), win.height()) == MainWindow.DEFAULT_SIZE
+
+
+# ---- 대상 전환: 연결 실패 알림 · 비블로킹 ----
+
+def _switch_env(qapp, tmp_path):
+    """SSH 프로필 하나가 등록된 창. 콤보 인덱스 1이 그 프로필이다."""
+    win = make_window(qapp, tmp_path)
+    win.ctx.store.settings.ssh_profiles.append(
+        SshProfile(name="pi", host="10.0.0.9"))
+    win._reload_targets()
+    return win
+
+
+def wait_connect(win, timeout=3.0):
+    import time as _time
+    deadline = _time.monotonic() + timeout
+    while win._site_pollers and win._site_pollers[-1].is_busy() \
+            and _time.monotonic() < deadline:
+        QApplication.processEvents()
+        _time.sleep(0.005)
+    QApplication.processEvents()
+
+
+def test_ssh_failure_shows_modal_and_reverts_combo(qapp, tmp_path, monkeypatch):
+    """실패가 배너로만 지나가면(곧 지워짐) 아무 일도 안 난 것처럼 보인다."""
+    win = _switch_env(qapp, tmp_path)
+
+    def boom(profile, password=None):
+        raise ConnectionError("No route to host")
+
+    win.ctx.set_remote = boom
+    shown = []
+    monkeypatch.setattr("app.ui.main_window.QMessageBox.critical",
+                        staticmethod(lambda *a, **k: shown.append(a[2])))
+
+    win.target_combo.setCurrentIndex(1)   # 사용자가 pi를 고른 것과 동일
+    wait_connect(win)
+
+    assert len(shown) == 1
+    assert "pi(10.0.0.9)" in shown[0]
+    assert "No route to host" in shown[0]
+    assert "확인해 볼 것" in shown[0]          # 원인 후보 안내 포함
+    assert win.target_combo.currentIndex() == 0  # 이전 대상(로컬)으로 복귀
+    assert win.target_combo.isEnabled()
+    assert win.ctx.runner is win.ctx.local_runner
+
+
+def test_switch_does_not_block_gui_while_connecting(qapp, tmp_path, monkeypatch):
+    """접속이 안 되는 기기는 타임아웃까지 걸린다 - 그동안 창이 멈추면 안 된다."""
+    import time as _time
+
+    win = _switch_env(qapp, tmp_path)
+
+    def slow(profile, password=None):
+        _time.sleep(0.6)   # 느린 연결 흉내
+
+    win.ctx.set_remote = slow
+    monkeypatch.setattr("app.ui.main_window.QMessageBox.critical",
+                        staticmethod(lambda *a, **k: None))
+
+    t0 = _time.perf_counter()
+    win.target_combo.setCurrentIndex(1)
+    elapsed = _time.perf_counter() - t0
+
+    assert elapsed < 0.2, f"전환 클릭이 {elapsed:.2f}s 동안 GUI를 붙잡았다"
+    assert not win.target_combo.isEnabled()          # 연결 중에는 잠금
+    assert "연결하는 중" in win.info_label.text()     # 진행 상황 표시
+    wait_connect(win)
+    assert win.target_combo.isEnabled()
+
+
+def test_successful_switch_completes_normally(qapp, tmp_path):
+    win = _switch_env(qapp, tmp_path)
+    remote = FakeRunner(home="/home/pi")
+    remote.name = "ssh:pi"
+    remote.run_results[LIST_TUNNELS_CMD] = RunResult(0, "[]", "")
+
+    def ok_connect(profile, password=None):
+        win.ctx.runner = remote
+
+    win.ctx.set_remote = ok_connect
+    win.ctx.store.settings.set_skip_prereq_check("ssh:pi", True)  # 점검 모달 생략
+
+    win.target_combo.setCurrentIndex(1)
+    wait_connect(win)
+
+    assert win._current_target_key == "pi"
+    assert win.ctx.runner is remote
+    assert win.target_combo.isEnabled()
+    assert win.info_banner.isHidden()   # "연결하는 중" 배너는 끝나면 사라진다

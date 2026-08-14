@@ -900,24 +900,48 @@ class MainWindow(QWidget):
         self._poll_backoff_active = False
         self._poll_failures = 0
         self._timer.setInterval(POLL_INTERVAL_NORMAL_MS)
-        try:
-            if profile is None:
-                self.ctx.set_local()
-                self._current_target_key = None
-            else:
-                self.setCursor(Qt.CursorShape.WaitCursor)
-                self.ctx.set_remote(profile)
-                self._current_target_key = profile.name
-        except Exception as ex:
-            self.banner.setText(f"SSH 연결 실패: {ex}")
-            self.banner.show()
-            self.target_combo.blockSignals(True)
-            self.target_combo.setCurrentIndex(0)
-            self.target_combo.blockSignals(False)
+
+        if profile is None:
             self.ctx.set_local()
             self._current_target_key = None
-        finally:
-            self.unsetCursor()
+            self._after_target_switch()
+            return
+
+        # SSH 연결은 워커에서 한다. 여기서 동기로 하면 접속이 안 되는 기기일 때
+        # 타임아웃(10초)까지 창 전체가 멈춰 "앱이 죽었나" 싶어진다. 연결하는
+        # 동안에는 배너로 알리고 콤보를 잠가 중복 전환을 막는다.
+        self.target_combo.setEnabled(False)
+        self._show_info(f"{profile.name}({profile.host})에 연결하는 중...")
+        connect_poller = BackgroundPoller(self)
+
+        def done(ok, _result, error):
+            self.target_combo.setEnabled(True)
+            self.info_banner.hide()
+            if ok:
+                self._current_target_key = profile.name
+                self._after_target_switch()
+                return
+            # 실패: 콤보를 이전 대상으로 되돌리고, 놓칠 수 없게 모달로 알린다.
+            # (예전에는 배너만 띄웠는데 곧이어 도는 refresh()가 그 배너를
+            # 지워버려, 아무 일도 안 일어난 것처럼 보였다.)
+            self.target_combo.blockSignals(True)
+            self.target_combo.setCurrentIndex(self._index_for_current_target() or 0)
+            self.target_combo.blockSignals(False)
+            QMessageBox.critical(
+                self, "SSH 연결 실패",
+                f"{profile.name}({profile.host})에 연결하지 못했습니다.\n\n"
+                f"{error}\n\n"
+                "확인해 볼 것:\n"
+                "· 대상 기기가 켜져 있고 네트워크에 연결돼 있는지\n"
+                "· 호스트 주소가 맞는지 (Tailscale이라면 양쪽 모두 로그인 상태인지)\n"
+                "· 키 파일 경로와 공개키 등록(authorized_keys)이 맞는지")
+
+        connect_poller.finished.connect(done)
+        connect_poller.run(lambda: self.ctx.set_remote(profile))
+        self._site_pollers.append(connect_poller)
+
+    def _after_target_switch(self):
+        """대상이 실제로 바뀐 뒤의 공통 마무리."""
         # B2: 로그 뷰어는 열린 시점의 대상(runner)에 붙어 있어, 대상이 바뀌면
         # 죽은 세션을 보거나 다른 대상의 로그를 잘못 보여줄 수 있다. 가장
         # 단순하고 오해가 없는 방법으로 전부 닫는다.
