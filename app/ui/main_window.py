@@ -731,6 +731,15 @@ class MainWindow(QWidget):
         self._first_load.timeout.connect(self.refresh)
         self._first_load.start(0)
 
+        # 안내 배너 자동 숨김(완료 알림 등). singleShot: 한 번 뜨고 사라진다.
+        self._info_hide_timer = QTimer(self)
+        self._info_hide_timer.setSingleShot(True)
+        self._info_hide_timer.timeout.connect(self.info_banner.hide)
+        # 배포 완료 감시: 배포한 라우트가 실제로 응답할 때까지 지켜본다.
+        self._deploy_watches: list[dict] = []
+        self._deploy_timer = QTimer(self)
+        self._deploy_timer.timeout.connect(self._process_deploy_watches)
+
         self._poller = BackgroundPoller(self)
         self._poller.finished.connect(self._on_poll_done)
         self._timer = QTimer(self)
@@ -790,8 +799,16 @@ class MainWindow(QWidget):
         self.info_label.setStyleSheet(
             f"color:{p['accent2']}; border: none; background: transparent;")
 
-    def _show_info(self, text: str, action: str = "", on_action=None):
-        """안내 배너를 띄운다. action이 있으면 그 자리에서 실행할 버튼도 함께."""
+    def _show_info(self, text: str, action: str = "", on_action=None,
+                   auto_hide_ms: int = 0):
+        """안내 배너를 띄운다. action이 있으면 그 자리에서 실행할 버튼도 함께.
+
+        auto_hide_ms를 주면 그 시간 뒤 저절로 사라진다(완료 알림처럼 확인만
+        하면 되는 문구용). 새 문구가 뜨면 이전 숨김 예약은 취소된다.
+        """
+        self._info_hide_timer.stop()
+        if auto_hide_ms:
+            self._info_hide_timer.start(auto_hide_ms)
         self.info_label.setText(text)
         try:
             self.info_action_btn.clicked.disconnect()
@@ -1263,8 +1280,15 @@ class MainWindow(QWidget):
             except Exception as ex:
                 self._show_info(f"서버 재시작 실패: {ex}")
                 return
-            self._show_info(f"{route.hostname or cwd} 배포를 시작했습니다. "
-                            "진행 상황은 로그에서 볼 수 있습니다.")
+            label = route.hostname or cwd
+            self._show_info(f"{label} 배포 중입니다... 완료되면 알려드립니다. "
+                            "(진행 상황은 로그에서)")
+            # 실행 판정이 "실제 웹 응답" 기준이라, 그 순간이 곧 배포 완료다.
+            self._deploy_watches.append({
+                "name": name, "route": route, "label": label,
+                "deadline": time.monotonic() + 600,   # 빌드 포함 최대 10분
+            })
+            self._deploy_timer.start(1000)
             if row is not None:
                 row.update_state()
 
@@ -1272,6 +1296,27 @@ class MainWindow(QWidget):
         poller.run(lambda: runner.run(["git", "-C", cwd, "pull", "--ff-only"],
                                       timeout=120.0))
         self._site_pollers.append(poller)
+
+    def _process_deploy_watches(self):
+        """배포한 서버가 실제로 응답하기 시작하면 완료를 알린다(5초 뒤 사라짐).
+
+        원격 호출은 하지 않는다 - 1초 폴링이 갱신해 둔 상태만 읽으므로 비용이
+        없다. 10분이 지나도 완료가 안 잡히면 조용히 감시만 접는다(빌드 실패
+        등은 로그와 토글 상태로 이미 드러난다).
+        """
+        remaining = []
+        for w in self._deploy_watches:
+            if time.monotonic() > w["deadline"]:
+                continue
+            if (self.ctx.manager.service_running(w["name"], w["route"])
+                    and not self.ctx.manager.service_pending(w["name"], w["route"])):
+                self._show_info(f"{w['label']} 배포가 완료되었습니다.",
+                                auto_hide_ms=5000)
+                continue
+            remaining.append(w)
+        self._deploy_watches = remaining
+        if not remaining:
+            self._deploy_timer.stop()
 
     def _check_site(self, route: RouteMeta):
         """공개 주소를 실제로 열어보고 결과를 배너로 알려준다.
