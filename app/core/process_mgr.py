@@ -441,12 +441,12 @@ class ProcessManager:
 
         tunnel_units = [reg.unit_tunnel(t.name) for t in tunnels]
         command_units: list[str] = []
-        docker_units: list[tuple[str, str]] = []  # (unit, cwd)
+        docker_units: list[tuple[str, str, str]] = []  # (unit, cwd, 서비스 주소)
         for t in tunnels:
             for r in t.routes:
                 unit = reg.unit_service(t.name, r.id)
                 if r.server.kind == "docker":
-                    docker_units.append((unit, r.server.cwd))
+                    docker_units.append((unit, r.server.cwd, r.service))
                 else:
                     command_units.append(unit)
 
@@ -556,7 +556,7 @@ class ProcessManager:
             self._log_offset[unit] = new_offset
 
         now = time.time()
-        for unit, cwd in docker_units:
+        for unit, cwd, service_url in docker_units:
             last = self._docker_checked_at.get(unit, 0.0)
             interval = (DOCKER_POLL_INTERVAL if self._is_pending(unit)
                         else DOCKER_POLL_IDLE_INTERVAL)
@@ -575,11 +575,43 @@ class ProcessManager:
             except Exception as exc:  # 도커 미설치 등 예상 못한 예외도 "중지"로 간주
                 running = False
                 self._docker_error[unit] = str(exc)
+            if running:
+                # 컨테이너가 떠 있어도 안의 웹서버가 아직 준비 전일 수 있다
+                # (재배포 직후가 대표적). "실행 중" 판정은 실제로 그 포트가
+                # 응답할 때로 미룬다 - 그래야 토글이 웹에 접속 가능해진
+                # 시점에 파란색이 된다. 판정 불가(curl 없음 등)면 컨테이너
+                # 상태를 그대로 쓴다(기능이 죽는 것보다 낫다).
+                ready = self._service_http_ready(reg, service_url)
+                if ready is not None:
+                    running = ready
             self._docker_running[unit] = running
             self._docker_checked_at[unit] = now
 
-        for unit, _cwd in docker_units:
+        for unit, _cwd, _svc in docker_units:
             self._resolve_pending(unit, self._docker_running.get(unit, False))
+
+    @staticmethod
+    def _service_http_ready(reg, service_url: str) -> bool | None:
+        """대상 기기에서 서비스 주소가 실제로 응답하는지 본다.
+
+        반환: True=응답함(5xx라도 서버가 떠 있다는 뜻), False=연결 안 됨,
+        None=판정 불가(curl 없음, http 주소가 아님) - 호출측이 폴백한다.
+        """
+        url = (service_url or "").strip()
+        if not url.startswith(("http://", "https://")):
+            return None
+        try:
+            # HEAD 요청, 2초 제한. -I는 본문을 받지 않아 폴링 비용이 작다.
+            res = reg.runner.run(["curl", "-s", "-I", "-m", "2", url],
+                                 timeout=8.0)
+        except Exception:
+            return None  # curl 실행 자체가 안 됨(미설치 등)
+        if res.exit_code == 0:
+            return True
+        # 7=연결 거부, 28=타임아웃, 52=빈 응답, 56=수신 실패: 아직 준비 전
+        if res.exit_code in (7, 28, 52, 56):
+            return False
+        return None  # 그 외(엉뚱한 환경)는 판정하지 않는다
 
     def mark_service_pending(self, tunnel: str, route: RouteMeta) -> None:
         """전이 중(배포 등)임을 표시한다. 실제 상태는 폴링이 곧 확정한다."""

@@ -755,3 +755,102 @@ def test_read_records_alive_marks_only_live_units():
     assert records["b"] == (222, "x")
     assert records["없는유닛"] is None
     assert alive == {"a"}
+
+
+# ---- 도커: 컨테이너가 떠도 웹이 응답해야 "실행 중" ----
+
+def _docker_setup():
+    from app.core.process_mgr import ProcessManager
+    from app.core.run_registry import RunRegistry
+    from app.core.store import RouteMeta, ServiceSpec, TunnelMeta, new_route_id
+
+    runner = FakeRunner(home="/home/pi")
+    route = RouteMeta(id=new_route_id(), hostname="a.example.com",
+                      service="http://localhost:8001",
+                      server=ServiceSpec(kind="docker", cwd="/srv/apps/x"))
+    meta = TunnelMeta(name="t1", routes=[route])
+    mgr = ProcessManager(lambda: RunRegistry(runner))
+    # 컨테이너는 떠 있는 상태
+    runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(0, "abc123\n", "")
+    return runner, mgr, meta, route
+
+CURL = ("curl", "-s", "-I", "-m", "2", "http://localhost:8001")
+
+
+def test_container_up_but_web_not_ready_is_not_running():
+    """재배포 직후: 컨테이너는 떴지만 웹서버가 아직이면 토글이 켜지면 안 된다."""
+    runner, mgr, meta, route = _docker_setup()
+    runner.run_results[CURL] = RunResult(7, "", "")  # 연결 거부
+
+    mgr.refresh([meta])
+
+    assert mgr.service_running("t1", route) is False
+
+
+def test_container_up_and_web_responding_is_running():
+    runner, mgr, meta, route = _docker_setup()
+    runner.run_results[CURL] = RunResult(0, "HTTP/1.1 200 OK\r\n", "")
+
+    mgr.refresh([meta])
+
+    assert mgr.service_running("t1", route) is True
+
+
+def test_http_5xx_still_counts_as_running():
+    """앱이 500을 뱉어도 서버는 떠 있는 것이다(curl은 5xx에도 exit 0)."""
+    runner, mgr, meta, route = _docker_setup()
+    runner.run_results[CURL] = RunResult(0, "HTTP/1.1 500 Internal Server Error\r\n", "")
+
+    mgr.refresh([meta])
+
+    assert mgr.service_running("t1", route) is True
+
+
+def test_curl_missing_falls_back_to_container_state():
+    """curl이 없는 환경에서 기능이 통째로 죽으면 안 된다 - 컨테이너 상태로 폴백."""
+    runner, mgr, meta, route = _docker_setup()
+    runner.run_raises[CURL] = FileNotFoundError("curl not found")
+
+    mgr.refresh([meta])
+
+    assert mgr.service_running("t1", route) is True
+
+
+def test_pending_stays_until_web_is_ready():
+    """배포 중 토글: 컨테이너가 떠도 웹이 응답할 때까지 주황(pending)이어야 한다."""
+    import time as _time
+    runner, mgr, meta, route = _docker_setup()
+    runner.run_results[CURL] = RunResult(7, "", "")  # 아직 준비 전
+
+    mgr.start_service("t1", route)     # 켜는 중(desired=True)
+    mgr.refresh([meta])
+    assert mgr.service_pending("t1", route) is True   # 아직 전이 중
+
+    runner.run_results[CURL] = RunResult(0, "HTTP/1.1 200 OK\r\n", "")
+    # 도커 폴링 캐시를 지나가게 시간을 민다
+    mgr._docker_checked_at.clear()
+    mgr.refresh([meta])
+
+    assert mgr.service_running("t1", route) is True
+    assert mgr.service_pending("t1", route) is False  # 이제 확정(파란색)
+
+
+def test_non_http_service_uses_container_state():
+    """tcp:// 같은 주소는 HEAD 확인이 안 되므로 컨테이너 상태를 쓴다."""
+    from app.core.process_mgr import ProcessManager
+    from app.core.run_registry import RunRegistry
+    from app.core.store import RouteMeta, ServiceSpec, TunnelMeta, new_route_id
+
+    runner = FakeRunner(home="/home/pi")
+    route = RouteMeta(id=new_route_id(), hostname="a.example.com",
+                      service="tcp://localhost:5432",
+                      server=ServiceSpec(kind="docker", cwd="/srv/apps/x"))
+    meta = TunnelMeta(name="t1", routes=[route])
+    mgr = ProcessManager(lambda: RunRegistry(runner))
+    runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(0, "abc\n", "")
+
+    mgr.refresh([meta])
+
+    assert mgr.service_running("t1", route) is True
+    # curl을 부르지도 않는다
+    assert not any(c[0] == "curl" for c, _ in runner.run_calls)
