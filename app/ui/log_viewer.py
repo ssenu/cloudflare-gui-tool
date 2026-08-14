@@ -153,6 +153,36 @@ class _ComposeLogTab(QWidget):
         self.view.setPlainText(f"[로그 읽기 실패] {message}")
 
 
+class _LogGroup(QWidget):
+    """한 서버의 로그 묶음: 위에는 서버 이름 탭 하나, 안에 하위 탭(앱/빌드).
+
+    도커 서버는 로그가 두 종류(컨테이너 앱 로그, compose 빌드 출력)라서
+    최상위에 나란히 두면 서버 2개에 탭이 5개가 된다. 서버당 탭 하나로 묶고
+    종류는 그 안에서 고르게 한다.
+    """
+
+    def __init__(self, tabs: list[tuple[str, QWidget]]):
+        super().__init__()
+        self.inner = QTabWidget()
+        # 하위 탭임을 시각적으로 구분(문서 스타일 - 상위 탭과 모양이 달라진다)
+        self.inner.setDocumentMode(True)
+        for name, widget in tabs:
+            self.inner.addTab(widget, name)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 4, 0, 0)
+        lay.addWidget(self.inner)
+
+    def current(self):
+        return self.inner.currentWidget()
+
+
+def _make_tab(ctx, source, error_color):
+    """소스 하나 -> 로그 탭 위젯. 파일 경로 또는 ("compose", cwd)."""
+    if isinstance(source, tuple) and source[0] == "compose":
+        return _ComposeLogTab(ctx.runner, source[1], error_color)
+    return _LogTab(ctx.runner, source, error_color)
+
+
 class LogViewer(QDialog):
     def __init__(self, ctx: AppContext, title: str, log_paths: dict[str, str], parent=None):
         super().__init__(parent)
@@ -163,14 +193,20 @@ class LogViewer(QDialog):
 
         error_color = current_palette(ctx.store.settings.theme)["danger"]
         tabs = QTabWidget()
-        self._tabs: list[_LogTab] = []
+        self._tabs: list = []          # 모든 로그 탭(하위 탭 포함, 평평하게)
         for name, source in log_paths.items():
-            if isinstance(source, tuple) and source[0] == "compose":
-                tab = _ComposeLogTab(ctx.runner, source[1], error_color)
+            if isinstance(source, dict):
+                # 하위 탭 묶음: {"앱": ..., "빌드": ...}
+                children = []
+                for sub_name, sub_source in source.items():
+                    tab = _make_tab(ctx, sub_source, error_color)
+                    self._tabs.append(tab)
+                    children.append((sub_name, tab))
+                tabs.addTab(_LogGroup(children), name)
             else:
-                tab = _LogTab(ctx.runner, source, error_color)
-            self._tabs.append(tab)
-            tabs.addTab(tab, name)
+                tab = _make_tab(ctx, source, error_color)
+                self._tabs.append(tab)
+                tabs.addTab(tab, name)
 
         lay = QVBoxLayout(self)
         lay.addWidget(tabs)
@@ -191,6 +227,8 @@ class LogViewer(QDialog):
 
     def _current_tab(self):
         widget = self._tab_widget.currentWidget()
+        if isinstance(widget, _LogGroup):
+            widget = widget.current()
         return widget if isinstance(widget, (_LogTab, _ComposeLogTab)) else None
 
     def _poll(self):

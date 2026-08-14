@@ -101,8 +101,12 @@ def test_file_tab_still_tails_incrementally(qapp, tmp_path):
     assert "둘째 줄" in viewer._tabs[0].view.toPlainText()
 
 
-def test_docker_route_gets_both_tabs(qapp, tmp_path):
-    """빌드 실패와 앱 오류는 서로 다른 곳에 남는다 - 둘 다 볼 수 있어야 한다."""
+def test_docker_route_gets_grouped_subtabs(qapp, tmp_path):
+    """빌드 실패와 앱 오류는 서로 다른 곳에 남는다 - 둘 다 볼 수 있어야 한다.
+
+    다만 최상위에 나란히 두면 서버 수의 두 배로 탭이 늘어나므로, 서버 이름
+    탭 하나에 하위 탭(앱/빌드)으로 묶는다.
+    """
     from app.ui.main_window import MainWindow
 
     runner = FakeRunner(home="/home/fake")
@@ -123,12 +127,10 @@ def test_docker_route_gets_both_tabs(qapp, tmp_path):
     win._open_log_viewer = lambda key, title, paths: opened.update(paths)
     win._open_log_tunnel(win.cards[0])
 
-    names = list(opened)
-    assert "터널" in names
-    assert any("(빌드)" in n for n in names)
-    assert any("(앱)" in n for n in names)
-    app_tab = next(v for n, v in opened.items() if "(앱)" in n)
-    assert app_tab == ("compose", "/srv/apps/x")
+    assert list(opened) == ["터널", "a.example.com"]      # 최상위 탭은 서버당 하나
+    group = opened["a.example.com"]
+    assert list(group) == ["앱", "빌드"]                   # 하위 탭 둘
+    assert group["앱"] == ("compose", "/srv/apps/x")
 
 
 def test_command_route_gets_single_tab(qapp, tmp_path):
@@ -152,4 +154,31 @@ def test_command_route_gets_single_tab(qapp, tmp_path):
     win._open_log_viewer = lambda key, title, paths: opened.update(paths)
     win._open_log_tunnel(win.cards[0])
 
-    assert not any("(앱)" in n for n in opened)
+    assert not any(isinstance(v, dict) for v in opened.values())  # 하위 탭 없음
+
+
+def test_grouped_viewer_polls_active_subtab(qapp, tmp_path):
+    """폴링은 지금 보이는 하위 탭 하나만 읽어야 한다."""
+    runner = FakeRunner(home="/home/pi")
+    runner.run_results[COMPOSE_LOGS] = RunResult(0, "앱 로그 내용", "")
+    runner.files["/log/build.log"] = "빌드 로그 내용\n"
+    ctx = make_ctx(tmp_path, runner)
+
+    viewer = LogViewer(ctx, "t", {
+        "blog.example.com": {"앱": ("compose", "/srv/apps/x"),
+                             "빌드": "/log/build.log"}})
+    viewer._timer.stop()
+
+    # 기본 하위 탭은 "앱"
+    pump(viewer)
+    app_tab, build_tab = viewer._tabs
+    assert "앱 로그 내용" in app_tab.view.toPlainText()
+    assert build_tab.view.toPlainText() == ""     # 아직 안 읽음
+
+    # 하위 탭을 "빌드"로 바꾸면 그쪽을 읽는다
+    from app.ui.log_viewer import _LogGroup
+    group = viewer._tab_widget.currentWidget()
+    assert isinstance(group, _LogGroup)
+    group.inner.setCurrentIndex(1)
+    pump(viewer)
+    assert "빌드 로그 내용" in build_tab.view.toPlainText()

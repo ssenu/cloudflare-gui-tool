@@ -1533,9 +1533,12 @@ class MainWindow(QWidget):
             if route.server.kind == "docker" and route.server.cwd:
                 # 도커는 두 종류가 다 필요하다: 빌드/기동 출력(우리 파일)과
                 # 컨테이너 안에서 앱이 뱉는 로그(docker compose logs).
-                # 500 오류를 볼 때 필요한 건 후자인데 파일에는 없다.
-                log_paths[f"{tab_name} (빌드)"] = path
-                log_paths[f"{tab_name} (앱)"] = ("compose", route.server.cwd)
+                # 최상위에 나란히 두면 서버 수의 두 배로 탭이 늘어나므로,
+                # 서버 이름 탭 하나 안에 하위 탭(앱/빌드)으로 묶는다.
+                log_paths[tab_name] = {
+                    "앱": ("compose", route.server.cwd),
+                    "빌드": path,
+                }
             else:
                 log_paths[tab_name] = path
         self._open_log_viewer(f"tunnel:{target}:{name}", title, log_paths)
