@@ -854,3 +854,58 @@ def test_non_http_service_uses_container_state():
     assert mgr.service_running("t1", route) is True
     # curl을 부르지도 않는다
     assert not any(c[0] == "curl" for c, _ in runner.run_calls)
+
+
+# ---- 서버 카테고리 (터널 없는 서버 묶음) ----
+
+def test_group_owner_key_does_not_collide_with_tunnel_units():
+    """기존 터널 서비스의 유닛 이름은 한 글자도 바뀌지 않아야 한다."""
+    from app.core.run_registry import group_owner_key
+
+    _, _, reg = make_mgr()
+    assert reg.unit_service("t1", "r1") == "svc-t1-r1"
+    assert reg.unit_service(group_owner_key("aabbccdd"), "r1") == "svc-gaabbccdd-r1"
+
+
+def test_group_docker_service_polls_and_reports_running():
+    from app.core.run_registry import group_owner_key
+    from app.core.store import ServerGroupMeta
+
+    mgr, runner, reg = make_mgr()
+    route = docker_route(cwd="/srv/api")
+    group = ServerGroupMeta(id="aabbccdd", name="백엔드", servers=[route])
+    runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(0, "abc123\n", "")
+    owner = group_owner_key(group.id)
+
+    mgr.refresh([], groups=[group])
+
+    assert mgr.service_running(owner, route) is True
+    assert (("docker", "compose", "ps", "-q"), "/srv/api") in runner.run_calls
+
+
+def test_group_command_service_start_and_stop():
+    from app.core.run_registry import group_owner_key
+    from app.core.store import ServerGroupMeta
+
+    mgr, runner, reg = make_mgr()
+    route = command_route(route_id="r9", start_cmd="myserver --run")
+    group = ServerGroupMeta(id="11112222", name="백엔드", servers=[route])
+    owner = group_owner_key(group.id)
+
+    mgr.start_service(owner, route)
+
+    unit = reg.unit_service(owner, route.id)
+    assert reg.read_pid(unit) is not None
+    assert mgr.service_running(owner, route) is True
+
+    mgr.stop_service(owner, route)
+
+    assert reg.read_pid(unit) is None
+    assert mgr.service_running(owner, route) is False
+
+
+def test_refresh_without_groups_still_works():
+    """groups는 선택 인자다 - 기존 호출부가 그대로 동작해야 한다."""
+    mgr, runner, reg = make_mgr()
+    mgr.refresh([meta("t1")])
+    assert mgr.tunnel_state("t1") == TunnelState.STOPPED

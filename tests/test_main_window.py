@@ -71,7 +71,7 @@ def test_tick_exception_shows_banner_and_backs_off_without_crashing(qapp, tmp_pa
     win = make_window(qapp, tmp_path)
     assert not win.ctx.is_remote
 
-    def boom(_tunnels):
+    def boom(_tunnels, _groups=()):
         raise ConnectionError("SSH 연결이 끊겼습니다")
 
     win.ctx.manager.refresh = boom
@@ -89,7 +89,7 @@ def test_tick_exception_on_remote_shows_connection_banner(qapp, tmp_path):
     win.ctx.runner = FakeRunner(home="/home/remote")  # local_runner와 다른 인스턴스 -> is_remote
     assert win.ctx.is_remote
 
-    win.ctx.manager.refresh = lambda _t: (_ for _ in ()).throw(ConnectionError("no route"))
+    win.ctx.manager.refresh = lambda _t, _g=(): (_ for _ in ()).throw(ConnectionError("no route"))
 
     tick(win)
 
@@ -103,7 +103,7 @@ def test_tick_repeated_failures_add_hint_after_threshold(qapp, tmp_path):
     # 로컬은 이미 로컬이므로 힌트를 보여주지 않는다(D3).
     win = make_window(qapp, tmp_path)
     win.ctx.runner = FakeRunner(home="/home/remote")
-    win.ctx.manager.refresh = lambda _t: (_ for _ in ()).throw(OSError("no route"))
+    win.ctx.manager.refresh = lambda _t, _g=(): (_ for _ in ()).throw(OSError("no route"))
 
     for _ in range(4):
         tick(win)
@@ -113,7 +113,7 @@ def test_tick_repeated_failures_add_hint_after_threshold(qapp, tmp_path):
 
 def test_tick_repeated_failures_on_local_have_no_reconnect_hint(qapp, tmp_path):
     win = make_window(qapp, tmp_path)
-    win.ctx.manager.refresh = lambda _t: (_ for _ in ()).throw(OSError("no route"))
+    win.ctx.manager.refresh = lambda _t, _g=(): (_ for _ in ()).throw(OSError("no route"))
 
     for _ in range(4):
         tick(win)
@@ -126,7 +126,7 @@ def test_tick_recovers_and_returns_to_normal_interval(qapp, tmp_path):
     win = make_window(qapp, tmp_path)
     fail = {"on": True}
 
-    def maybe_boom(_tunnels):
+    def maybe_boom(_tunnels, _groups=()):
         if fail["on"]:
             raise EOFError("연결 끊김")
 
@@ -673,7 +673,9 @@ def test_route_change_forces_rebuild(qapp, tmp_path):
 def test_empty_state_label_visible_without_tunnels(qapp, tmp_path):
     win = make_window(qapp, tmp_path)  # 터널 0개
     assert not win.list_status.isHidden()
-    assert "아직 터널이 없습니다" in win.list_status.text()
+    # 이제 만들 수 있는 것이 터널만이 아니라, 안내도 두 가지를 다 가리킨다
+    text = win.list_status.text()
+    assert "터널 생성" in text and "서버 카테고리" in text
 
     runner = win.ctx.runner
     runner.run_results[LIST_TUNNELS_CMD] = RunResult(
@@ -978,7 +980,7 @@ def test_tick_returns_immediately_even_when_poll_is_slow(qapp, tmp_path):
 
     win = make_window(qapp, tmp_path)
 
-    def slow_refresh(_metas):
+    def slow_refresh(_metas, _groups=()):
         _time.sleep(0.4)  # SSH 왕복을 흉내낸다
 
     win.ctx.manager.refresh = slow_refresh
@@ -1005,7 +1007,7 @@ def test_overlapping_ticks_do_not_pile_up(qapp, tmp_path):
     win = make_window(qapp, tmp_path)
     calls = {"n": 0}
 
-    def slow_refresh(_metas):
+    def slow_refresh(_metas, _groups=()):
         calls["n"] += 1
         _time.sleep(0.3)
 
@@ -1059,7 +1061,7 @@ def test_target_switch_waits_for_in_flight_poll(qapp, tmp_path):
     import time as _time
 
     win = make_window(qapp, tmp_path)
-    win.ctx.manager.refresh = lambda _m: _time.sleep(0.2)
+    win.ctx.manager.refresh = lambda _m, _g=(): _time.sleep(0.2)
     win._tick()
     assert win._poller.is_busy()
 

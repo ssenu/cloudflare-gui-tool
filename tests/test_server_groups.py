@@ -1,0 +1,193 @@
+"""서버 카테고리(터널 없는 서버 묶음)의 메인 창 통합 테스트.
+
+핵심: 이 카드에는 터널 토글이 없고, 터널 목록과 같은 목록에 섞여 나오며,
+드래그로 순서를 바꿀 수 있고, 그 순서가 저장된다.
+"""
+from __future__ import annotations
+
+import pytest
+from PyQt6.QtWidgets import QApplication, QMessageBox
+
+from app.context import AppContext
+from app.core.runner import RunResult
+from app.core.store import (RouteMeta, ServerGroupMeta, ServiceSpec,
+                            SettingsStore, new_route_id)
+from app.ui.main_window import MainWindow, ServerGroupCard
+from tests.fake_runner import FakeRunner
+
+LIST_TUNNELS_CMD = ("cloudflared", "tunnel", "list", "--output", "json")
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def _silence(monkeypatch):
+    for name in ("warning", "critical", "information"):
+        monkeypatch.setattr(QMessageBox, name, lambda *a, **k: None)
+
+
+def make_window(qapp, tmp_path, tunnels_json="[]", groups=None):
+    store = SettingsStore(path=str(tmp_path / "settings.json"))
+    ctx = AppContext(store=store)
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(0, tunnels_json, "")
+    ctx.runner = runner
+    ctx.local_runner = runner
+    for g in groups or []:
+        ctx.store.settings.server_groups_for(runner.name).append(g)
+    win = MainWindow(ctx)
+    win._timer.stop()
+    win.refresh()
+    return win
+
+
+def docker_server(label="api", cwd="/srv/api"):
+    return RouteMeta(id=new_route_id(), hostname="", service="http://localhost:8000",
+                     label=label,
+                     server=ServiceSpec(kind="docker", cwd=cwd,
+                                        start_cmd="docker compose up -d",
+                                        stop_cmd="docker compose down"))
+
+
+# ---- 카드 렌더링 ----
+
+def test_server_group_card_is_rendered_without_a_tunnel_switch(qapp, tmp_path):
+    group = ServerGroupMeta(id="aabbccdd", name="백엔드", servers=[docker_server()])
+    win = make_window(qapp, tmp_path, groups=[group])
+
+    assert len(win.server_cards) == 1
+    card = win.server_cards[0]
+    assert isinstance(card, ServerGroupCard)
+    assert card.group.name == "백엔드"
+    # 터널 토글이 없는 것이 이 카드의 정의다
+    assert not hasattr(card, "tunnel_switch")
+    # 서버는 라우트 행과 같은 방식으로 한 줄씩 나온다
+    assert len(card.route_rows) == 1
+    assert card.route_rows[0].route.label == "api"
+
+
+def test_server_row_has_no_domain_column(qapp, tmp_path):
+    group = ServerGroupMeta(id="aabbccdd", name="백엔드", servers=[docker_server()])
+    win = make_window(qapp, tmp_path, groups=[group])
+
+    row = win.server_cards[0].route_rows[0]
+    assert row.domain_label is None
+
+
+def test_group_card_owner_key_is_namespaced_for_units(qapp, tmp_path):
+    """유닛 이름이 터널과 겹치지 않아야 한다."""
+    from app.core.run_registry import group_owner_key
+
+    group = ServerGroupMeta(id="aabbccdd", name="백엔드", servers=[docker_server()])
+    win = make_window(qapp, tmp_path, groups=[group])
+
+    assert win.server_cards[0].owner == group_owner_key("aabbccdd")
+
+
+def test_adding_a_group_persists_and_renders(qapp, tmp_path):
+    win = make_window(qapp, tmp_path)
+
+    win._create_server_group("백엔드")
+
+    assert len(win.server_cards) == 1
+    saved = SettingsStore(path=win.ctx.store.path).load()
+    assert [g.name for g in saved.server_groups_for("fake")] == ["백엔드"]
+
+
+def test_duplicate_group_name_is_rejected(qapp, tmp_path):
+    win = make_window(qapp, tmp_path)
+    win._create_server_group("백엔드")
+    win._create_server_group("백엔드")
+    assert len(win.ctx.store.settings.server_groups_for("fake")) == 1
+
+
+# ---- 폴링 ----
+
+def test_tick_polls_group_servers(qapp, tmp_path):
+    """그룹 서버도 도커 폴링 대상에 들어가야 상태가 갱신된다."""
+    group = ServerGroupMeta(id="aabbccdd", name="백엔드", servers=[docker_server()])
+    win = make_window(qapp, tmp_path, groups=[group])
+    win.ctx.runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(
+        0, "abc123\n", "")
+
+    win.ctx.manager.refresh([], groups=[group])
+
+    from app.core.run_registry import group_owner_key
+    assert win.ctx.manager.service_running(group_owner_key(group.id),
+                                           group.servers[0]) is True
+
+
+# ---- 순서 바꾸기 ----
+
+def test_reorder_moves_card_and_persists(qapp, tmp_path):
+    a = ServerGroupMeta(id="aaaaaaaa", name="A")
+    b = ServerGroupMeta(id="bbbbbbbb", name="B")
+    win = make_window(qapp, tmp_path, groups=[a, b])
+    assert [c.group.name for c in win.server_cards] == ["A", "B"]
+
+    win._reorder_card("fake", "s:bbbbbbbb", before="s:aaaaaaaa")
+
+    assert [c.group.name for c in win.server_cards] == ["B", "A"]
+    saved = SettingsStore(path=win.ctx.store.path).load()
+    assert saved.card_order["fake"] == ["s:bbbbbbbb", "s:aaaaaaaa"]
+
+
+def test_saved_order_survives_a_rerender(qapp, tmp_path):
+    """1초 폴링이 화면을 다시 그려도 순서가 되돌아가면 안 된다."""
+    a = ServerGroupMeta(id="aaaaaaaa", name="A")
+    b = ServerGroupMeta(id="bbbbbbbb", name="B")
+    win = make_window(qapp, tmp_path, groups=[a, b])
+    win._reorder_card("fake", "s:bbbbbbbb", before="s:aaaaaaaa")
+
+    win.refresh(fetch=False)
+
+    assert [c.group.name for c in win.server_cards] == ["B", "A"]
+
+
+def test_reorder_across_owner_groups_is_rejected(qapp, tmp_path):
+    """터널이 어느 기기 소속인지는 자격증명 위치라 드래그로 바꿀 수 없다."""
+    a = ServerGroupMeta(id="aaaaaaaa", name="A")
+    win = make_window(qapp, tmp_path, groups=[a])
+
+    moved = win._reorder_card("ssh:다른기기", "s:aaaaaaaa", before=None)
+
+    assert moved is False
+    assert "ssh:다른기기" not in win.ctx.store.settings.card_order
+
+
+# ---- 삭제 ----
+
+def test_deleting_a_group_stops_servers_and_removes_it(qapp, tmp_path):
+    server = docker_server()
+    group = ServerGroupMeta(id="aabbccdd", name="백엔드", servers=[server])
+    win = make_window(qapp, tmp_path, groups=[group])
+    stopped = []
+    win.ctx.manager.stop_service = lambda owner, route: stopped.append(route.id)
+
+    win._do_delete_server_group(win.server_cards[0])
+
+    assert stopped == [server.id]
+    assert win.ctx.store.settings.server_groups_for("fake") == []
+    assert win.server_cards == []
+
+
+def test_drop_before_uses_real_card_geometry(qapp, tmp_path):
+    """드롭 지점 y가 어느 카드 앞인지 실제 위젯 위치로 계산되어야 한다."""
+    a = ServerGroupMeta(id="aaaaaaaa", name="A")
+    b = ServerGroupMeta(id="bbbbbbbb", name="B")
+    win = make_window(qapp, tmp_path, groups=[a, b])
+    win.resize(900, 600)
+    win.show()
+    QApplication.processEvents()
+    win.card_list.layout().activate()
+
+    first, second = win.server_cards
+    # 첫 카드 위쪽 절반 -> 첫 카드 앞
+    assert win._drop_before("fake", first.y() + 2, "s:bbbbbbbb") == "s:aaaaaaaa"
+    # 둘째 카드 아래쪽 절반 -> 맨 뒤
+    assert win._drop_before("fake", second.y() + second.height() - 2,
+                            "s:aaaaaaaa") is None
+    win.close()

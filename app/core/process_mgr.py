@@ -8,7 +8,7 @@ from typing import Callable
 
 from app.core import autostart
 from app.core.cloudflared import CloudflaredClient
-from app.core.run_registry import RunRegistry
+from app.core.run_registry import RunRegistry, group_owner_key
 from app.core.store import RouteMeta, TunnelMeta
 
 RUNNING_MARKER = "Registered tunnel connection"
@@ -291,9 +291,9 @@ class ProcessManager:
         return self._mismatch_reason.get(reg.unit_tunnel(name))
 
     # ---- 서비스 ----
-    def start_service(self, tunnel: str, route: RouteMeta) -> None:
+    def start_service(self, owner: str, route: RouteMeta) -> None:
         reg = self._registry()
-        unit = reg.unit_service(tunnel, route.id)
+        unit = reg.unit_service(owner, route.id)
         server = route.server
         if server.kind == "docker":
             cmd = _split_cmd(server.start_cmd) if server.start_cmd.strip() else DOCKER_START_DEFAULT
@@ -330,9 +330,9 @@ class ProcessManager:
         self._mismatch_reason.pop(unit, None)
         self._set_pending(unit, True, PENDING_TIMEOUT_COMMAND)
 
-    def stop_service(self, tunnel: str, route: RouteMeta) -> None:
+    def stop_service(self, owner: str, route: RouteMeta) -> None:
         reg = self._registry()
-        unit = reg.unit_service(tunnel, route.id)
+        unit = reg.unit_service(owner, route.id)
         server = route.server
         if server.kind == "docker":
             cmd = _split_cmd(server.stop_cmd) if server.stop_cmd.strip() else DOCKER_STOP_DEFAULT
@@ -362,29 +362,29 @@ class ProcessManager:
         self._mismatch_reason.pop(unit, None)
         self._set_pending(unit, False, PENDING_TIMEOUT_COMMAND)
 
-    def service_pending(self, tunnel: str, route: RouteMeta) -> bool:
+    def service_pending(self, owner: str, route: RouteMeta) -> bool:
         reg = self._registry()
-        return self._is_pending(reg.unit_service(tunnel, route.id))
+        return self._is_pending(reg.unit_service(owner, route.id))
 
-    def service_pending_desired(self, tunnel: str, route: RouteMeta) -> bool | None:
+    def service_pending_desired(self, owner: str, route: RouteMeta) -> bool | None:
         reg = self._registry()
-        return self._pending_desired(reg.unit_service(tunnel, route.id))
+        return self._pending_desired(reg.unit_service(owner, route.id))
 
-    def service_running(self, tunnel: str, route: RouteMeta) -> bool:
+    def service_running(self, owner: str, route: RouteMeta) -> bool:
         reg = self._registry()
-        unit = reg.unit_service(tunnel, route.id)
+        unit = reg.unit_service(owner, route.id)
         if route.server.kind == "docker":
             return self._docker_running.get(unit, False)
         has_pid, alive = self._alive.get(unit, (False, False))
         return has_pid and alive
 
-    def docker_error(self, tunnel: str, route: RouteMeta) -> str | None:
+    def docker_error(self, owner: str, route: RouteMeta) -> str | None:
         """가장 최근 docker compose ps 조회 실패 사유(메모리만, I5/C4용)."""
         reg = self._registry()
-        unit = reg.unit_service(tunnel, route.id)
+        unit = reg.unit_service(owner, route.id)
         return self._docker_error.get(unit)
 
-    def service_mismatch_reason(self, tunnel: str, route: RouteMeta) -> str | None:
+    def service_mismatch_reason(self, owner: str, route: RouteMeta) -> str | None:
         """D2: 이름 불일치로 확정된 사유(UI 툴팁용). 없으면 None.
 
         서비스는 PID가 살아있는 한 service_running()이 계속 True를 준다
@@ -392,7 +392,7 @@ class ProcessManager:
         토글을 끄지 않는다) - 이 사유는 그 토글의 툴팁으로만 노출된다.
         """
         reg = self._registry()
-        unit = reg.unit_service(tunnel, route.id)
+        unit = reg.unit_service(owner, route.id)
         return self._mismatch_reason.get(unit)
 
     # ---- 로그 경로 ----
@@ -400,9 +400,9 @@ class ProcessManager:
         reg = self._registry()
         return reg.log_path(reg.unit_tunnel(name))
 
-    def log_path_for_service(self, tunnel: str, route: RouteMeta) -> str:
+    def log_path_for_service(self, owner: str, route: RouteMeta) -> str:
         reg = self._registry()
-        return reg.log_path(reg.unit_service(tunnel, route.id))
+        return reg.log_path(reg.unit_service(owner, route.id))
 
     def _remove_log_files(self, reg: RunRegistry, unit: str) -> None:
         for path in (reg.log_path(unit), reg.log_path(unit) + ".1"):
@@ -416,13 +416,18 @@ class ProcessManager:
         reg = self._registry()
         self._remove_log_files(reg, reg.unit_tunnel(name))
 
-    def cleanup_logs_for_service(self, tunnel: str, route: RouteMeta) -> None:
+    def cleanup_logs_for_service(self, owner: str, route: RouteMeta) -> None:
         reg = self._registry()
-        self._remove_log_files(reg, reg.unit_service(tunnel, route.id))
+        self._remove_log_files(reg, reg.unit_service(owner, route.id))
 
     # ---- 폴링 ----
-    def refresh(self, tunnels: list[TunnelMeta]) -> None:
-        """단위 수와 무관하게 PID 생존 확인은 pids_alive() 한 번으로 끝낸다."""
+    def refresh(self, tunnels: list[TunnelMeta], groups=()) -> None:
+        """단위 수와 무관하게 PID 생존 확인은 pids_alive() 한 번으로 끝낸다.
+
+        groups는 터널에 속하지 않는 서버 카테고리(ServerGroupMeta) 목록이다.
+        그 안의 서버도 터널 라우트와 똑같이 폴링 대상에 들어가므로, 상태 판정
+        (컨테이너 + 실제 HTTP 응답)과 전이 스피너가 동일하게 동작한다.
+        """
         reg = self._registry()  # 대상 전환 시 _ensure_target()이 캐시를 비운다
 
         # systemd가 관리하는 터널은 PID 파일이 없다(부팅 때 systemd가 띄운다).
@@ -442,9 +447,11 @@ class ProcessManager:
         tunnel_units = [reg.unit_tunnel(t.name) for t in tunnels]
         command_units: list[str] = []
         docker_units: list[tuple[str, str, str]] = []  # (unit, cwd, 서비스 주소)
-        for t in tunnels:
-            for r in t.routes:
-                unit = reg.unit_service(t.name, r.id)
+        owned_routes = [(t.name, t.routes) for t in tunnels]
+        owned_routes += [(group_owner_key(g.id), g.servers) for g in groups]
+        for owner, routes in owned_routes:
+            for r in routes:
+                unit = reg.unit_service(owner, r.id)
                 if r.server.kind == "docker":
                     docker_units.append((unit, r.server.cwd, r.service))
                 else:
@@ -613,17 +620,17 @@ class ProcessManager:
             return False
         return None  # 그 외(엉뚱한 환경)는 판정하지 않는다
 
-    def mark_service_pending(self, tunnel: str, route: RouteMeta) -> None:
+    def mark_service_pending(self, owner: str, route: RouteMeta) -> None:
         """전이 중(배포 등)임을 표시한다. 실제 상태는 폴링이 곧 확정한다."""
         reg = self._registry()
-        unit = reg.unit_service(tunnel, route.id)
+        unit = reg.unit_service(owner, route.id)
         desired = self._docker_running.get(unit, False) if route.server.kind == "docker" else True
         self._set_pending(unit, desired, PENDING_TIMEOUT_DOCKER)
 
-    def append_service_log(self, tunnel: str, route: RouteMeta, text: str) -> None:
+    def append_service_log(self, owner: str, route: RouteMeta, text: str) -> None:
         """서비스 로그에 한 줄 남긴다(배포 진행 상황 등을 로그 탭에서 보게)."""
         reg = self._registry()
-        self._append_log(reg, reg.unit_service(tunnel, route.id), text)
+        self._append_log(reg, reg.unit_service(owner, route.id), text)
 
     def _append_log(self, reg: RunRegistry, unit: str, text: str) -> None:
         reg.runner.append_file(reg.log_path(unit), text + "\n")

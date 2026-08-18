@@ -33,6 +33,20 @@ class TunnelMeta:
     boot_autostart: bool = False
 
 
+@dataclass
+class ServerGroupMeta:
+    """터널에 속하지 않는 서버 묶음(= 화면의 '서버 카테고리' 카드).
+
+    안에 담는 항목은 RouteMeta를 그대로 쓴다 - 서버 하나를 표현하는 데 필요한
+    것(label/service/server)이 이미 전부 있고, 다른 점은 hostname이 항상 빈
+    문자열(= 도메인도 DNS 레코드도 없음)이라는 것뿐이다. 별도 타입을 만들면
+    라우트 행과 서버 행이 공유하는 표시·실행 코드가 두 벌이 된다.
+    """
+    id: str                      # new_route_id()와 같은 8자리 hex
+    name: str                    # 카드 제목 (예: "백엔드")
+    servers: list[RouteMeta] = field(default_factory=list)
+
+
 def new_route_id() -> str:
     """라우트의 안정적인 식별자를 생성한다 (hostname이 바뀌어도 PID/로그와의 연결 유지)"""
     return secrets.token_hex(4)
@@ -82,6 +96,12 @@ class Settings:
     # 사용자가 "모두 정상"인 상태에서 직접 체크했을 때만 들어간다 - 그래서 새
     # 기기는 최초 1회 반드시 점검을 거친다.
     prereq_skip: list[str] = field(default_factory=list)
+    # 대상(로컬/SSH 프로필)별 서버 카테고리 목록. repos와 같은 이유로 대상
+    # 키로 나눈다 - 작업 폴더 경로도 컨테이너도 기기마다 다르다.
+    server_groups: dict[str, list[ServerGroupMeta]] = field(default_factory=dict)
+    # 기기 그룹(owner_key)별 카드 표시 순서. 항목 키는 터널이면 "t:<이름>",
+    # 서버 카테고리면 "s:<그룹id>". 여기에 없는 카드는 뒤에 붙는다.
+    card_order: dict[str, list[str]] = field(default_factory=dict)
     # 마지막 창 크기/위치 (x, y, w, h). 비어 있으면 기본값으로 연다.
     # 매번 같은 크기로 시작하면 넓게 놓고 쓰는 사람은 켤 때마다 다시 늘려야 한다.
     window_geometry: list[int] = field(default_factory=list)
@@ -102,6 +122,10 @@ class Settings:
     def repos_for(self, target_key: str) -> list[RepoMeta]:
         """target_key에 해당하는 저장소 목록을 돌려준다. 없으면 새로 만들어 등록한다."""
         return self.repos.setdefault(target_key, [])
+
+    def server_groups_for(self, target_key: str) -> list[ServerGroupMeta]:
+        """target_key에 해당하는 서버 카테고리 목록. 없으면 새로 만들어 등록한다."""
+        return self.server_groups.setdefault(target_key, [])
 
 
 def _filter_dataclass_kwargs(dataclass_type, data: dict) -> dict:
@@ -211,6 +235,28 @@ def _parse_repos_list(repos_data) -> list[RepoMeta]:
     return repos
 
 
+def _parse_server_group(data) -> ServerGroupMeta:
+    """dict를 ServerGroupMeta로 변환. id/name이 비어 있지 않은 문자열이어야 한다."""
+    kwargs = _filter_dataclass_kwargs(ServerGroupMeta, data)
+    for key in ("id", "name"):
+        if not isinstance(kwargs.get(key), str) or not kwargs.get(key):
+            raise TypeError(f"{key} must be non-empty str")
+    kwargs["servers"] = _parse_routes_list(kwargs.get("servers"))
+    return ServerGroupMeta(**kwargs)
+
+
+def _parse_server_groups_list(groups_data) -> list[ServerGroupMeta]:
+    """서버 카테고리 배열을 파싱. 잘못된 항목은 개별 스킵."""
+    groups: list[ServerGroupMeta] = []
+    if isinstance(groups_data, list):
+        for g in groups_data:
+            try:
+                groups.append(_parse_server_group(g))
+            except (TypeError, ValueError):
+                continue
+    return groups
+
+
 def default_settings_path() -> str:
     base = os.environ.get("APPDATA") or os.path.expanduser("~")
     return os.path.join(base, "CloudflareTunnelGUI", "settings.json")
@@ -299,6 +345,25 @@ class SettingsStore:
                             continue
                         repos[target_key] = _parse_repos_list(repo_list)
 
+                # 대상별 서버 카테고리(터널 없는 서버 묶음). repos와 같은 형태.
+                server_groups: dict[str, list[ServerGroupMeta]] = {}
+                groups_data = raw.get("server_groups", {})
+                if isinstance(groups_data, dict):
+                    for target_key, group_list in groups_data.items():
+                        if not isinstance(target_key, str):
+                            continue
+                        server_groups[target_key] = _parse_server_groups_list(group_list)
+
+                # 카드 표시 순서. 문자열 키 -> 문자열 목록만 받아들이고,
+                # 목록 안의 비문자열 항목은 개별로 걸러낸다.
+                card_order: dict[str, list[str]] = {}
+                order_data = raw.get("card_order", {})
+                if isinstance(order_data, dict):
+                    for owner_key, keys in order_data.items():
+                        if not isinstance(owner_key, str) or not isinstance(keys, list):
+                            continue
+                        card_order[owner_key] = [k for k in keys if isinstance(k, str)]
+
                 repo_root = raw.get("repo_root", "/srv/apps")
                 if not isinstance(repo_root, str):
                     repo_root = "/srv/apps"
@@ -336,6 +401,8 @@ class SettingsStore:
                     tunnel_owners=tunnel_owners,
                     prereq_skip=prereq_skip,
                     window_geometry=window_geometry,
+                    server_groups=server_groups,
+                    card_order=card_order,
                 )
 
                 # v1 형식에서 실제로 마이그레이션이 일어난 경우에만 재저장.
@@ -376,6 +443,14 @@ class SettingsStore:
             "tunnel_owners": dict(self.settings.tunnel_owners),
             "prereq_skip": list(self.settings.prereq_skip),
             "window_geometry": list(self.settings.window_geometry),
+            "server_groups": {
+                target_key: [asdict(g) for g in group_list]
+                for target_key, group_list in self.settings.server_groups.items()
+            },
+            "card_order": {
+                owner_key: list(keys)
+                for owner_key, keys in self.settings.card_order.items()
+            },
         }
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump(raw, f, ensure_ascii=False, indent=2)

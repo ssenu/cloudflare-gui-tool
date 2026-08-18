@@ -8,6 +8,17 @@ from app.core.runner import CommandRunner
 logger = logging.getLogger(__name__)
 
 
+def group_owner_key(group_id: str) -> str:
+    """서버 카테고리를 유닛 이름의 '소유 키' 자리에 넣을 때 쓰는 값.
+
+    유닛 이름은 ``svc-<소유 키>-<서버 id>`` 형식이고, 소유 키는 터널이면
+    터널 이름이다. 그룹 id는 8자리 hex라 ``g`` 접두사만 붙이면 터널 이름과
+    겹칠 일이 사실상 없고, 무엇보다 **기존 터널 서비스의 유닛 이름이 전혀
+    바뀌지 않는다** - 지금 돌고 있는 서비스의 PID/로그 파일이 그대로 유효하다.
+    """
+    return f"g{group_id}"
+
+
 class RunRegistry:
     """대상 머신의 ``~/.cloudflare-gui/run/`` 아래 PID·로그 파일을 관리한다.
 
@@ -29,8 +40,9 @@ class RunRegistry:
     def unit_tunnel(self, name: str) -> str:
         return f"tunnel-{name}"
 
-    def unit_service(self, tunnel: str, route_id: str) -> str:
-        return f"svc-{tunnel}-{route_id}"
+    def unit_service(self, owner: str, route_id: str) -> str:
+        """서비스 유닛 이름. owner는 터널 이름 또는 group_owner_key(그룹id)."""
+        return f"svc-{owner}-{route_id}"
 
     def unit_clone(self, repo_id: str) -> str:
         return f"clone-{repo_id}"

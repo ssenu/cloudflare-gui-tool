@@ -822,3 +822,79 @@ def test_save_works_with_bare_filename(tmp_path, monkeypatch):
     store.load()
     store.save()
     assert (tmp_path / "only-name.json").exists()
+
+
+# ---- 서버 카테고리 (터널 없는 서버 묶음) ----
+
+def test_server_groups_roundtrip(tmp_path):
+    """서버 카테고리는 대상별로 저장되고 그대로 다시 읽혀야 한다."""
+    from app.core.store import ServerGroupMeta
+
+    path = str(tmp_path / "settings.json")
+    store = SettingsStore(path=path)
+    store.load()
+    store.settings.server_groups_for("ssh:rpi").append(
+        ServerGroupMeta(
+            id="aabbccdd",
+            name="백엔드",
+            servers=[
+                RouteMeta(
+                    id="11223344",
+                    hostname="",
+                    service="http://localhost:8000",
+                    label="api",
+                    server=ServiceSpec(kind="docker", cwd="/srv/apps/api"),
+                )
+            ],
+        ))
+    store.save()
+
+    loaded = SettingsStore(path=path).load()
+    groups = loaded.server_groups_for("ssh:rpi")
+    assert len(groups) == 1
+    assert groups[0].name == "백엔드"
+    assert groups[0].servers[0].label == "api"
+    assert groups[0].servers[0].server.kind == "docker"
+    assert groups[0].servers[0].hostname == ""
+    # 다른 대상에는 새어 나가지 않는다
+    assert loaded.server_groups_for("local") == []
+
+
+def test_server_groups_skip_invalid_entries(tmp_path):
+    """id/name이 없는 항목만 개별로 건너뛰고 나머지는 살린다."""
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({"server_groups": {"local": [
+        {"name": "이름만 있음"},                       # id 없음 -> 스킵
+        {"id": "aabbccdd", "name": ""},                # name 빈 문자열 -> 스킵
+        {"id": "11112222", "name": "정상", "servers": []},
+    ]}}), encoding="utf-8")
+
+    settings = SettingsStore(path=str(path)).load()
+
+    assert [g.name for g in settings.server_groups_for("local")] == ["정상"]
+
+
+def test_missing_server_group_fields_load_as_empty(tmp_path):
+    """옛 설정 파일에는 없는 필드다 - 없어도 정상 로드되어야 한다."""
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({"root_domain": "example.com"}), encoding="utf-8")
+
+    settings = SettingsStore(path=str(path)).load()
+
+    assert settings.server_groups == {}
+    assert settings.card_order == {}
+
+
+def test_card_order_roundtrip_and_validation(tmp_path):
+    """카드 순서는 문자열 키/문자열 목록만 받아들인다."""
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({"card_order": {
+        "local": ["t:mysite", "s:aabbccdd", 7],   # 숫자 항목은 걸러진다
+        "ssh:rpi": "문자열이라 목록이 아님",         # 통째로 스킵
+        9: ["t:x"],                                # JSON에서 키는 문자열이 되지만 방어
+    }}), encoding="utf-8")
+
+    settings = SettingsStore(path=str(path)).load()
+
+    assert settings.card_order["local"] == ["t:mysite", "s:aabbccdd"]
+    assert "ssh:rpi" not in settings.card_order

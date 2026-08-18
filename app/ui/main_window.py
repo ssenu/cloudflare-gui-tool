@@ -3,19 +3,23 @@ from __future__ import annotations
 import time
 import webbrowser
 
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QAction
-from PyQt6.QtWidgets import (QApplication, QComboBox, QFrame, QHBoxLayout, QLabel,
-                             QMenu, QMessageBox, QPushButton, QScrollArea,
-                             QSizePolicy, QVBoxLayout, QWidget)
+from PyQt6.QtCore import Qt, QMimeData, QTimer
+from PyQt6.QtGui import QAction, QDrag
+from PyQt6.QtWidgets import (QApplication, QComboBox, QFrame, QHBoxLayout,
+                             QInputDialog, QLabel, QMenu, QMessageBox,
+                             QPushButton, QScrollArea, QSizePolicy,
+                             QVBoxLayout, QWidget)
 
 from app.context import AppContext
+from app.core.card_order import apply_order, card_key_group, card_key_server, drop_target, move_key
 from app.core.cloudflared import CloudflaredError
 from app.core.config_yml import get_routes, parse_config, set_routes
 from app.core.process_mgr import TunnelState
 from app.core.confirm import (group_by_owner, owner_group_label, owner_label,
                               route_display_label)
-from app.core.store import RouteMeta, SshProfile, TunnelMeta, new_route_id
+from app.core.run_registry import group_owner_key
+from app.core.store import (RouteMeta, ServerGroupMeta, SshProfile, TunnelMeta,
+                            new_route_id)
 from app.ui.icons import make_icon
 from app.ui.poller import BackgroundPoller
 from app.ui.theme import STATE_COLORS, build_qss, current_palette, ensure_qss_icons
@@ -25,11 +29,15 @@ from app.ui.wizard import TunnelWizard
 
 ADD_SSH_TARGET = "__add__"
 
+# 카드 드래그의 mime 타입. 다른 앱에서 끌어온 것과 섞이지 않게 고유 이름을 쓴다.
+CARD_MIME = "application/x-cft-card"
+
 TOP_BTN_HEIGHT = 34  # 상단 바 버튼/콤보 공통 높이
 
 LOADING_TEXT = "터널 목록을 불러오는 중..."
-EMPTY_TEXT = ("아직 터널이 없습니다.\n"
-              "위의 '＋터널 생성'으로 첫 터널을 만들어 보세요.")
+EMPTY_TEXT = ("아직 아무것도 없습니다.\n"
+              "위의 '＋터널 생성'으로 도메인에 연결할 터널을 만들거나,\n"
+              "'＋서버 카테고리'로 이 기기에서만 돌릴 서버를 모아 보세요.")
 
 # C1: 폴링(_tick) 간격. 정상일 땐 1초, 대상 연결이 끊긴 것으로 보이면 5초로
 # 물러나 실패한 원격 호출을 계속 재시도하며 UI를 붙잡지 않게 한다.
@@ -86,12 +94,21 @@ def _route_vline(palette: dict) -> QFrame:
 
 
 class RouteRow(QWidget):
-    """라우트 한 줄: 상태 동그라미, 이름/도메인/서비스 3열, 서버 토글(또는 등록 버튼), 메뉴."""
+    """라우트 한 줄: 상태 동그라미, 이름/도메인/서비스 3열, 서버 토글(또는 등록 버튼), 메뉴.
 
-    def __init__(self, card: "TunnelCard", route: RouteMeta):
+    서버 카테고리 카드도 이 행을 그대로 쓴다(server_mode=True). 그쪽은 도메인이
+    없으므로 도메인 열과 '접속 확인'만 빠지고, 상태 표시·토글·배포는 완전히
+    같은 코드를 탄다 - 두 벌로 나뉘면 한쪽만 고쳐지는 일이 생긴다.
+
+    카드와 이야기할 때는 card.owner(유닛 이름의 소유 키)와 card.edit_route/
+    delete_route/deploy_route만 쓴다. 어느 카드인지 여기서 분기하지 않는다.
+    """
+
+    def __init__(self, card, route: RouteMeta, server_mode: bool = False):
         super().__init__(card)
         self.card = card
         self.route = route
+        self.server_mode = server_mode
         win = card.win
         palette = current_palette(win.ctx.store.settings.theme)
         icon_color = palette["text"]
@@ -114,22 +131,26 @@ class RouteRow(QWidget):
         # 도메인은 눌러서 브라우저로 여는 링크다. 라우트를 만든 직후 "실제로
         # 열리나" 확인하는 것이 가장 흔한 다음 행동이라, 주소를 복사해 붙여넣는
         # 과정을 없앤다. hostname이 없으면 링크가 아니라 안내 문구로 둔다.
-        hostname = route.hostname or "(hostname 미설정)"
-        self.domain_label = QLabel()
-        self.domain_label.setFixedWidth(ROUTE_DOMAIN_COL_WIDTH)
-        domain_metrics = self.domain_label.fontMetrics()
-        elided = _elide(hostname, domain_metrics, ROUTE_DOMAIN_COL_WIDTH - 8)
-        if route.hostname:
+        #
+        # 서버 카테고리 행에는 도메인이 아예 없다. 빈 열을 남기면 그 자리가
+        # "아직 설정하지 않은 무언가"처럼 보이므로 열 자체를 만들지 않는다.
+        self.domain_label = None
+        if not server_mode:
+            hostname = route.hostname or "(hostname 미설정)"
+            self.domain_label = QLabel()
+            self.domain_label.setFixedWidth(ROUTE_DOMAIN_COL_WIDTH)
+            domain_metrics = self.domain_label.fontMetrics()
+            elided = _elide(hostname, domain_metrics, ROUTE_DOMAIN_COL_WIDTH - 8)
             self.domain_label.setText(elided)
-            self.domain_label.setStyleSheet(
-                f"color: {palette['accent2']}; text-decoration: underline;")
-            self.domain_label.setCursor(Qt.CursorShape.PointingHandCursor)
-            self.domain_label.setToolTip(f"https://{hostname} 열기")
-            self.domain_label.mouseReleaseEvent = self._open_site
-        else:
-            self.domain_label.setText(elided)
-            self.domain_label.setStyleSheet(f"color: {palette['muted']};")
-            self.domain_label.setToolTip(hostname)
+            if route.hostname:
+                self.domain_label.setStyleSheet(
+                    f"color: {palette['accent2']}; text-decoration: underline;")
+                self.domain_label.setCursor(Qt.CursorShape.PointingHandCursor)
+                self.domain_label.setToolTip(f"https://{hostname} 열기")
+                self.domain_label.mouseReleaseEvent = self._open_site
+            else:
+                self.domain_label.setStyleSheet(f"color: {palette['muted']};")
+                self.domain_label.setToolTip(hostname)
 
         service = route.service or "(서비스 미설정)"
         self.service_label = QLabel()
@@ -165,8 +186,9 @@ class RouteRow(QWidget):
         lay.addWidget(self.dot)
         lay.addWidget(self.name_label)
         lay.addWidget(_route_vline(palette))
-        lay.addWidget(self.domain_label)
-        lay.addWidget(_route_vline(palette))
+        if self.domain_label is not None:
+            lay.addWidget(self.domain_label)
+            lay.addWidget(_route_vline(palette))
         lay.addWidget(self.service_label, 1)
         lay.addWidget(toggle_label)
         lay.addWidget(self.server_switch if self.server_switch else self.register_btn)
@@ -178,9 +200,9 @@ class RouteRow(QWidget):
         ctx = self.card.win.ctx
         try:
             if checked:
-                ctx.manager.start_service(self.card.tunnel_name, self.route)
+                ctx.manager.start_service(self.card.owner, self.route)
             else:
-                ctx.manager.stop_service(self.card.tunnel_name, self.route)
+                ctx.manager.stop_service(self.card.owner, self.route)
         except Exception as ex:
             QMessageBox.critical(self, "서버 오류", str(ex))
         self.card.win.info_banner.hide()
@@ -197,13 +219,15 @@ class RouteRow(QWidget):
         deploy.setToolTip(
             "최신 코드를 받고 이 서버를 다시 시작합니다" if self.route.server.cwd
             else "작업 폴더가 지정된 서버에서만 쓸 수 있습니다")
-        deploy.triggered.connect(lambda: win._deploy_route(self.card, self.route))
+        deploy.triggered.connect(lambda: self.card.deploy_route(self.route))
         m.addAction(deploy)
-        check = QAction("접속 확인", m)
-        check.setEnabled(bool(self.route.hostname))
-        check.setToolTip("실제로 그 주소를 열어 보고 결과를 알려줍니다")
-        check.triggered.connect(lambda: win._check_site(self.route))
-        m.addAction(check)
+        if not self.server_mode:
+            # 공개 주소가 없는 서버에는 "열어 볼 곳"이 없다.
+            check = QAction("접속 확인", m)
+            check.setEnabled(bool(self.route.hostname))
+            check.setToolTip("실제로 그 주소를 열어 보고 결과를 알려줍니다")
+            check.triggered.connect(lambda: win._check_site(self.route))
+            m.addAction(check)
         edit_action = QAction("편집", m)
         edit_action.triggered.connect(self._edit_route)
         m.addAction(edit_action)
@@ -220,37 +244,36 @@ class RouteRow(QWidget):
         webbrowser.open(f"https://{self.route.hostname}")
 
     def _edit_route(self):
-        self.card.win._edit_route(self.card, self.route)
+        self.card.edit_route(self.route)
 
     def _delete_route(self):
-        self.card.win._delete_route(self.card, self.route)
+        self.card.delete_route(self.route)
 
     def update_state(self):
         ctx = self.card.win.ctx
+        owner = self.card.owner
         palette = current_palette(ctx.store.settings.theme)
         pending = False
         running = False
         if self.server_switch is not None:
-            pending = ctx.manager.service_pending(self.card.tunnel_name, self.route)
-            running = ctx.manager.service_running(self.card.tunnel_name, self.route)
+            pending = ctx.manager.service_pending(owner, self.route)
+            running = ctx.manager.service_running(owner, self.route)
             # 전이 중에는 "가는 방향"에 노브를 고정한다. 실제 상태로 그리면
             # 시작 직후 살아있다고 나왔다가 폴링 결과가 도착하며 꺼진 자리로
             # 되돌아오는 식으로 노브가 왔다 갔다 한다.
-            desired = ctx.manager.service_pending_desired(self.card.tunnel_name,
-                                                          self.route)
+            desired = ctx.manager.service_pending_desired(owner, self.route)
             shown = desired if (pending and desired is not None) else running
             self.server_switch.sync(shown, pending)
             if self.route.server.kind == "docker":
                 # I5: 도커 조회 실패 사유를 토글 툴팁으로 보여준다.
-                err = ctx.manager.docker_error(self.card.tunnel_name, self.route)
+                err = ctx.manager.docker_error(owner, self.route)
                 if err:
                     self.server_switch.setToolTip(err)
             else:
                 # D2: PID 재사용 의심(명령 불일치 확정) 사유를 같은 자리에
                 # 툴팁으로 보여준다. 서비스는 꺼짐으로 표시하지 않는다 -
                 # PID는 여전히 살아있으므로 "확인 불가"일 뿐이다.
-                reason = ctx.manager.service_mismatch_reason(self.card.tunnel_name,
-                                                              self.route)
+                reason = ctx.manager.service_mismatch_reason(owner, self.route)
                 if reason:
                     self.server_switch.setToolTip(reason)
 
@@ -272,6 +295,76 @@ class RouteRow(QWidget):
             self._dot_color = dot_color
             self.dot.setStyleSheet(
                 f"background: {dot_color}; border-radius: {ROUTE_DOT_SIZE // 2}px;")
+
+
+class DragHandle(QLabel):
+    """카드 헤더 맨 왼쪽의 '☰'. 잡아서 카드 순서를 바꾼다.
+
+    카드 전체를 잡게 하지 않는 이유: 카드 안에는 토글과 메뉴 버튼이 있어,
+    누른 채 살짝만 움직여도 의도치 않게 드래그가 시작된다. 잡는 곳을 손잡이
+    하나로 좁혀 두면 그런 오조작이 없다.
+    """
+
+    def __init__(self, card, palette: dict):
+        super().__init__("☰")
+        self.card = card
+        self.setFixedWidth(14)
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setStyleSheet(f"color: {palette['muted']}; font-size: 12px;")
+        self.setToolTip("잡아서 카드 순서를 바꿉니다 (같은 기기 안에서)")
+        self._press_pos = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = event.position().toPoint()
+
+    def mouseMoveEvent(self, event):
+        if self._press_pos is None:
+            return
+        moved = (event.position().toPoint() - self._press_pos).manhattanLength()
+        if moved < QApplication.startDragDistance():
+            return
+        self._press_pos = None
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(CARD_MIME,
+                     f"{self.card.owner_key}\n{self.card.card_key}".encode())
+        drag.setMimeData(mime)
+        # 드래그 중에 카드 모습 그대로를 따라다니게 한다 - 무엇을 옮기는
+        # 중인지 손잡이만 보고는 알 수 없다.
+        drag.setPixmap(self.card.grab().scaledToWidth(
+            min(self.card.width(), 360), Qt.TransformationMode.SmoothTransformation))
+        drag.exec(Qt.DropAction.MoveAction)
+
+    def mouseReleaseEvent(self, event):
+        self._press_pos = None
+
+
+class CardList(QWidget):
+    """카드들이 놓이는 목록. 드롭을 받아 순서를 바꾼다."""
+
+    def __init__(self, win: "MainWindow"):
+        super().__init__()
+        self.win = win
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat(CARD_MIME):
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat(CARD_MIME):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        data = bytes(event.mimeData().data(CARD_MIME)).decode()
+        owner_key, _, card_key = data.partition("\n")
+        y = int(event.position().y())
+        before = self.win._drop_before(owner_key, y, card_key)
+        if self.win._reorder_card(owner_key, card_key, before):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
 
 class OwnerGroupHeader(QWidget):
@@ -358,6 +451,10 @@ class TunnelCard(QFrame):
         self.info = info
         self.meta = meta
         self.tunnel_name = info.name
+        # RouteRow와 ProcessManager가 쓰는 "유닛 소유 키". 터널은 이름이 곧
+        # 소유 키다(기존 유닛 이름을 그대로 유지하기 위해).
+        self.owner = info.name
+        self.card_key = card_key_group(info.name)
         # O3: 자격증명 존재 여부는 refresh() 시점에 한 번만 원격 확인해 카드에
         # 들고 있는다 - 1초 폴링(_tick)에서 매번 stat을 날리지 않기 위해서다.
         self.has_credentials = has_credentials
@@ -434,6 +531,7 @@ class TunnelCard(QFrame):
         menu_btn.clicked.connect(lambda: self._menu(menu_btn))
 
         header = QHBoxLayout()
+        header.addWidget(DragHandle(self, palette))
         header.addWidget(self.dot)
         header.addWidget(title)
         header.addWidget(self.state_label)
@@ -477,6 +575,16 @@ class TunnelCard(QFrame):
         lay.addLayout(add_row)
 
         self.update_state()
+
+    # ---- 라우트 행이 부르는 동작 (ServerGroupCard와 같은 이름을 쓴다) ----
+    def edit_route(self, route: RouteMeta):
+        self.win._edit_route(self, route)
+
+    def delete_route(self, route: RouteMeta):
+        self.win._delete_route(self, route)
+
+    def deploy_route(self, route: RouteMeta):
+        self.win._deploy_route(self, route)
 
     # ---- 메뉴 ----
     def _menu(self, anchor: QPushButton):
@@ -582,11 +690,141 @@ class TunnelCard(QFrame):
             row.update_state()
 
 
+class ServerGroupCard(QFrame):
+    """터널에 속하지 않는 서버 묶음 카드.
+
+    터널 카드와 같은 모양이지만 터널 토글이 없다 - 이 카드에는 켤 터널이
+    없기 때문이다. 안의 서버 행은 터널 카드와 같은 RouteRow를 쓴다.
+    """
+
+    def __init__(self, win: "MainWindow", group: ServerGroupMeta,
+                 owner_key: str = ""):
+        super().__init__()
+        self.setObjectName("card")
+        self.win = win
+        self.group = group
+        self.owner_key = owner_key
+        # 유닛 이름의 소유 키. 터널 이름과 겹치지 않도록 접두사를 붙인다.
+        self.owner = group_owner_key(group.id)
+        self.card_key = card_key_server(group.id)
+
+        palette = current_palette(win.ctx.store.settings.theme)
+        icon_color = palette["text"]
+
+        title = QLabel(group.name)
+        title.setObjectName("cardTitle")
+        self.count_label = QLabel()
+        self.count_label.setObjectName("cardSub")
+
+        log_btn = QPushButton("로그")
+        log_btn.setToolTip("이 카테고리의 모든 서버 로그를 탭으로 봅니다")
+        log_btn.clicked.connect(lambda: win._open_log_server_group(self))
+
+        menu_btn = QPushButton()
+        menu_btn.setIcon(make_icon("dots", icon_color))
+        menu_btn.setFixedWidth(34)
+        menu_btn.setToolTip(f"{group.name} 동작")
+        menu_btn.clicked.connect(lambda: self._menu(menu_btn))
+
+        header = QHBoxLayout()
+        header.addWidget(DragHandle(self, palette))
+        header.addWidget(title)
+        header.addWidget(self.count_label)
+        header.addStretch(1)
+        # 터널 카드의 토글 자리는 비워 둔다 - 폭을 맞춰 두면 두 종류의 카드가
+        # 섞여 있어도 로그/메뉴 버튼이 같은 세로선 위에 놓인다.
+        spacer = QLabel()
+        spacer.setFixedWidth(TOGGLE_LABEL_WIDTH + 44)
+        header.addWidget(spacer)
+        header.addWidget(log_btn)
+        header.addWidget(menu_btn)
+
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setStyleSheet(f"background: {palette['border']}; max-height: 1px;")
+        separator.setFixedHeight(1)
+
+        self.route_rows: list[RouteRow] = []
+        rows_lay = QVBoxLayout()
+        rows_lay.setContentsMargins(24, 2, 0, 0)
+        rows_lay.setSpacing(0)
+        for server in group.servers:
+            row = RouteRow(self, server, server_mode=True)
+            self.route_rows.append(row)
+            rows_lay.addWidget(row)
+
+        self.empty_label = QLabel("아직 서버가 없습니다. 아래 '서버 추가'로 등록하세요.")
+        self.empty_label.setStyleSheet(
+            f"color: {palette['muted']}; font-size: 11px; padding-left: 24px;")
+        self.empty_label.setVisible(not group.servers)
+
+        add_btn = QPushButton("서버 추가")
+        add_btn.setIcon(make_icon("plus", icon_color))
+        add_btn.clicked.connect(lambda: win._add_server(self))
+        add_row = QHBoxLayout()
+        add_row.setContentsMargins(24, 2, 0, 0)
+        add_row.addWidget(add_btn)
+        add_row.addStretch(1)
+
+        lay = QVBoxLayout(self)
+        lay.addLayout(header)
+        lay.addWidget(separator)
+        lay.addLayout(rows_lay)
+        lay.addWidget(self.empty_label)
+        lay.addLayout(add_row)
+
+        self.update_state()
+
+    # ---- 라우트 행이 부르는 동작 (TunnelCard와 같은 이름) ----
+    def edit_route(self, route: RouteMeta):
+        self.win._edit_server(self, route)
+
+    def delete_route(self, route: RouteMeta):
+        self.win._delete_server(self, route)
+
+    def deploy_route(self, route: RouteMeta):
+        self.win._deploy_route(self, route)
+
+    # ---- 메뉴 ----
+    def _menu(self, anchor: QPushButton):
+        win = self.win
+        palette = current_palette(win.ctx.store.settings.theme)
+        m = QMenu(self)
+
+        start_all = QAction("모두 시작", m)
+        start_all.setEnabled(bool(self.group.servers))
+        start_all.triggered.connect(lambda: win._set_all_servers(self, True))
+        m.addAction(start_all)
+
+        stop_all = QAction("모두 정지", m)
+        stop_all.setEnabled(bool(self.group.servers))
+        stop_all.triggered.connect(lambda: win._set_all_servers(self, False))
+        m.addAction(stop_all)
+
+        rename = QAction("이름 변경", m)
+        rename.triggered.connect(lambda: win._rename_server_group(self))
+        m.addAction(rename)
+
+        m.addSeparator()
+        danger_menu_action(m, "카테고리 삭제", palette,
+                           lambda: win._delete_server_group(self))
+        m.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+    # ---- 표시 갱신 ----
+    def update_state(self):
+        self.count_label.setText(f"서버 {len(self.group.servers)}개")
+        for row in self.route_rows:
+            row.update_state()
+
+
 class MainWindow(QWidget):
     def __init__(self, ctx: AppContext):
         super().__init__()
         self.ctx = ctx
         self.cards: list[TunnelCard] = []
+        # 터널 카드와 같은 목록에 섞여 나오지만, 터널 목록(계정 단위)과는 성격이
+        # 달라 따로 들고 있는다 - self.cards를 도는 기존 코드가 터널만 다룬다.
+        self.server_cards: list[ServerGroupCard] = []
         self.group_headers: list[OwnerGroupHeader] = []
         # 카테고리 접힘: 사용자가 직접 누른 그룹만 여기 기록하고, 나머지는
         # "현재 대상만 펼침" 규칙을 따른다(대상을 바꾸면 자동으로 다시 접힌다).
@@ -622,6 +860,12 @@ class MainWindow(QWidget):
         self.add_btn = QPushButton("터널 생성")
         self.add_btn.setIcon(make_icon("plus", palette["on_accent"]))
         self.add_btn.setObjectName("primary")
+        # 터널 없이 서버만 모아 실행하는 묶음. 터널 생성 바로 오른쪽에 두어
+        # "카드를 새로 만드는 두 가지 방법"이 나란히 보이게 한다.
+        self.add_group_btn = QPushButton("서버 카테고리")
+        self.add_group_btn.setIcon(make_icon("plus", icon_color))
+        self.add_group_btn.setToolTip(
+            "터널 없이 이 기기 안에서만 돌릴 서버들을 모아 둡니다")
         self.repos_btn = QPushButton("프로젝트")
         # 프로젝트 버튼도 설정 버튼과 마찬가지로 아이콘 없이 텍스트만 쓴다
         self.settings_btn = QPushButton("설정")
@@ -631,7 +875,8 @@ class MainWindow(QWidget):
         self.help_btn.setToolTip("사용 흐름 안내")
         # 상단 바 버튼 높이를 하나로 맞춘다(아이콘 버튼과 글자 버튼이 섞여
         # 있으면 기본 높이가 달라 위아래로 들쭉날쭉해 보인다).
-        for btn in (self.add_btn, self.repos_btn, self.settings_btn):
+        for btn in (self.add_btn, self.add_group_btn, self.repos_btn,
+                    self.settings_btn):
             btn.setFixedHeight(TOP_BTN_HEIGHT)
         self.target_combo.setFixedHeight(TOP_BTN_HEIGHT)
         # clicked 시그널은 checked(bool)를 넘긴다. self.refresh를 그대로 연결하면
@@ -639,6 +884,7 @@ class MainWindow(QWidget):
         # 정반대 동작이 된다. 인자를 끊어서 연결한다.
         self.refresh_btn.clicked.connect(lambda: self.refresh())
         self.add_btn.clicked.connect(self._create_tunnel)
+        self.add_group_btn.clicked.connect(self._ask_server_group_name)
         self.repos_btn.clicked.connect(self._open_repos)
         self.settings_btn.clicked.connect(self._open_settings)
         self.help_btn.clicked.connect(self._open_guide)
@@ -651,6 +897,7 @@ class MainWindow(QWidget):
         top.addWidget(self.refresh_btn)
         top.addStretch(1)  # 대상 선택과 동작 버튼을 시각적으로 갈라 놓는다
         top.addWidget(self.add_btn)
+        top.addWidget(self.add_group_btn)
         top.addWidget(self.repos_btn)
         top.addWidget(self.settings_btn)
         top.addWidget(self.help_btn)
@@ -667,7 +914,9 @@ class MainWindow(QWidget):
             f"color: {palette['muted']}; font-size: 13px; padding: 40px 0;")
         self.list_lay.addWidget(self.list_status)
         self.list_lay.addStretch(1)
-        inner = QWidget()
+        # 카드 드롭을 받는 컨테이너(순서 바꾸기).
+        inner = CardList(self)
+        self.card_list = inner
         inner.setLayout(self.list_lay)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -828,15 +1077,20 @@ class MainWindow(QWidget):
 
     # ---- 실행 여부 확인 ----
     def _any_running(self) -> bool:
-        if not self.cards:
+        if not (self.cards or self.server_cards):
             return False
-        self.ctx.manager.refresh([c.meta for c in self.cards])
+        groups = [c.group for c in self.server_cards]
+        self.ctx.manager.refresh([c.meta for c in self.cards], groups)
         for c in self.cards:
             if self.ctx.manager.tunnel_state(c.tunnel_name) in (
                     TunnelState.RUNNING, TunnelState.STARTING):
                 return True
             for r in c.meta.routes:
-                if self.ctx.manager.service_running(c.tunnel_name, r):
+                if self.ctx.manager.service_running(c.owner, r):
+                    return True
+        for c in self.server_cards:
+            for s in c.group.servers:
+                if self.ctx.manager.service_running(c.owner, s):
                     return True
         return False
 
@@ -1021,7 +1275,7 @@ class MainWindow(QWidget):
         for header in self.group_headers:
             collapsed = self._is_collapsed(header.owner_key)
             header.set_collapsed(collapsed)
-            for card in self.cards:
+            for card in self._all_cards():
                 if card.owner_key == header.owner_key:
                     card.setVisible(not collapsed)
 
@@ -1103,20 +1357,25 @@ class MainWindow(QWidget):
         if restored or owner_backfilled:
             self.ctx.store.save()
 
+        # 서버 카테고리는 계정이 아니라 이 기기에만 있는 것이므로, 항상 현재
+        # 대상의 머리글 아래에 들어간다.
+        groups = self.ctx.store.settings.server_groups_for(self.ctx.runner.name)
+
         # 성능: 화면에 그릴 내용이 지난번과 같으면 위젯을 부수고 다시 만들지
         # 않는다. 다이얼로그를 닫을 때마다 카드 수십 개를 재생성하던 것이
         # "버튼 누르면 잠깐 멈춤"의 원인이었다.
-        signature = self._render_signature(rows)
-        if signature == self._render_sig and self.cards:
-            for card in self.cards:
+        signature = self._render_signature(rows, groups)
+        if signature == self._render_sig and (self.cards or self.server_cards):
+            for card in self._all_cards():
                 card.update_state()
             self._apply_collapsed()
             return
         self._render_sig = signature
 
-        for c in self.cards:
+        for c in self._all_cards():
             c.setParent(None)
         self.cards.clear()
+        self.server_cards.clear()
         for h in self.group_headers:
             h.setParent(None)
         self.group_headers.clear()
@@ -1125,23 +1384,46 @@ class MainWindow(QWidget):
         # 화면에 보이는 순서와 같게 유지한다.
         palette = current_palette(self.ctx.store.settings.theme)
         current_key = self.ctx.runner.name
-        pairs = [(owner_key, (info, meta, has_creds))
+        # 두 종류의 카드를 한 목록에 섞는다. 서버 카테고리는 현재 대상에만
+        # 존재하므로 그 기기의 머리글 아래로 들어간다.
+        pairs = [(owner_key, ("t", (info, meta, has_creds)))
                  for owner_key, info, meta, has_creds in rows]
-        for owner_key, group in group_by_owner(pairs, self._owner_order()):
+        pairs += [(current_key, ("s", g)) for g in groups]
+        order_map = self.ctx.store.settings.card_order
+        for owner_key, items in group_by_owner(pairs, self._owner_order()):
             header = OwnerGroupHeader(
                 owner_key, palette, is_current=owner_key == current_key,
-                count=len(group), collapsed=self._is_collapsed(owner_key),
+                count=len(items), collapsed=self._is_collapsed(owner_key),
                 on_toggle=self._toggle_group)
             self.list_lay.insertWidget(self.list_lay.count() - 1, header)
             self.group_headers.append(header)
-            for info, meta, has_creds in group:
-                card = TunnelCard(self, info, meta, has_creds, owner_key)
-                card.set_restart_needed(info.name in self._restart_needed)
-                self.list_lay.insertWidget(self.list_lay.count() - 1, card)
-                self.cards.append(card)
 
-        self._set_list_status(EMPTY_TEXT if not self.cards else "")
+            by_key = {self._entry_key(item): item for item in items}
+            for key in apply_order(list(by_key), order_map.get(owner_key, [])):
+                kind, payload = by_key[key]
+                if kind == "t":
+                    info, meta, has_creds = payload
+                    card = TunnelCard(self, info, meta, has_creds, owner_key)
+                    card.set_restart_needed(info.name in self._restart_needed)
+                    self.cards.append(card)
+                else:
+                    card = ServerGroupCard(self, payload, owner_key)
+                    self.server_cards.append(card)
+                self.list_lay.insertWidget(self.list_lay.count() - 1, card)
+
+        self._set_list_status(
+            EMPTY_TEXT if not (self.cards or self.server_cards) else "")
         self._apply_collapsed()
+
+    @staticmethod
+    def _entry_key(item) -> str:
+        kind, payload = item
+        return (card_key_group(payload[0].name) if kind == "t"
+                else card_key_server(payload.id))
+
+    def _all_cards(self) -> list:
+        """터널 카드 + 서버 카테고리 카드. 상태 갱신·정리처럼 둘 다 도는 경로용."""
+        return [*self.cards, *self.server_cards]
 
     def _set_list_status(self, text: str):
         """목록 안내 문구(로딩/비어 있음). 빈 문자열이면 숨긴다."""
@@ -1151,20 +1433,31 @@ class MainWindow(QWidget):
         # 숨긴 뒤에도 레이아웃이 옛 자리를 잡고 있지 않도록 즉시 다시 계산한다.
         self.list_lay.activate()
 
-    @staticmethod
-    def _render_signature(rows) -> tuple:
+    def _render_signature(self, rows, groups=()) -> tuple:
         """카드를 다시 만들어야 하는지 판단하는 값.
 
-        카드가 보여주는 것(이름/소유자/자격증명 여부/라우트 구성)만 담는다.
-        실행 상태처럼 매 틱 바뀌는 값은 update_state()가 따로 반영하므로
-        여기 넣으면 안 된다 - 넣으면 1초마다 전체를 다시 그리게 된다.
+        카드가 보여주는 것(이름/소유자/자격증명 여부/라우트 구성/서버 카테고리
+        구성/카드 순서)만 담는다. 실행 상태처럼 매 틱 바뀌는 값은
+        update_state()가 따로 반영하므로 여기 넣으면 안 된다 - 넣으면 1초마다
+        전체를 다시 그리게 된다.
+
+        카드 순서를 빠뜨리면 드래그로 옮긴 카드가 다음 폴링에서 제자리로
+        돌아간 것처럼 보인다(순서만 바뀌었을 뿐 나머지 지문이 같기 때문).
         """
-        return tuple(
-            (owner_key, info.name, has_creds,
-             tuple((r.id, r.label, r.hostname, r.service, r.server.kind,
+        def spec(r):
+            return (r.id, r.label, r.hostname, r.service, r.server.kind,
                     r.server.start_cmd, r.server.stop_cmd, r.server.cwd,
-                    r.server.autostart) for r in meta.routes))
+                    r.server.autostart)
+
+        tunnels = tuple(
+            (owner_key, info.name, has_creds,
+             tuple(spec(r) for r in meta.routes))
             for owner_key, info, meta, has_creds in rows)
+        server_groups = tuple(
+            (g.id, g.name, tuple(spec(s) for s in g.servers)) for g in groups)
+        order = tuple(sorted(
+            (k, tuple(v)) for k, v in self.ctx.store.settings.card_order.items()))
+        return (tunnels, server_groups, order)
 
     def _owner_order(self) -> list[str]:
         """카테고리 표시 순서: 이 PC → 설정에 등록된 SSH 프로필 순."""
@@ -1235,7 +1528,155 @@ class MainWindow(QWidget):
         wiz.finished.connect(_on_finished)
         self._open_modal(wiz)
 
-    def _deploy_route(self, card: TunnelCard, route: RouteMeta):
+    # ---- 서버 카테고리 ----
+    def _ask_server_group_name(self):
+        name, ok = QInputDialog.getText(self, "서버 카테고리 만들기", "이름")
+        if ok:
+            self._create_server_group(name)
+
+    def _create_server_group(self, name: str) -> bool:
+        """현재 대상에 서버 카테고리를 만든다. 만들었으면 True."""
+        name = (name or "").strip()
+        if not name:
+            return False
+        groups = self.ctx.store.settings.server_groups_for(self.ctx.runner.name)
+        if any(g.name == name for g in groups):
+            QMessageBox.warning(self, "이름 중복",
+                                f"이 기기에 이미 '{name}' 카테고리가 있습니다.")
+            return False
+        groups.append(ServerGroupMeta(id=new_route_id(), name=name))
+        self.ctx.store.save()
+        self.refresh(fetch=False)
+        return True
+
+    def _rename_server_group(self, card: "ServerGroupCard"):
+        name, ok = QInputDialog.getText(self, "이름 변경", "이름", text=card.group.name)
+        name = (name or "").strip()
+        if not ok or not name or name == card.group.name:
+            return
+        groups = self.ctx.store.settings.server_groups_for(self.ctx.runner.name)
+        if any(g.name == name and g.id != card.group.id for g in groups):
+            QMessageBox.warning(self, "이름 중복",
+                                f"이 기기에 이미 '{name}' 카테고리가 있습니다.")
+            return
+        card.group.name = name
+        self.ctx.store.save()
+        self.refresh(fetch=False)
+
+    def _delete_server_group(self, card: "ServerGroupCard"):
+        from app.ui.confirm_dialogs import ConfirmDeleteDialog
+        dlg = ConfirmDeleteDialog(
+            self.ctx, "카테고리 삭제",
+            f"'{card.group.name}' 카테고리를 삭제할까요?\n"
+            "- 안에 있는 서버가 실행 중이면 중지됩니다", [], self)
+
+        def _on_finished(result):
+            if result == dlg.DialogCode.Accepted:
+                QTimer.singleShot(0, lambda: self._do_delete_server_group(card))
+
+        dlg.finished.connect(_on_finished)
+        self._open_modal(dlg)
+
+    def _do_delete_server_group(self, card: "ServerGroupCard"):
+        for server in card.group.servers:
+            try:
+                self.ctx.manager.stop_service(card.owner, server)
+            except Exception:
+                pass
+            self.ctx.manager.cleanup_logs_for_service(card.owner, server)
+        groups = self.ctx.store.settings.server_groups_for(self.ctx.runner.name)
+        self.ctx.store.settings.server_groups[self.ctx.runner.name] = [
+            g for g in groups if g.id != card.group.id]
+        # 삭제된 카드의 키가 순서 목록에 남지 않게 정리한다.
+        for owner_key, keys in self.ctx.store.settings.card_order.items():
+            self.ctx.store.settings.card_order[owner_key] = [
+                k for k in keys if k != card.card_key]
+        self.ctx.store.save()
+        self.refresh(fetch=False)
+
+    def _set_all_servers(self, card: "ServerGroupCard", start: bool):
+        for server in card.group.servers:
+            try:
+                if start:
+                    self.ctx.manager.start_service(card.owner, server)
+                else:
+                    self.ctx.manager.stop_service(card.owner, server)
+            except Exception as ex:
+                QMessageBox.critical(self, "서버 오류", str(ex))
+                break
+        card.update_state()
+
+    def _add_server(self, card: "ServerGroupCard"):
+        from app.ui.server_dialog import ServerDialog
+        dlg = ServerDialog(self.ctx, card.group, None, self)
+
+        def _on_finished(result):
+            if result == dlg.DialogCode.Accepted:
+                self.refresh(fetch=False)
+
+        dlg.finished.connect(_on_finished)
+        self._open_modal(dlg)
+
+    def _edit_server(self, card: "ServerGroupCard", server: RouteMeta):
+        from app.ui.server_dialog import ServerDialog
+        dlg = ServerDialog(self.ctx, card.group, server, self)
+
+        def _on_finished(result):
+            if result == dlg.DialogCode.Accepted:
+                self.refresh(fetch=False)
+
+        dlg.finished.connect(_on_finished)
+        self._open_modal(dlg)
+
+    def _delete_server(self, card: "ServerGroupCard", server: RouteMeta):
+        from app.ui.confirm_dialogs import ConfirmDeleteDialog
+        dlg = ConfirmDeleteDialog(
+            self.ctx, "서버 삭제",
+            f"'{server.label or server.id}' 서버를 삭제할까요?\n"
+            "- 실행 중이면 중지됩니다", [], self)
+
+        def _on_finished(result):
+            if result == dlg.DialogCode.Accepted:
+                self._do_delete_server(card, server)
+
+        dlg.finished.connect(_on_finished)
+        self._open_modal(dlg)
+
+    def _do_delete_server(self, card: "ServerGroupCard", server: RouteMeta):
+        try:
+            self.ctx.manager.stop_service(card.owner, server)
+        except Exception:
+            pass
+        self.ctx.manager.cleanup_logs_for_service(card.owner, server)
+        card.group.servers = [s for s in card.group.servers if s.id != server.id]
+        self.ctx.store.save()
+        self.refresh(fetch=False)
+
+    # ---- 카드 순서 ----
+    def _drop_before(self, owner_key: str, y: int, moving_key: str) -> str | None:
+        """드롭 지점(y)이 어느 카드 앞인지. 맨 뒤면 None."""
+        cards = [(c.card_key, c.y(), c.height())
+                 for c in self._all_cards() if c.owner_key == owner_key]
+        return drop_target(cards, y)
+
+    def _reorder_card(self, owner_key: str, key: str,
+                      before: str | None) -> bool:
+        """카드를 같은 기기 그룹 안에서 옮긴다. 옮겼으면 True.
+
+        그룹을 넘나드는 이동은 거부한다 - 터널이 어느 기기 소속인지는
+        자격증명이 실제로 있는 위치라서 드래그로 바꿀 수 있으면 안 된다.
+        """
+        keys = [c.card_key for c in self._all_cards() if c.owner_key == owner_key]
+        if key not in keys:
+            return False
+        settings = self.ctx.store.settings
+        settings.card_order[owner_key] = move_key(
+            settings.card_order.get(owner_key, []), keys, key, before)
+        self.ctx.store.save()
+        self.refresh(fetch=False)
+        return True
+
+    def _deploy_route(self, card, route: RouteMeta):
         """이 서버의 프로젝트를 최신 코드로 받고 다시 띄운다.
 
         순서를 지키는 것이 중요하다: git pull이 실패하면 재시작하지 않는다.
@@ -1248,7 +1689,8 @@ class MainWindow(QWidget):
         if not cwd:
             return
         ctx = self.ctx
-        name = card.tunnel_name
+        # 터널 카드든 서버 카테고리 카드든 유닛 소유 키만 있으면 된다.
+        name = card.owner
         self._show_info(f"{cwd} 최신 코드를 받는 중...")
         ctx.manager.append_service_log(name, route, "[배포] git pull --ff-only")
         # 전이 중임을 토글 색으로 알린다(스피너를 없앤 뒤의 공통 표시 방식).
@@ -1280,7 +1722,7 @@ class MainWindow(QWidget):
             except Exception as ex:
                 self._show_info(f"서버 재시작 실패: {ex}")
                 return
-            label = route.hostname or cwd
+            label = route.hostname or route.label or cwd
             self._show_info(f"{label} 배포 중입니다... 완료되면 알려드립니다. "
                             "(진행 상황은 로그에서)")
             # 실행 판정이 "실제 웹 응답" 기준이라, 그 순간이 곧 배포 완료다.
@@ -1588,6 +2030,27 @@ class MainWindow(QWidget):
                 log_paths[tab_name] = path
         self._open_log_viewer(f"tunnel:{target}:{name}", title, log_paths)
 
+    def _open_log_server_group(self, card: "ServerGroupCard"):
+        """서버 카테고리의 로그. 터널 탭만 없고 구조는 터널 로그와 같다."""
+        target = self.ctx.runner.name
+        title = f"{card.group.name} ({self._target_display_name()})"
+        log_paths: dict = {}
+        for i, server in enumerate(card.group.servers, start=1):
+            tab_name = server.label or f"서버 {i}"
+            path = self.ctx.manager.log_path_for_service(card.owner, server)
+            if server.server.kind == "docker" and server.server.cwd:
+                log_paths[tab_name] = {
+                    "앱": ("compose", server.server.cwd),
+                    "빌드": path,
+                }
+            else:
+                log_paths[tab_name] = path
+        if not log_paths:
+            QMessageBox.information(self, "로그 없음",
+                                    "이 카테고리에는 아직 서버가 없습니다.")
+            return
+        self._open_log_viewer(f"group:{target}:{card.group.id}", title, log_paths)
+
     def _open_log_viewer(self, key: str, title: str, log_paths: dict[str, str]):
         from app.ui.log_viewer import LogViewer
         if key in self._log_viewers:
@@ -1668,7 +2131,8 @@ class MainWindow(QWidget):
         # 이전 폴링이 아직 안 끝났으면 이번 차례는 건너뛴다. 큐에 쌓으면
         # 연결이 느릴수록 밀린 폴링이 끝없이 이어진다.
         metas = [c.meta for c in self.cards]
-        self._poller.run(lambda: self.ctx.manager.refresh(metas))
+        groups = [c.group for c in self.server_cards]
+        self._poller.run(lambda: self.ctx.manager.refresh(metas, groups))
 
     def _on_poll_done(self, ok: bool, _result, _error: str):
         # C1: PyQt6는 슬롯의 미처리 예외에서 프로세스를 abort시킨다(실증됨).
@@ -1698,7 +2162,7 @@ class MainWindow(QWidget):
             self.banner.hide()
             self._timer.setInterval(POLL_INTERVAL_NORMAL_MS)
 
-        for c in self.cards:
+        for c in self._all_cards():
             c.update_state()
 
     # ---- 종료 정리 ----
