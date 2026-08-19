@@ -191,3 +191,60 @@ def test_drop_before_uses_real_card_geometry(qapp, tmp_path):
     assert win._drop_before("fake", second.y() + second.height() - 2,
                             "s:aaaaaaaa") is None
     win.close()
+
+
+# ---- 장치 주소 링크 ----
+
+def test_server_row_shows_device_ip_link(qapp, tmp_path, monkeypatch):
+    """도메인이 없는 대신, 그 장치에서 열리는 주소를 링크로 보여준다."""
+    monkeypatch.setattr("app.ui.main_window.local_lan_ip", lambda: "192.168.0.10")
+    group = ServerGroupMeta(id="aabbccdd", name="백엔드", servers=[docker_server()])
+    win = make_window(qapp, tmp_path, groups=[group])
+
+    row = win.server_cards[0].route_rows[0]
+    assert row.device_link == "http://192.168.0.10:8000"
+    # 표시 문구는 열 폭에 맞춰 줄어들 수 있으므로 툴팁으로 전체를 확인한다
+    assert row.link_label.toolTip() == "http://192.168.0.10:8000 열기"
+
+
+def test_server_row_link_falls_back_when_host_unknown(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr("app.ui.main_window.local_lan_ip", lambda: "")
+    group = ServerGroupMeta(id="aabbccdd", name="백엔드", servers=[docker_server()])
+    win = make_window(qapp, tmp_path, groups=[group])
+
+    row = win.server_cards[0].route_rows[0]
+    assert row.device_link == ""
+    assert "주소 없음" in row.link_label.text()
+
+
+def test_remote_target_uses_the_ssh_host(qapp, tmp_path, monkeypatch):
+    """원격 대상은 SSH로 접속하는 host를 그대로 쓴다 - 이미 닿고 있는 주소다."""
+    from app.core.store import SshProfile
+
+    monkeypatch.setattr("app.ui.main_window.local_lan_ip", lambda: "192.168.0.10")
+    group = ServerGroupMeta(id="aabbccdd", name="백엔드", servers=[docker_server()])
+    win = make_window(qapp, tmp_path, groups=[group])
+    win.ctx.runner.profile = SshProfile(name="rpi", host="10.0.0.7")
+
+    win._device_hosts.clear()
+    assert win._device_host() == "10.0.0.7"
+
+
+def test_clicking_the_link_opens_the_browser(qapp, tmp_path, monkeypatch):
+    from PyQt6.QtCore import QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
+
+    monkeypatch.setattr("app.ui.main_window.local_lan_ip", lambda: "192.168.0.10")
+    opened = []
+    monkeypatch.setattr("app.ui.main_window.webbrowser",
+                        type("W", (), {"open": staticmethod(opened.append)}))
+    group = ServerGroupMeta(id="aabbccdd", name="백엔드", servers=[docker_server()])
+    win = make_window(qapp, tmp_path, groups=[group])
+
+    row = win.server_cards[0].route_rows[0]
+    event = QMouseEvent(QMouseEvent.Type.MouseButtonRelease, QPointF(1, 1),
+                        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                        Qt.KeyboardModifier.NoModifier)
+    row.link_label.mouseReleaseEvent(event)
+
+    assert opened == ["http://192.168.0.10:8000"]

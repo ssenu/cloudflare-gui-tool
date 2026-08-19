@@ -18,6 +18,7 @@ from app.core.process_mgr import TunnelState
 from app.core.confirm import (group_by_owner, owner_group_label, owner_label,
                               route_display_label)
 from app.core.run_registry import group_owner_key
+from app.core.service_url import device_url, local_lan_ip
 from app.core.store import (RouteMeta, ServerGroupMeta, SshProfile, TunnelMeta,
                             new_route_id)
 from app.ui.icons import make_icon
@@ -132,9 +133,15 @@ class RouteRow(QWidget):
         # 열리나" 확인하는 것이 가장 흔한 다음 행동이라, 주소를 복사해 붙여넣는
         # 과정을 없앤다. hostname이 없으면 링크가 아니라 안내 문구로 둔다.
         #
-        # 서버 카테고리 행에는 도메인이 아예 없다. 빈 열을 남기면 그 자리가
-        # "아직 설정하지 않은 무언가"처럼 보이므로 열 자체를 만들지 않는다.
+        # 서버 카테고리 행에는 도메인이 없다. 대신 그 자리에 "이 장치에서 열리는
+        # 주소"를 링크로 둔다 - 등록된 http://localhost:8000의 localhost는 서버가
+        # 도는 기기를 가리키므로, 앱을 보는 사람의 PC에서는 열리지 않는다.
         self.domain_label = None
+        self.link_label = None
+        if server_mode:
+            self.link_label = QLabel()
+            self.link_label.setFixedWidth(ROUTE_DOMAIN_COL_WIDTH)
+            self._apply_device_link(palette)
         if not server_mode:
             hostname = route.hostname or "(hostname 미설정)"
             self.domain_label = QLabel()
@@ -189,6 +196,9 @@ class RouteRow(QWidget):
         if self.domain_label is not None:
             lay.addWidget(self.domain_label)
             lay.addWidget(_route_vline(palette))
+        elif self.link_label is not None:
+            lay.addWidget(self.link_label)
+            lay.addWidget(_route_vline(palette))
         lay.addWidget(self.service_label, 1)
         lay.addWidget(toggle_label)
         lay.addWidget(self.server_switch if self.server_switch else self.register_btn)
@@ -234,6 +244,36 @@ class RouteRow(QWidget):
         m.addSeparator()
         danger_menu_action(m, "삭제", palette, self._delete_route)
         m.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+    def _apply_device_link(self, palette: dict):
+        """서버 행의 '이 장치에서 열리는 주소' 링크를 채운다.
+
+        만들 수 없는 경우(장치 IP를 모름, http가 아닌 주소 등)에는 왜 링크가
+        없는지 툴팁으로 알린다 - 빈 칸만 두면 고장난 것처럼 보인다.
+        """
+        url = device_url(self.route.service, self.card.win._device_host())
+        self.device_link = url
+        metrics = self.link_label.fontMetrics()
+        if url:
+            self.link_label.setText(_elide(url, metrics, ROUTE_DOMAIN_COL_WIDTH - 8))
+            self.link_label.setStyleSheet(
+                f"color: {palette['accent2']}; text-decoration: underline;")
+            self.link_label.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.link_label.setToolTip(f"{url} 열기")
+            self.link_label.mouseReleaseEvent = self._open_device_link
+        else:
+            self.link_label.setText("(주소 없음)")
+            self.link_label.setStyleSheet(f"color: {palette['muted']};")
+            self.link_label.setToolTip(
+                "이 장치의 주소를 알 수 없거나, 브라우저로 열 수 있는 "
+                "주소(http/https)가 아닙니다.")
+
+    def _open_device_link(self, event):
+        """장치 주소 클릭 -> 기본 브라우저로 연다."""
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self.device_link:
+            webbrowser.open(self.device_link)
 
     def _open_site(self, event):
         """도메인 클릭 -> 기본 브라우저로 그 주소를 연다."""
@@ -842,6 +882,9 @@ class MainWindow(QWidget):
         # 로컬, 문자열이면 SSH 프로필 이름. 인덱스만 쓰면 프로필이 삭제됐을 때
         # 콤보 항목이 밀려서 엉뚱한 대상을 가리키게 된다.
         self._current_target_key: str | None = None
+        # 대상 키 -> 그 장치의 주소(원격이면 SSH host, 내 PC면 LAN IP).
+        # 카드를 그릴 때마다 소켓을 새로 열지 않으려고 대상별로 캐시한다.
+        self._device_hosts: dict[str, str] = {}
         self.setWindowTitle("Cloudflare Tunnel GUI")
         self._restore_geometry()
 
@@ -1457,7 +1500,22 @@ class MainWindow(QWidget):
             (g.id, g.name, tuple(spec(s) for s in g.servers)) for g in groups)
         order = tuple(sorted(
             (k, tuple(v)) for k, v in self.ctx.store.settings.card_order.items()))
-        return (tunnels, server_groups, order)
+        # 장치 주소가 바뀌면 서버 행의 링크도 다시 만들어야 한다.
+        return (tunnels, server_groups, order, self._device_host())
+
+    def _device_host(self) -> str:
+        """현재 대상 장치의 주소. 서버 카테고리 행의 링크를 만드는 데 쓴다.
+
+        원격이면 SSH로 접속하는 host를 그대로 쓴다 - 사용자가 그 주소로 이미
+        그 기기에 닿고 있으므로 가장 확실하다. 내 PC면 LAN IP를 찾는다.
+        """
+        key = self.ctx.runner.name
+        if key in self._device_hosts:
+            return self._device_hosts[key]
+        profile = getattr(self.ctx.runner, "profile", None)
+        host = getattr(profile, "host", "") if profile is not None else local_lan_ip()
+        self._device_hosts[key] = host or ""
+        return self._device_hosts[key]
 
     def _owner_order(self) -> list[str]:
         """카테고리 표시 순서: 이 PC → 설정에 등록된 SSH 프로필 순."""

@@ -86,12 +86,12 @@
 
   <div class="cardbox" style="border-color: var(--accent2)">
     <div class="row"><span class="grip">☰</span><strong>백엔드</strong><span class="sub">서버 2개</span><span style="flex:1"></span><span class="sub">로그</span><span class="sub">⋮</span></div>
-    <div class="row indent"><span class="dot on"></span><span>api</span><span class="sub">http://localhost:8000</span><span style="flex:1"></span><span class="sub">서버</span><span class="sw on">ON</span><span class="sub">⋮</span></div>
-    <div class="row indent"><span class="dot off"></span><span>worker</span><span class="sub">http://localhost:8080</span><span style="flex:1"></span><span class="sub">서버</span><span class="sw">OFF</span><span class="sub">⋮</span></div>
+    <div class="row indent"><span class="dot on"></span><span>api</span><span style="color:var(--accent2);text-decoration:underline">http://192.168.0.10:8000</span><span class="sub">http://localhost:8000</span><span style="flex:1"></span><span class="sub">서버</span><span class="sw on">ON</span><span class="sub">⋮</span></div>
+    <div class="row indent"><span class="dot off"></span><span>worker</span><span style="color:var(--accent2);text-decoration:underline">http://192.168.0.10:8080</span><span class="sub">http://localhost:8080</span><span style="flex:1"></span><span class="sub">서버</span><span class="sw">OFF</span><span class="sub">⋮</span></div>
     <div class="row indent"><span class="sub">＋ 서버 추가</span></div>
   </div>
 </div>
-<p class="sub" style="color:var(--muted); font-size:.9rem">파란 테두리가 새로 생기는 서버 카테고리 카드다. 헤더에 터널 토글이 없고, 그 자리가 비어 있다. 두 카드 모두 왼쪽 <code>☰</code>를 잡아 서로 순서를 바꿀 수 있다.</p>
+<p class="sub" style="color:var(--muted); font-size:.9rem">파란 테두리가 새로 생기는 서버 카테고리 카드다. 헤더에 터널 토글이 없고, 그 자리가 비어 있다. 터널 카드의 도메인 자리에는 <strong>장치 주소 링크</strong>가 들어간다. 두 카드 모두 왼쪽 <code>☰</code>를 잡아 서로 순서를 바꿀 수 있다.</p>
 
 <h2>1. 데이터 모델</h2>
 <pre><code>@dataclass
@@ -137,7 +137,7 @@ def move_key(order, keys, key, before):
   <tr><th>영역</th><th>구성</th></tr>
   <tr><td>헤더</td><td><code>☰</code> · 이름 · <code>서버 N개</code> · (터널 토글 자리 비움) · <code>로그</code> · <code>⋮</code></td></tr>
   <tr><td>헤더 ⋮</td><td>모두 시작 / 모두 정지 / 이름 변경 / 삭제(위험 색)</td></tr>
-  <tr><td>서버 행</td><td><code>상태점 | 이름 | 주소 | [서버 토글] | ⋮</code> — 라우트 행에서 도메인 열만 뺀 모양</td></tr>
+  <tr><td>서버 행</td><td><code>상태점 | 이름 | 장치 링크 | 주소 | [서버 토글] | ⋮</code> — 라우트 행과 열 구성이 같고, 도메인 자리에 장치 주소 링크가 들어간다</td></tr>
   <tr><td>서버 행 ⋮</td><td>배포(pull + 재시작) / 편집 / 삭제. “접속 확인”은 공개 주소가 없으므로 넣지 않는다</td></tr>
   <tr><td>하단</td><td><code>서버 추가</code></td></tr>
 </table>
@@ -165,6 +165,15 @@ def move_key(order, keys, key, before):
 </table>
 <p>검증과 경고는 기존 것을 재사용한다: <code>validate_service</code>, <code>detect_service_port</code> + <code>port_mismatch</code>(compose가 실제로 여는 포트와 입력한 주소의 포트가 다르면 저장 전 경고), 실행 중인 서버의 종류·명령·폴더를 바꿀 때의 정지 확인.</p>
 <div class="note"><code>ServiceSpec.autostart</code>(“터널을 켤 때 함께 시작”)는 붙을 터널이 없으므로 입력에서 제외한다. 그 자리는 그룹 <code>⋮</code>의 “모두 시작”이 대신한다.</div>
+
+<h3>장치 주소 링크</h3>
+<p>등록된 주소의 <code>localhost</code>는 <strong>서버가 도는 기기</strong>를 가리킨다. 앱을 보는 사람의 PC가 아니다. 그래서 <code>localhost</code>(및 <code>127.0.0.1</code>, <code>0.0.0.0</code>) 자리에 그 장치의 주소를 끼운 링크를 만들어 누르면 브라우저로 열리게 한다.</p>
+<table>
+  <tr><th>대상</th><th>장치 주소</th><th>이유</th></tr>
+  <tr><td>SSH 원격</td><td>그 프로필의 <code>host</code></td><td>사용자가 이미 그 주소로 그 기기에 닿고 있다 — 가장 확실하다</td></tr>
+  <tr><td>내 PC</td><td>LAN IP 자동 탐지</td><td>UDP 소켓을 연결만 해 나가는 인터페이스를 커널에 묻는다(패킷은 나가지 않음). <code>gethostbyname</code>은 윈도우에서 루프백/가상 어댑터 주소를 주는 경우가 흔해 쓰지 않는다</td></tr>
+</table>
+<div class="note">만들 수 없을 때(장치 주소를 모름, http/https가 아닌 주소, 이미 다른 기기를 가리키는 주소)는 <code>(주소 없음)</code>과 이유를 담은 툴팁을 보여준다 — 빈 칸만 두면 고장난 것처럼 보인다.</div>
 
 <h2>6. 로그</h2>
 <p><code>log_viewer</code>의 계층 탭 구조를 그대로 쓴다. 상위 탭이 그룹 이름, 하위 탭이 각 서버다. 터널 로그 탭만 없다.</p>
