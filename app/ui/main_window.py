@@ -15,6 +15,7 @@ from app.core.card_order import apply_order, card_key_group, card_key_server, dr
 from app.core.cloudflared import CloudflaredError
 from app.core.config_yml import get_routes, parse_config, set_routes
 from app.core.process_mgr import TunnelState
+from app.core.progress import deploy_text, service_text, tunnel_text
 from app.core.confirm import (group_by_owner, owner_group_label, owner_label,
                               route_display_label)
 from app.core.run_registry import group_owner_key
@@ -207,7 +208,8 @@ class RouteRow(QWidget):
         self.update_state()
 
     def _on_server_toggled(self, checked: bool):
-        ctx = self.card.win.ctx
+        win = self.card.win
+        ctx = win.ctx
         try:
             if checked:
                 ctx.manager.start_service(self.card.owner, self.route)
@@ -215,7 +217,13 @@ class RouteRow(QWidget):
                 ctx.manager.stop_service(self.card.owner, self.route)
         except Exception as ex:
             QMessageBox.critical(self, "서버 오류", str(ex))
-        self.card.win.info_banner.hide()
+            win.info_banner.hide()
+            self.update_state()
+            return
+        label = route_display_label(self.route.label, self.route.hostname)[0]
+        win._set_progress(service_text(label, "start" if checked else "stop"))
+        win._watch(kind="service", label=label, want=checked, timeout=300,
+                   owner=self.card.owner, route=self.route)
         self.update_state()
 
     def _menu(self, anchor: QPushButton):
@@ -665,6 +673,9 @@ class TunnelCard(QFrame):
                     return
                 ctx.manager.start_tunnel(self.tunnel_name, ctx.client,
                                          boot_managed=self.boot_managed())
+                self.win._set_progress(tunnel_text(self.tunnel_name, "start"))
+                self.win._watch(kind="tunnel", label=self.tunnel_name,
+                                want=True, timeout=120, name=self.tunnel_name)
                 for route in self.meta.routes:
                     if route.server.autostart and route.server.start_cmd \
                             and not ctx.manager.service_running(self.tunnel_name, route):
@@ -672,9 +683,12 @@ class TunnelCard(QFrame):
             else:
                 ctx.manager.stop_tunnel(self.tunnel_name,
                                         boot_managed=self.boot_managed())
+                self.win._set_progress(tunnel_text(self.tunnel_name, "stop"))
+                self.win._watch(kind="tunnel", label=self.tunnel_name,
+                                want=False, timeout=60, name=self.tunnel_name)
         except Exception as ex:
             QMessageBox.critical(self, "오류", str(ex))
-        self.win.info_banner.hide()
+            self.win.info_banner.hide()
         self.update_state()
 
     def set_restart_needed(self, needed: bool) -> None:
@@ -1028,9 +1042,10 @@ class MainWindow(QWidget):
         self._info_hide_timer.setSingleShot(True)
         self._info_hide_timer.timeout.connect(self.info_banner.hide)
         # 배포 완료 감시: 배포한 라우트가 실제로 응답할 때까지 지켜본다.
-        self._deploy_watches: list[dict] = []
-        self._deploy_timer = QTimer(self)
-        self._deploy_timer.timeout.connect(self._process_deploy_watches)
+        # 진행 중인 작업 감시 목록. 배포/터널/서버가 같은 배너 한 줄을 나눠 쓴다.
+        self._progress_watches: list[dict] = []
+        self._progress_timer = QTimer(self)
+        self._progress_timer.timeout.connect(self._process_progress_watches)
 
         self._poller = BackgroundPoller(self)
         self._poller.finished.connect(self._on_poll_done)
@@ -1749,7 +1764,9 @@ class MainWindow(QWidget):
         ctx = self.ctx
         # 터널 카드든 서버 카테고리 카드든 유닛 소유 키만 있으면 된다.
         name = card.owner
-        self._show_info(f"{cwd} 최신 코드를 받는 중...")
+        label = route.hostname or route.label or cwd
+        srv_kind = route.server.kind
+        self._set_progress(deploy_text(label, "pull"))
         ctx.manager.append_service_log(name, route, "[배포] git pull --ff-only")
         # 전이 중임을 토글 색으로 알린다(스피너를 없앤 뒤의 공통 표시 방식).
         if route.server.kind == "docker":
@@ -1764,31 +1781,29 @@ class MainWindow(QWidget):
         def done(ok, result, error):
             poller.deleteLater()
             if not ok:
-                self._show_info(f"배포 실패: {error}")
+                self._set_progress(deploy_text(label, "fail", reason=error))
                 ctx.manager.append_service_log(name, route, f"[배포] 실패: {error}")
                 return
             res = result
             output = (res.stdout or res.stderr).strip()
             ctx.manager.append_service_log(name, route, output or "(출력 없음)")
             if res.exit_code != 0:
-                self._show_info(
-                    f"git pull 실패 - 서버는 그대로 둡니다. 로그를 확인하세요.")
+                self._set_progress(deploy_text(
+                    label, "fail",
+                    reason="git pull 실패 - 서버는 그대로 둡니다. 로그를 확인하세요."))
                 return
+            self._set_progress(deploy_text(label, "restart", kind=srv_kind))
             try:
                 ctx.manager.stop_service(name, route)
                 ctx.manager.start_service(name, route)
             except Exception as ex:
-                self._show_info(f"서버 재시작 실패: {ex}")
+                self._set_progress(deploy_text(label, "fail",
+                                               reason=f"서버 재시작 실패: {ex}"))
                 return
-            label = route.hostname or route.label or cwd
-            self._show_info(f"{label} 배포 중입니다... 완료되면 알려드립니다. "
-                            "(진행 상황은 로그에서)")
             # 실행 판정이 "실제 웹 응답" 기준이라, 그 순간이 곧 배포 완료다.
-            self._deploy_watches.append({
-                "name": name, "route": route, "label": label,
-                "deadline": time.monotonic() + 600,   # 빌드 포함 최대 10분
-            })
-            self._deploy_timer.start(1000)
+            self._set_progress(deploy_text(label, "wait"))
+            self._watch(kind="deploy", label=label, owner=name, route=route,
+                        want=True, timeout=600)   # 빌드 포함 최대 10분
             if row is not None:
                 row.update_state()
 
@@ -1797,26 +1812,84 @@ class MainWindow(QWidget):
                                       timeout=120.0))
         self._site_pollers.append(poller)
 
-    def _process_deploy_watches(self):
-        """배포한 서버가 실제로 응답하기 시작하면 완료를 알린다(5초 뒤 사라짐).
+    # ---- 진행 상황 한 줄 ----
+    def _set_progress(self, text: str, auto_hide_ms: int = 0):
+        """배너 문구를 바꾼다. 같은 문구면 아무것도 하지 않는다.
+
+        1초마다 같은 값을 다시 넣으면 리페인트가 헛돌고, 무엇보다 자동 숨김
+        예약이 매번 리셋돼 완료 문구가 영영 사라지지 않는다.
+        """
+        # isVisible()이 아니라 isHidden()을 본다 - isVisible()은 창이 아직
+        # 화면에 뜨기 전이면 무조건 False라, 그 사이에는 이 가드가 통째로
+        # 무력화된다(자동 숨김이 매초 리셋되어 완료 문구가 안 사라진다).
+        if not self.info_banner.isHidden() and self.info_label.text() == text:
+            return
+        self._show_info(text, auto_hide_ms=auto_hide_ms)
+
+    def _watch(self, kind: str, label: str, want: bool, timeout: float,
+               owner: str = "", route: RouteMeta | None = None,
+               name: str = ""):
+        """작업 하나를 감시 목록에 넣고 1초 타이머를 돌린다.
+
+        같은 대상에 대한 옛 감시는 걷어낸다 - 켰다 껐다를 빠르게 하면 서로
+        반대 방향을 기다리는 감시가 둘 다 남아, 배너 문구가 왔다 갔다 한다.
+        """
+        key = (kind, owner, route.id if route is not None else "", name)
+        self._progress_watches = [
+            w for w in self._progress_watches if w["key"] != key]
+        self._progress_watches.append({
+            "key": key, "kind": kind, "label": label, "want": want,
+            "owner": owner, "route": route, "name": name,
+            "deadline": time.monotonic() + timeout,
+        })
+        self._progress_timer.start(1000)
+
+    def _process_progress_watches(self):
+        """감시 중인 작업이 실제로 끝났는지 보고 배너 한 줄을 갱신한다.
 
         원격 호출은 하지 않는다 - 1초 폴링이 갱신해 둔 상태만 읽으므로 비용이
-        없다. 10분이 지나도 완료가 안 잡히면 조용히 감시만 접는다(빌드 실패
-        등은 로그와 토글 상태로 이미 드러난다).
+        없다. 제한 시간이 지나면 조용히 감시만 접는다(실패는 로그와 토글
+        상태로 이미 드러나므로, 배너로 한 번 더 겁줄 이유가 없다).
         """
+        mgr = self.ctx.manager
         remaining = []
-        for w in self._deploy_watches:
+        for w in self._progress_watches:
             if time.monotonic() > w["deadline"]:
                 continue
-            if (self.ctx.manager.service_running(w["name"], w["route"])
-                    and not self.ctx.manager.service_pending(w["name"], w["route"])):
-                self._show_info(f"{w['label']} 배포가 완료되었습니다.",
-                                auto_hide_ms=5000)
-                continue
-            remaining.append(w)
-        self._deploy_watches = remaining
+            text, done = self._watch_state(mgr, w)
+            if text:
+                self._set_progress(text, auto_hide_ms=5000 if done else 0)
+            if not done:
+                remaining.append(w)
+        self._progress_watches = remaining
         if not remaining:
-            self._deploy_timer.stop()
+            self._progress_timer.stop()
+
+    @staticmethod
+    def _watch_state(mgr, w) -> tuple[str, bool]:
+        """감시 항목의 현재 문구와 '끝났는가'. 문구가 빈 문자열이면 배너를 두 번
+        칠하지 않는다(이미 그 단계 문구가 떠 있는 경우)."""
+        kind, label, want = w["kind"], w["label"], w["want"]
+        if kind == "tunnel":
+            state = mgr.tunnel_state(w["name"])
+            if want and state == TunnelState.RUNNING:
+                return tunnel_text(label, "done"), True
+            if not want and state == TunnelState.STOPPED:
+                return tunnel_text(label, "stopped"), True
+            return tunnel_text(label, "start" if want else "stop"), False
+
+        owner, route = w["owner"], w["route"]
+        running = mgr.service_running(owner, route)
+        pending = mgr.service_pending(owner, route)
+        if want and running and not pending:
+            step = "done"
+            return ((deploy_text(label, step) if kind == "deploy"
+                     else service_text(label, step)), True)
+        if not want and not running and not pending:
+            return service_text(label, "stopped"), True
+        if kind == "deploy":
+            return deploy_text(label, "wait"), False
+        return service_text(label, "wait" if want else "stop"), False
 
     def _check_site(self, route: RouteMeta):
         """공개 주소를 실제로 열어보고 결과를 배너로 알려준다.
@@ -1871,7 +1944,9 @@ class MainWindow(QWidget):
             return
         self._restart_needed.discard(card.tunnel_name)
         card.set_restart_needed(False)
-        self.info_banner.hide()
+        self._set_progress(tunnel_text(card.tunnel_name, "restart"))
+        self._watch(kind="tunnel", label=card.tunnel_name, want=True,
+                    timeout=120, name=card.tunnel_name)
         card.update_state()
 
     def _set_boot_autostart(self, card: TunnelCard, enabled: bool):

@@ -1422,21 +1422,23 @@ def test_deploy_shows_completion_then_auto_hides(qapp, tmp_path):
         _time.sleep(0.005)
     QApplication.processEvents()
 
-    # 아직 준비 전: "배포 중" 문구, 감시 등록됨
-    assert "배포 중" in win.info_label.text()
-    assert len(win._deploy_watches) == 1
-    win._process_deploy_watches()
-    assert "배포 중" in win.info_label.text()   # 완료 전에는 그대로
+    # 아직 준비 전: 3단계(응답 대기) 문구, 감시 등록됨
+    assert win.info_label.text().startswith("[3/4]")
+    assert "응답" in win.info_label.text()
+    assert len(win._progress_watches) == 1
+    win._process_progress_watches()
+    assert win.info_label.text().startswith("[3/4]")   # 완료 전에는 그대로
 
     # 웹이 응답하기 시작하면 완료 문구 + 5초 자동 숨김 예약
     ready["on"] = True
-    win._process_deploy_watches()
+    win._process_progress_watches()
 
-    assert "배포가 완료되었습니다" in win.info_label.text()
+    assert win.info_label.text().startswith("[4/4]")
+    assert "배포 완료" in win.info_label.text()
     assert not win.info_banner.isHidden()
     assert win._info_hide_timer.isActive()
     assert win._info_hide_timer.interval() == 5000
-    assert win._deploy_watches == []            # 감시 종료
+    assert win._progress_watches == []          # 감시 종료
 
 
 def test_deploy_watch_gives_up_after_deadline(qapp, tmp_path):
@@ -1446,13 +1448,14 @@ def test_deploy_watch_gives_up_after_deadline(qapp, tmp_path):
     win, card, route = _route_window(qapp, tmp_path)
     win.ctx.manager.service_running = lambda t, r: False
     win.ctx.manager.service_pending = lambda t, r: True
-    win._deploy_watches.append({"name": "t1", "route": route, "label": "x",
-                                "deadline": _time.monotonic() - 1})
+    win._watch(kind="deploy", label="x", want=True, timeout=600,
+               owner="t1", route=route)
+    win._progress_watches[0]["deadline"] = _time.monotonic() - 1
 
-    win._process_deploy_watches()
+    win._process_progress_watches()
 
-    assert win._deploy_watches == []
-    assert "완료되었습니다" not in win.info_label.text()
+    assert win._progress_watches == []
+    assert "배포 완료" not in win.info_label.text()
 
 
 def test_new_banner_cancels_pending_auto_hide(qapp, tmp_path):

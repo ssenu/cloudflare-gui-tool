@@ -248,3 +248,97 @@ def test_clicking_the_link_opens_the_browser(qapp, tmp_path, monkeypatch):
     row.link_label.mouseReleaseEvent(event)
 
     assert opened == ["http://192.168.0.10:8000"]
+
+
+# ---- 진행 상황 한 줄 ----
+
+def test_server_toggle_reports_start_then_completion(qapp, tmp_path):
+    """켜는 중 -> 응답 대기 -> 켜졌습니다. 한 줄이 상황에 따라 계속 바뀐다."""
+    group = ServerGroupMeta(id="aabbccdd", name="백엔드", servers=[docker_server()])
+    win = make_window(qapp, tmp_path, groups=[group])
+    win.ctx.manager.start_service = lambda owner, route: None
+    ready = {"on": False}
+    win.ctx.manager.service_running = lambda owner, route: ready["on"]
+    win.ctx.manager.service_pending = lambda owner, route: not ready["on"]
+
+    row = win.server_cards[0].route_rows[0]
+    row._on_server_toggled(True)
+
+    assert "켜는 중" in win.info_label.text()
+    win._process_progress_watches()
+    assert "응답" in win.info_label.text()      # 아직 준비 전
+
+    ready["on"] = True
+    win._process_progress_watches()
+
+    assert "켜졌" in win.info_label.text()
+    assert win._progress_watches == []
+    assert win._info_hide_timer.isActive()      # 완료 문구는 저절로 사라진다
+
+
+def test_server_toggle_off_reports_until_stopped(qapp, tmp_path):
+    group = ServerGroupMeta(id="aabbccdd", name="백엔드", servers=[docker_server()])
+    win = make_window(qapp, tmp_path, groups=[group])
+    win.ctx.manager.stop_service = lambda owner, route: None
+    running = {"on": True}
+    win.ctx.manager.service_running = lambda owner, route: running["on"]
+    win.ctx.manager.service_pending = lambda owner, route: False
+
+    row = win.server_cards[0].route_rows[0]
+    row._on_server_toggled(False)
+    assert "끄는 중" in win.info_label.text()
+
+    running["on"] = False
+    win._process_progress_watches()
+
+    assert "껐" in win.info_label.text()
+    assert win._progress_watches == []
+
+
+def test_repeated_toggling_keeps_only_the_latest_watch(qapp, tmp_path):
+    """켰다 껐다를 빠르게 하면 반대 방향 감시가 둘 다 남아 문구가 흔들린다."""
+    group = ServerGroupMeta(id="aabbccdd", name="백엔드", servers=[docker_server()])
+    win = make_window(qapp, tmp_path, groups=[group])
+    win.ctx.manager.start_service = lambda owner, route: None
+    win.ctx.manager.stop_service = lambda owner, route: None
+    win.ctx.manager.service_running = lambda owner, route: False
+    win.ctx.manager.service_pending = lambda owner, route: True
+
+    row = win.server_cards[0].route_rows[0]
+    row._on_server_toggled(True)
+    row._on_server_toggled(False)
+
+    assert len(win._progress_watches) == 1
+    assert win._progress_watches[0]["want"] is False
+
+
+def test_same_text_does_not_reset_the_auto_hide_timer(qapp, tmp_path):
+    """1초마다 같은 문구를 다시 넣으면 완료 알림이 영영 안 사라진다."""
+    win = make_window(qapp, tmp_path)
+    win._set_progress("완료!", auto_hide_ms=5000)
+    first = win._info_hide_timer.remainingTime()
+
+    win._set_progress("완료!", auto_hide_ms=5000)
+
+    assert win._info_hide_timer.remainingTime() <= first
+
+
+def test_tunnel_watch_reports_until_running(qapp, tmp_path):
+    """터널도 같은 한 줄을 쓴다: 켜는 중 -> 켜졌습니다."""
+    from app.core.process_mgr import TunnelState
+
+    win = make_window(qapp, tmp_path)
+    state = {"v": TunnelState.STARTING}
+    win.ctx.manager.tunnel_state = lambda name: state["v"]
+
+    win._watch(kind="tunnel", label="my-tunnel", want=True, timeout=120,
+               name="my-tunnel")
+    win._process_progress_watches()
+    assert "my-tunnel" in win.info_label.text()
+    assert "켜는 중" in win.info_label.text()
+
+    state["v"] = TunnelState.RUNNING
+    win._process_progress_watches()
+
+    assert "켜졌" in win.info_label.text()
+    assert win._progress_watches == []
