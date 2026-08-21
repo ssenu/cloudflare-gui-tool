@@ -31,7 +31,8 @@ def test_deploy_restart_wording_differs_by_kind():
 
 
 def test_deploy_wait_step_explains_the_wait():
-    assert "응답" in deploy_text("api", "wait")
+    """컨테이너가 뜬 것과 웹이 열린 것은 다르다 - 무엇을 기다리는지 밝힌다."""
+    assert "웹이 열리기" in deploy_text("api", "wait")
 
 
 def test_deploy_done_is_a_completion_message():
@@ -66,7 +67,7 @@ def test_tunnel_stop_and_stopped():
 
 def test_service_start_waits_then_completes():
     assert "켜는 중" in service_text("api", "start")
-    assert "응답" in service_text("api", "wait")
+    assert "웹이 열리기" in service_text("api", "wait")
     assert "켜졌" in service_text("api", "done")
 
 

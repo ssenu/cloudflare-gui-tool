@@ -1424,7 +1424,7 @@ def test_deploy_shows_completion_then_auto_hides(qapp, tmp_path):
 
     # 아직 준비 전: 3단계(응답 대기) 문구, 감시 등록됨
     assert win.info_label.text().startswith("[3/4]")
-    assert "응답" in win.info_label.text()
+    assert "웹이 열리기" in win.info_label.text()
     assert len(win._progress_watches) == 1
     win._process_progress_watches()
     assert win.info_label.text().startswith("[3/4]")   # 완료 전에는 그대로

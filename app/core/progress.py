@@ -18,7 +18,7 @@ DEPLOY_STEPS = ("pull", "restart", "wait", "done")
 _DEPLOY_LABELS = {
     "pull": "최신 코드 받는 중 (git pull)...",
     "restart": None,        # 종류에 따라 달라진다(아래 참고)
-    "wait": "서버가 응답하기를 기다리는 중...",
+    "wait": "웹이 열리기를 기다리는 중...",
     "done": "배포 완료!",
 }
 
@@ -32,7 +32,7 @@ _TUNNEL_LABELS = {
 
 _SERVICE_LABELS = {
     "start": "서버 켜는 중...",
-    "wait": "서버가 응답하기를 기다리는 중...",
+    "wait": "웹이 열리기를 기다리는 중...",
     "done": "서버가 켜졌습니다.",
     "stop": "서버 끄는 중...",
     "stopped": "서버를 껐습니다.",

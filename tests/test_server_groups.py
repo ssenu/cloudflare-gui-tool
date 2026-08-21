@@ -266,7 +266,7 @@ def test_server_toggle_reports_start_then_completion(qapp, tmp_path):
 
     assert "켜는 중" in win.info_label.text()
     win._process_progress_watches()
-    assert "응답" in win.info_label.text()      # 아직 준비 전
+    assert "웹이 열리기" in win.info_label.text()   # 아직 준비 전
 
     ready["on"] = True
     win._process_progress_watches()
