@@ -152,7 +152,7 @@ class TunnelWizard(QDialog):
         self.stop_cmd_edit = QLineEdit()
         self.stop_cmd_edit.setPlaceholderText("비우면 프로세스를 강제 종료합니다 (선택)")
         self.cwd_edit = QLineEdit()
-        self.cwd_edit.setPlaceholderText("작업 폴더 (선택, 도커는 필수)")
+        self.cwd_edit.setPlaceholderText("작업 폴더 - 직접 입력하거나 아래 버튼으로 선택 (도커는 필수)")
         # 이전에는 여기서 QFileDialog를 직접 열었다. SSH 대상일 때도 내 PC의
         # 폴더 선택창이 떠서 원격 경로를 고를 수 없었다(같은 기능이 이미
         # route_dialog에는 제대로 있었다). 규칙을 공유 위젯으로 옮겼다.

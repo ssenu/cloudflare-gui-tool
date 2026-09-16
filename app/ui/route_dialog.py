@@ -76,7 +76,7 @@ class RouteDialog(QDialog):
         self.stop_cmd_edit = QLineEdit(route.server.stop_cmd if route else "")
         self.stop_cmd_edit.setPlaceholderText("비우면 프로세스를 강제 종료합니다 (선택)")
         self.cwd_edit = QLineEdit(route.server.cwd if route else "")
-        self.cwd_edit.setPlaceholderText("작업 폴더 (도커는 필수)")
+        self.cwd_edit.setPlaceholderText("작업 폴더 - 직접 입력하거나 아래 버튼으로 선택 (도커는 필수)")
         # 로컬/원격에 따라 폴더 선택 방식이 갈리는 규칙은 CwdPickerRow가 갖는다
         # (마법사와 공유해, 한쪽만 고쳐지는 일이 없게 한다).
         self.cwd_picker = CwdPickerRow(ctx, self.cwd_edit, self.service_edit,

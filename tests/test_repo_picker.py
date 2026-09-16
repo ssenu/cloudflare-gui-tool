@@ -117,3 +117,112 @@ def test_picked_project_fills_service_port(qapp, tmp_path, monkeypatch):
 
     assert cwd_edit.text() == "/srv/apps/app"
     assert service_edit.text() == "http://localhost:8001"
+
+
+# ---- 경로 직접 입력 ----
+# 원격 대상에서는 "프로젝트에서 선택" 목록에 없는 폴더(예: 클론한 리포의
+# 하위 deploy/ 폴더, 앱을 거치지 않고 직접 클론한 리포)를 쓸 방법이 눈에
+# 보이지 않았다. 입력칸에 타이핑은 됐지만 그걸 알 수 없었고, 쳐 넣어도 폴더
+# 존재 확인과 포트 자동 채움이 없었다.
+
+def _remote_row(tmp_path, monkeypatch, typed: str, exists: bool,
+                env_port: str = ""):
+    from PyQt6.QtWidgets import QInputDialog
+    ctx = make_ctx(tmp_path, remote=True)
+    if exists:
+        ctx.runner.dirs.add(typed)
+        if env_port:
+            ctx.runner.files[f"{typed}/.env"] = f"HOST_PORT={env_port}\n"
+    monkeypatch.setattr(QInputDialog, "getText",
+                        staticmethod(lambda *a, **k: (typed, True)))
+    cwd, svc = QLineEdit(), QLineEdit("http://localhost:8000")
+    return CwdPickerRow(ctx, cwd, svc), cwd, svc
+
+
+def test_remote_target_shows_manual_path_button(qapp, tmp_path):
+    ctx = make_ctx(tmp_path, remote=True)
+    row = CwdPickerRow(ctx, QLineEdit(), None)
+    assert not row.manual_btn.isHidden()
+
+
+def test_local_target_hides_manual_path_button(qapp, tmp_path):
+    """로컬은 폴더 선택창이 있고 입력칸도 바로 옆이라 버튼이 하나 더 있을 이유가 없다."""
+    ctx = make_ctx(tmp_path, remote=False)
+    row = CwdPickerRow(ctx, QLineEdit(), None)
+    assert row.manual_btn.isHidden()
+
+
+def test_manual_path_sets_cwd_and_detects_port(qapp, tmp_path, monkeypatch):
+    row, cwd, svc = _remote_row(tmp_path, monkeypatch,
+                                "/srv/apps/Woo-MoMo-Project/deploy",
+                                exists=True, env_port="8006")
+
+    row._manual()
+
+    assert cwd.text() == "/srv/apps/Woo-MoMo-Project/deploy"
+    assert svc.text() == "http://localhost:8006"
+
+
+def test_manual_path_strips_whitespace(qapp, tmp_path, monkeypatch):
+    row, cwd, _ = _remote_row(tmp_path, monkeypatch, "  /srv/apps/x  ", exists=False)
+    from PyQt6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+
+    row._manual()
+
+    assert cwd.text() == "/srv/apps/x"
+
+
+def test_manual_path_missing_on_target_asks_and_can_refuse(qapp, tmp_path, monkeypatch):
+    """대상 기기에 없는 폴더는 오타일 가능성이 크다 - 묻고, 거절하면 바꾸지 않는다."""
+    from PyQt6.QtWidgets import QMessageBox
+    row, cwd, svc = _remote_row(tmp_path, monkeypatch, "/srv/apps/없는폴더", exists=False)
+    cwd.setText("/srv/apps/원래값")
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(
+        lambda *a, **k: asked.append(a[2]) or QMessageBox.StandardButton.No))
+
+    row._manual()
+
+    assert asked and "없는폴더" in asked[0]
+    assert cwd.text() == "/srv/apps/원래값"
+    assert svc.text() == "http://localhost:8000"
+
+
+def test_manual_path_missing_on_target_can_be_forced(qapp, tmp_path, monkeypatch):
+    """아직 클론 전이라 폴더가 없을 수도 있다 - 그래도 쓰겠다면 받아들인다."""
+    from PyQt6.QtWidgets import QMessageBox
+    row, cwd, _ = _remote_row(tmp_path, monkeypatch, "/srv/apps/곧생길폴더", exists=False)
+    monkeypatch.setattr(QMessageBox, "question",
+                        staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+
+    row._manual()
+
+    assert cwd.text() == "/srv/apps/곧생길폴더"
+
+
+def test_manual_path_cancel_changes_nothing(qapp, tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QInputDialog
+    ctx = make_ctx(tmp_path, remote=True)
+    monkeypatch.setattr(QInputDialog, "getText",
+                        staticmethod(lambda *a, **k: ("", False)))
+    cwd = QLineEdit("/srv/apps/원래값")
+    row = CwdPickerRow(ctx, cwd, None)
+
+    row._manual()
+
+    assert cwd.text() == "/srv/apps/원래값"
+
+
+def test_no_projects_message_points_to_manual_input(qapp, tmp_path, monkeypatch):
+    """클론한 프로젝트가 없을 때 '먼저 클론하라'고만 하면 막다른 길이다."""
+    from PyQt6.QtWidgets import QMessageBox
+    from app.ui.repo_picker import pick_repo_path
+    ctx = make_ctx(tmp_path, remote=True)
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information",
+                        staticmethod(lambda *a, **k: shown.append(a[2])))
+
+    assert pick_repo_path(None, ctx) is None
+    assert shown and "직접 입력" in shown[0]

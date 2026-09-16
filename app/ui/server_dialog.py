@@ -65,7 +65,7 @@ class ServerDialog(QDialog):
         self.stop_cmd_edit = QLineEdit(server.server.stop_cmd if server else "")
         self.stop_cmd_edit.setPlaceholderText("비우면 프로세스를 강제 종료합니다 (선택)")
         self.cwd_edit = QLineEdit(server.server.cwd if server else "")
-        self.cwd_edit.setPlaceholderText("작업 폴더 (도커는 필수)")
+        self.cwd_edit.setPlaceholderText("작업 폴더 - 직접 입력하거나 아래 버튼으로 선택 (도커는 필수)")
         self.cwd_picker = CwdPickerRow(ctx, self.cwd_edit, self.service_edit,
                                        icon_color)
 
