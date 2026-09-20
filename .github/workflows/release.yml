@@ -64,7 +64,9 @@ jobs:
       - name: 설치 프로그램 빌드
         shell: pwsh
         run: |
-          & "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe" `
+          # $env:ProgramFiles(x86) 는 괄호 때문에 PowerShell이 파싱하지 못한다.
+          # 중괄호로 감싸야 한 덩어리의 변수 이름으로 읽힌다.
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
             "/DAppVersion=${{ steps.ver.outputs.value }}" `
             "installer\CloudflareTunnelGUI.iss"
 
