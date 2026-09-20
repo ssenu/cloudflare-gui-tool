@@ -1,3 +1,5 @@
 .superpowers/
 dist/
 build/
+installer/out/
+

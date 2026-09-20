@@ -1,0 +1,87 @@
+# 태그를 올리면 윈도우용 설치본과 무설치 압축본을 만들어 릴리스에 붙인다.
+#
+# 왜 "모든 푸시"가 아니라 태그인가: 커밋마다 릴리스를 만들면 버전이 무의미해지고
+# 릴리스 목록이 커밋 로그가 된다. 올릴 준비가 됐을 때만 태그를 찍는다.
+#
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# 수동으로도 돌릴 수 있다(Actions 탭 > Run workflow). 그때는 릴리스를 만들지
+# 않고 빌드 결과만 아티팩트로 남긴다 - 태그 없이 릴리스를 만들 수 없기 때문이다.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # 릴리스 생성·자산 업로드에 필요
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 의존성 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: 테스트
+        # 화면 없는 러너에서도 PyQt 테스트가 돌아가야 한다(conftest가 offscreen 강제).
+        run: python -m pytest -q
+
+      - name: 버전 결정
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=0.0.0-dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 폴더형(onedir) 빌드
+        run: pyinstaller --noconfirm CFT-onedir.spec
+
+      - name: 무설치 압축본
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.value }}"
+          Compress-Archive -Path "dist\CloudflareTunnelGUI\*" `
+            -DestinationPath "dist\CloudflareTunnelGUI-$v-portable.zip"
+
+      - name: Inno Setup 설치
+        run: choco install innosetup -y --no-progress
+
+      - name: 설치 프로그램 빌드
+        shell: pwsh
+        run: |
+          & "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe" `
+            "/DAppVersion=${{ steps.ver.outputs.value }}" `
+            "installer\CloudflareTunnelGUI.iss"
+
+      - name: 빌드 결과 보관 (태그가 아닐 때도 받아볼 수 있게)
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: |
+            dist/*.zip
+            installer/out/*.exe
+
+      - name: 릴리스에 올리기
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.ver.outputs.value }}
+          generate_release_notes: true
+          files: |
+            dist/*.zip
+            installer/out/*.exe

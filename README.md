@@ -326,12 +326,29 @@ pytest
 
 ### 빌드
 
-```bash
+폴더형(onedir)으로 굽고 설치 프로그램으로 묶는다.
+
+```powershell
 pip install pyinstaller
-pyinstaller --noconfirm "Cloudflare Tunnel GUI.spec"
+pyinstaller --noconfirm CFT-onedir.spec          # dist\CloudflareTunnelGUI& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" `
+  "/DAppVersion=0.1.0" "installer\CloudflareTunnelGUI.iss"
 ```
 
-결과물은 `dist\Cloudflare Tunnel GUI.exe`(단일 파일, 콘솔 없음)입니다.
+결과는 `installer\out\CloudflareTunnelGUI-Setup-<버전>.exe` 입니다.
+
+onefile(`Cloudflare Tunnel GUI.spec`)도 남겨 두었지만 기본은 onedir입니다.
+onefile은 실행할 때마다 42MB를 임시 폴더에 풀어 **매번 1.6초**가 걸리는 반면,
+onedir은 두 번째 실행부터 **0.8초**입니다(실측). 대신 파일이 183개로
+흩어지므로 사용자에게는 설치본으로 줍니다.
+
+### 릴리스
+
+태그를 올리면 GitHub Actions가 설치본과 무설치 압축본을 만들어 릴리스에
+붙입니다.
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
 
 ### 문서
 
