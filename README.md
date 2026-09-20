@@ -330,7 +330,8 @@ pytest
 
 ```powershell
 pip install pyinstaller
-pyinstaller --noconfirm CFT-onedir.spec          # dist\CloudflareTunnelGUI& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" `
+pyinstaller --noconfirm CFT-onedir.spec          # dist\CloudflareTunnelGUI\
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" `
   "/DAppVersion=0.1.0" "installer\CloudflareTunnelGUI.iss"
 ```
 
