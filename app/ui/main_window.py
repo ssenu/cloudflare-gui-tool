@@ -246,6 +246,10 @@ class RouteRow(QWidget):
             check.setToolTip("실제로 그 주소를 열어 보고 결과를 알려줍니다")
             check.triggered.connect(lambda: win._check_site(self.route))
             m.addAction(check)
+        log_action = QAction("로그", m)
+        log_action.setToolTip("이 서버의 로그만 따로 봅니다")
+        log_action.triggered.connect(self._open_log)
+        m.addAction(log_action)
         edit_action = QAction("편집", m)
         edit_action.triggered.connect(self._edit_route)
         m.addAction(edit_action)
@@ -290,6 +294,9 @@ class RouteRow(QWidget):
         if not self.route.hostname:
             return
         webbrowser.open(f"https://{self.route.hostname}")
+
+    def _open_log(self):
+        self.card.open_log(self.route)
 
     def _edit_route(self):
         self.card.edit_route(self.route)
@@ -558,7 +565,7 @@ class TunnelCard(QFrame):
 
         log_btn = QPushButton("로그")
         # I1: 로그 버튼은 아이콘 없이 텍스트만 (사용자가 "이모지"라 부르는 그림 아이콘 제거)
-        log_btn.setToolTip("터널과 모든 라우트의 로그를 탭으로 봅니다")
+        log_btn.setToolTip("이 터널 자체의 로그를 봅니다 (서버 로그는 각 행의 ⋮에서)")
         log_btn.clicked.connect(lambda: win._open_log_tunnel(self))
 
         # 부팅 시 자동 실행 중이면 헤더에 표시한다. 켜고 끄는 것은 ⋮ 메뉴에서
@@ -633,6 +640,9 @@ class TunnelCard(QFrame):
 
     def deploy_route(self, route: RouteMeta):
         self.win._deploy_route(self, route)
+
+    def open_log(self, route: RouteMeta):
+        self.win._open_log_route(self, route)
 
     # ---- 메뉴 ----
     def _menu(self, anchor: QPushButton):
@@ -770,10 +780,6 @@ class ServerGroupCard(QFrame):
         self.count_label = QLabel()
         self.count_label.setObjectName("cardSub")
 
-        log_btn = QPushButton("로그")
-        log_btn.setToolTip("이 카테고리의 모든 서버 로그를 탭으로 봅니다")
-        log_btn.clicked.connect(lambda: win._open_log_server_group(self))
-
         menu_btn = QPushButton()
         menu_btn.setIcon(make_icon("dots", icon_color))
         menu_btn.setFixedWidth(34)
@@ -790,7 +796,6 @@ class ServerGroupCard(QFrame):
         spacer = QLabel()
         spacer.setFixedWidth(TOGGLE_LABEL_WIDTH + 44)
         header.addWidget(spacer)
-        header.addWidget(log_btn)
         header.addWidget(menu_btn)
 
         separator = QFrame()
@@ -838,6 +843,9 @@ class ServerGroupCard(QFrame):
 
     def deploy_route(self, route: RouteMeta):
         self.win._deploy_route(self, route)
+
+    def open_log(self, route: RouteMeta):
+        self.win._open_log_route(self, route)
 
     # ---- 메뉴 ----
     def _menu(self, anchor: QPushButton):
@@ -2138,51 +2146,35 @@ class MainWindow(QWidget):
 
     # ---- 로그 ----
     def _open_log_tunnel(self, card: TunnelCard):
-        # I4: 터널당 로그 버튼 하나로 통합 - 첫 탭 "터널", 그 뒤로 라우트마다
-        # 한 탭(탭 이름은 hostname, 없으면 "서버 N"). 라우트가 없으면 "터널"
-        # 탭만 열어 탭이 불필요하게 많아지지 않게 한다.
+        """터널 자체의 로그만 연다.
+
+        예전에는 이 버튼 하나가 터널 + 모든 라우트를 탭으로 몰아서 열었다.
+        탭이 많을수록 여는 비용(탭마다 첫 읽기)과 "지금 보는 게 어느 서버
+        로그인지" 헷갈림이 함께 늘어난다. 서버 로그는 각 행의 ⋮로 옮겼다.
+        """
         name = card.tunnel_name
         # B2: 캐시 키에 대상(runner.name)을 포함시켜 대상 전환 후 다른 대상의
         # 뷰어가 잘못 재사용되지 않게 한다.
         target = self.ctx.runner.name
-        title = f"{name} ({self._target_display_name()})"
-        log_paths = {"터널": self.ctx.manager.log_path_for_tunnel(name)}
-        for i, route in enumerate(card.meta.routes, start=1):
-            tab_name = route.hostname or f"서버 {i}"
-            path = self.ctx.manager.log_path_for_service(name, route)
-            if route.server.kind == "docker" and route.server.cwd:
-                # 도커는 두 종류가 다 필요하다: 빌드/기동 출력(우리 파일)과
-                # 컨테이너 안에서 앱이 뱉는 로그(docker compose logs).
-                # 최상위에 나란히 두면 서버 수의 두 배로 탭이 늘어나므로,
-                # 서버 이름 탭 하나 안에 하위 탭(앱/빌드)으로 묶는다.
-                log_paths[tab_name] = {
-                    "앱": ("compose", route.server.cwd),
-                    "빌드": path,
-                }
-            else:
-                log_paths[tab_name] = path
-        self._open_log_viewer(f"tunnel:{target}:{name}", title, log_paths)
+        title = f"{name} 터널 ({self._target_display_name()})"
+        self._open_log_viewer(
+            f"tunnel:{target}:{name}", title,
+            {"터널": self.ctx.manager.log_path_for_tunnel(name)})
 
-    def _open_log_server_group(self, card: "ServerGroupCard"):
-        """서버 카테고리의 로그. 터널 탭만 없고 구조는 터널 로그와 같다."""
+    def _open_log_route(self, card, route: RouteMeta):
+        """서버(라우트) 하나의 로그만 연다. 서버마다 창이 따로 뜬다."""
         target = self.ctx.runner.name
-        title = f"{card.group.name} ({self._target_display_name()})"
-        log_paths: dict = {}
-        for i, server in enumerate(card.group.servers, start=1):
-            tab_name = server.label or f"서버 {i}"
-            path = self.ctx.manager.log_path_for_service(card.owner, server)
-            if server.server.kind == "docker" and server.server.cwd:
-                log_paths[tab_name] = {
-                    "앱": ("compose", server.server.cwd),
-                    "빌드": path,
-                }
-            else:
-                log_paths[tab_name] = path
-        if not log_paths:
-            QMessageBox.information(self, "로그 없음",
-                                    "이 카테고리에는 아직 서버가 없습니다.")
-            return
-        self._open_log_viewer(f"group:{target}:{card.group.id}", title, log_paths)
+        label = route_display_label(route.label, route.hostname)[0] or route.id
+        title = f"{label} ({self._target_display_name()})"
+        path = self.ctx.manager.log_path_for_service(card.owner, route)
+        if route.server.kind == "docker" and route.server.cwd:
+            # 도커는 두 종류가 다 필요하다: 컨테이너 안에서 앱이 뱉는 로그와
+            # 우리가 남긴 빌드·기동 출력.
+            sources = {"앱": ("compose", route.server.cwd), "빌드": path}
+        else:
+            sources = {"로그": path}
+        self._open_log_viewer(f"svc:{target}:{card.owner}:{route.id}",
+                              title, sources)
 
     def _open_log_viewer(self, key: str, title: str, log_paths: dict[str, str]):
         from app.ui.log_viewer import LogViewer

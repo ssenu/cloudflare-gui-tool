@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import re
+import time
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QCloseEvent
@@ -54,15 +55,23 @@ class _LogTab(QWidget):
         # 재시작 후 처음 열 때: 파일이 아주 크면 마지막 TAIL_START_LIMIT
         # 바이트만 읽도록 시작 offset을 조정한다(그래도 setMaximumBlockCount가
         # 화면에는 마지막 2000줄만 남긴다).
-        try:
-            size = self.runner.file_size(self.path)
-        except Exception:
-            size = 0
-        if size > TAIL_START_LIMIT:
-            self.offset = size - TAIL_START_LIMIT
+        # 뷰어가 모든 탭을 생성자에서 만들기 때문에, 여기서 file_size()를
+        # 부르면 탭 수만큼 SSH 왕복이 GUI 스레드에서 줄줄이 일어나 창이 굳는다
+        # (빌드 중에는 한 번이 초 단위). 첫 읽기 때 워커에서 한 번만 잰다.
+        self._seeked = False
+
+    min_interval_ms = 0   # 파일 tail은 싸다 - 뷰어 기본 주기를 그대로 쓴다
 
     def read_new(self) -> tuple[int, str]:
         """새로 늘어난 부분을 읽는다. 워커 스레드에서 호출된다(위젯 접근 금지)."""
+        if not self._seeked:
+            self._seeked = True
+            try:
+                size = self.runner.file_size(self.path)
+            except Exception:
+                size = 0
+            if size > TAIL_START_LIMIT:
+                self.offset = size - TAIL_START_LIMIT
         return self.runner.tail_file(self.path, self.offset)
 
     def apply_new(self, offset: int, text: str) -> None:
@@ -106,13 +115,19 @@ class _ComposeLogTab(QWidget):
     """
 
     TAIL_LINES = 200
+    # 파일 tail보다 훨씬 비싸다(도커 CLI 기동 + 로그 스캔). 실측 콜드 2.1초,
+    # SD카드 페이지 캐시에서 밀려나면 10초 이상. 뷰어가 이 주기 전에는 다시
+    # 부르지 않는다.
+    min_interval_ms = 3000
+    # compose 출력에서 시각을 뽑는다: "web-1  | 2026-09-20T06:11:15.1Z ..."
+    TS_RE = re.compile(r"(\d{4}-\d{2}-\d{2}T[\d:.]+Z)")
 
     def __init__(self, runner: CommandRunner, cwd: str, error_color: str):
         super().__init__()
         self.runner = runner
         self.cwd = cwd
         self.error_color = error_color
-        self._last_text = ""
+        self._since = ""
 
         self.view = QPlainTextEdit()
         self.view.setReadOnly(True)
@@ -132,22 +147,37 @@ class _ComposeLogTab(QWidget):
 
     def read_new(self):
         """워커 스레드에서 호출된다(위젯 접근 금지)."""
-        return self.runner.run(
-            ["docker", "compose", "logs", "--tail", str(self.TAIL_LINES),
-             "--no-color"], cwd=self.cwd, timeout=20.0)
+        cmd = ["docker", "compose", "logs", "--no-color", "-t"]
+        if self._since:
+            # 첫 읽기 뒤로는 새로 생긴 줄만 받는다. 매번 전체를 긁으면
+            # 파이에서 한 번에 몇 초씩 걸린다.
+            cmd += ["--since", self._since]
+        else:
+            cmd += ["--tail", str(self.TAIL_LINES)]
+        return self.runner.run(cmd, cwd=self.cwd, timeout=20.0)
 
     def apply_new(self, result) -> None:
         text = (result.stdout or "") + (result.stderr or "")
         if result.exit_code != 0 and not text.strip():
-            text = f"(컨테이너 로그를 읽지 못했습니다. 종료 코드 {result.exit_code})"
-        if text == self._last_text:
+            self.view.appendPlainText(
+                f"(컨테이너 로그를 읽지 못했습니다. 종료 코드 {result.exit_code})")
             return
-        self._last_text = text
-        bar = self.view.verticalScrollBar()
-        at_bottom = self.follow.isChecked() or bar.value() >= bar.maximum() - 4
-        pos = bar.value()
-        self.view.setPlainText(text.rstrip("\n"))
-        bar.setValue(bar.maximum() if at_bottom else min(pos, bar.maximum()))
+        newest = self._since
+        shown = 0
+        for line in text.splitlines():
+            m = self.TS_RE.search(line)
+            ts = m.group(1) if m else ""
+            # --since는 경계 줄을 다시 주기도 한다. 이미 본 시각은 버린다.
+            if ts and self._since and ts <= self._since:
+                continue
+            if ts and ts > newest:
+                newest = ts
+            self.view.appendPlainText(line)
+            shown += 1
+        self._since = newest
+        if shown and self.follow.isChecked():
+            bar = self.view.verticalScrollBar()
+            bar.setValue(bar.maximum())
 
     def show_error(self, message: str) -> None:
         self.view.setPlainText(f"[로그 읽기 실패] {message}")
@@ -212,6 +242,7 @@ class LogViewer(QDialog):
         lay.addWidget(tabs)
 
         self._tab_widget = tabs
+        self._last_read: dict[int, float] = {}
         # 로그 읽기도 원격 왕복이라 GUI 스레드에서 하면 창이 멈칫한다.
         # 워커로 돌리고, 결과만 여기서 화면에 붙인다.
         self._poller = BackgroundPoller(self)
@@ -235,6 +266,14 @@ class LogViewer(QDialog):
         tab = self._current_tab()
         if tab is None:
             return
+        # 탭마다 읽는 비용이 다르다. 컨테이너 로그는 도커 CLI를 띄우는 비용이
+        # 커서, 파일 tail과 같은 주기로 부르면 파이가 그 일만 하게 된다.
+        wait = getattr(tab, "min_interval_ms", 0)
+        if wait:
+            last = self._last_read.get(id(tab), 0.0)
+            if (time.monotonic() - last) * 1000 < wait:
+                return
+            self._last_read[id(tab)] = time.monotonic()
         self._pending_tab = tab
         self._poller.run(tab.read_new)
 
