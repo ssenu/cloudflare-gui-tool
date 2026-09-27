@@ -940,6 +940,11 @@ def test_failed_start_leaves_knob_off(qapp, tmp_path, monkeypatch):
                         staticmethod(lambda *a, **k: None))
 
     row.server_switch.click()
+    # 시작은 워커에서 돈다(창이 멈추지 않도록). 실패가 돌아올 때까지 기다린다.
+    import time as _t
+    deadline = _t.monotonic() + 3
+    while row.server_switch._display_checked and _t.monotonic() < deadline:
+        QApplication.processEvents()
 
     assert row.server_switch._display_checked is False
 

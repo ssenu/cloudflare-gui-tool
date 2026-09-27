@@ -99,3 +99,78 @@ def test_pump_exception_still_calls_on_exit():
     # on_exit must have been called exactly once with code 1 (error)
     assert len(exit_codes) == 1, f"on_exit not called, got {exit_codes}"
     assert exit_codes[0] == 1, f"Expected error code 1, got {exit_codes[0]}"
+
+
+# ---- tail_file: 큰 파일을 조각내어 왕복하지 않는다 ----
+# 실측: 1.8MB 로그 하나를 읽는 데 17.6초. paramiko는 prefetch 없이 읽으면
+# 32KB마다 왕복하므로, 왕복이 250ms인 링크에서는 이렇게 된다. 앱을 켠 직후와
+# 대상을 바꾼 직후에 이 경로를 타서 창이 그 시간만큼 멈춘다.
+
+class FakeSftpFile:
+    def __init__(self, data: bytes, log: list):
+        self._data, self._pos, self._log = data, 0, log
+
+    def seek(self, pos):
+        self._pos = pos
+
+    def prefetch(self, size=None):
+        self._log.append(("prefetch", size))
+
+    def read(self, size=None):
+        out = self._data[self._pos:]
+        self._pos = len(self._data)
+        return out
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class FakeSftp:
+    def __init__(self, data: bytes):
+        self.data, self.log = data, []
+
+    def stat(self, path):
+        return type("A", (), {"st_size": len(self.data)})()
+
+    def open(self, path, mode):
+        return FakeSftpFile(self.data, self.log)
+
+
+def _runner_with(data: bytes):
+    from app.core.ssh_runner import SshRunner
+    from app.core.store import SshProfile
+    r = SshRunner(SshProfile(name="x", host="h"))
+    r._sftp = FakeSftp(data)
+    return r, r._sftp
+
+
+def test_tail_file_prefetches_the_range_it_will_read():
+    r, sftp = _runner_with(b"a" * 100_000)
+
+    r.tail_file("/x.log", 40_000)
+
+    assert ("prefetch", 60_000) in sftp.log   # 남은 만큼만
+
+
+def test_tail_file_still_returns_the_new_text():
+    r, _ = _runner_with(b"hello world")
+
+    offset, text = r.tail_file("/x.log", 6)
+
+    assert text == "world" and offset == 11
+
+
+def test_tail_file_survives_a_client_without_prefetch():
+    """옛 paramiko 등 prefetch를 모르는 구현에서도 읽기는 되어야 한다."""
+    r, sftp = _runner_with(b"abc")
+
+    class NoPrefetch(FakeSftpFile):
+        def prefetch(self, size=None):
+            raise TypeError("prefetch() takes no arguments")
+
+    sftp.open = lambda path, mode: NoPrefetch(b"abc", sftp.log)
+
+    assert r.tail_file("/x.log", 0)[1] == "abc"

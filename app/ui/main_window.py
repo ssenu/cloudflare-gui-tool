@@ -210,16 +210,30 @@ class RouteRow(QWidget):
     def _on_server_toggled(self, checked: bool):
         win = self.card.win
         ctx = win.ctx
+        owner, route = self.card.owner, self.route
+        # 전이 중 표시는 즉시 해 준다(캐시만 건드리므로 원격 호출이 아니다).
+        # 실제 시작·정지는 워커로 넘긴다 - 여기서 직접 부르면 파이가 바쁠 때
+        # 창이 굳는다.
         try:
-            if checked:
-                ctx.manager.start_service(self.card.owner, self.route)
-            else:
-                ctx.manager.stop_service(self.card.owner, self.route)
-        except Exception as ex:
-            QMessageBox.critical(self, "서버 오류", str(ex))
-            win.info_banner.hide()
+            ctx.manager.mark_service_pending(owner, route)
+        except Exception:
+            pass
+
+        def _done(ok, _result, error):
+            if not ok:
+                # 실패했는데 전이 표시를 두면 토글이 몇 분 동안 "켜지는 중"으로
+                # 남는다. 즉시 풀어 실제 상태(꺼짐)로 되돌린다.
+                try:
+                    ctx.manager.clear_service_pending(owner, route)
+                except Exception:
+                    pass
+                QMessageBox.critical(self, "서버 오류", error)
             self.update_state()
-            return
+
+        if checked:
+            win._run_bg(lambda: ctx.manager.start_service(owner, route), _done)
+        else:
+            win._run_bg(lambda: ctx.manager.stop_service(owner, route), _done)
         label = route_display_label(self.route.label, self.route.hostname)[0]
         win._set_progress(service_text(label, "start" if checked else "stop"))
         win._watch(kind="service", label=label, want=checked, timeout=300,
@@ -1801,24 +1815,52 @@ class MainWindow(QWidget):
                     reason="git pull 실패 - 서버는 그대로 둡니다. 로그를 확인하세요."))
                 return
             self._set_progress(deploy_text(label, "restart", kind=srv_kind))
-            try:
+
+            def _restart():
                 ctx.manager.stop_service(name, route)
                 ctx.manager.start_service(name, route)
-            except Exception as ex:
-                self._set_progress(deploy_text(label, "fail",
-                                               reason=f"서버 재시작 실패: {ex}"))
-                return
-            # 실행 판정이 "실제 웹 응답" 기준이라, 그 순간이 곧 배포 완료다.
-            self._set_progress(deploy_text(label, "wait"))
-            self._watch(kind="deploy", label=label, owner=name, route=route,
-                        want=True, timeout=600)   # 빌드 포함 최대 10분
-            if row is not None:
-                row.update_state()
+
+            def _restarted(ok2, _r, err2):
+                if not ok2:
+                    self._set_progress(deploy_text(
+                        label, "fail", reason=f"서버 재시작 실패: {err2}"))
+                    return
+                # 실행 판정이 "실제 웹 응답" 기준이라, 그 순간이 곧 배포 완료다.
+                self._set_progress(deploy_text(label, "wait"))
+                self._watch(kind="deploy", label=label, owner=name, route=route,
+                            want=True, timeout=600)   # 빌드 포함 최대 10분
+                if row is not None:
+                    row.update_state()
+
+            # 도커 재시작은 원격 호출이 여러 번이다. GUI 스레드에서 하면
+            # 그동안 창이 멈춘다.
+            self._run_bg(_restart, _restarted)
 
         poller.finished.connect(done)
         poller.run(lambda: runner.run(["git", "-C", cwd, "pull", "--ff-only"],
                                       timeout=120.0))
         self._site_pollers.append(poller)
+
+    # ---- 원격 작업을 워커로 ----
+    def _run_bg(self, fn, done=None):
+        """원격 호출 하나를 워커 스레드에서 돌린다.
+
+        SSH 연결 하나를 상태 폴링과 공유하고 락으로 줄을 세우기 때문에, GUI
+        스레드에서 직접 부르면 파이가 바쁠 때(빌드 중) 그 한 번이 몇 초가 되고
+        그동안 창이 통째로 굳는다. 사용자 조작은 전부 이쪽으로 보낸다.
+        """
+        poller = BackgroundPoller(self)
+
+        def _finish(ok, result, error):
+            if poller in self._site_pollers:
+                self._site_pollers.remove(poller)
+            poller.deleteLater()
+            if done is not None:
+                done(ok, result, error)
+
+        poller.finished.connect(_finish)
+        self._site_pollers.append(poller)
+        poller.run(fn)
 
     # ---- 진행 상황 한 줄 ----
     def _set_progress(self, text: str, auto_hide_ms: int = 0):

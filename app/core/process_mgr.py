@@ -48,6 +48,11 @@ class TunnelState(Enum):
     ERROR = auto()
 
 
+def _norm_dir(path: str) -> str:
+    """경로 비교용 정규화. 끝 슬래시와 역슬래시 차이를 흡수한다."""
+    return (path or "").replace(chr(92), "/").rstrip("/")
+
+
 def _split_cmd(cmd: str) -> list[str]:
     # posix=False: Windows 경로의 역슬래시를 보존한다. 이후 따옴표만 벗겨준다.
     parts = shlex.split(cmd, posix=False)
@@ -563,39 +568,70 @@ class ProcessManager:
             self._log_offset[unit] = new_offset
 
         now = time.time()
-        for unit, cwd, service_url in docker_units:
-            last = self._docker_checked_at.get(unit, 0.0)
-            interval = (DOCKER_POLL_INTERVAL if self._is_pending(unit)
-                        else DOCKER_POLL_IDLE_INTERVAL)
-            if now - last < interval:
-                continue  # 캐시 유효: 직전 self._docker_running 값을 재사용
-            try:
-                res = reg.runner.run(["docker", "compose", "ps", "-q"], cwd=cwd,
-                                     timeout=POLL_TIMEOUT)
-                running = res.exit_code == 0 and bool(res.stdout.strip())
-                if res.exit_code != 0:
-                    # C4: 폴링 경로 실패는 파일에 남기지 않고 메모리에만 보관한다
-                    # (도커 유닛은 로그 로테이션 대상도 아니라 무한 성장 위험이 큼).
-                    self._docker_error[unit] = res.stderr.strip() or res.stdout.strip()
+        # 어떤 유닛이든 조회할 때가 됐으면 한 번에 다 받아 온다. 예전에는
+        # 프로젝트마다 `docker compose ps -q`를 따로 날려 SSH 왕복이 유닛
+        # 수만큼 생겼다(실측 5개 500ms). 라벨 조회 한 번이면 59ms다.
+        due = [u for u in docker_units
+               if now - self._docker_checked_at.get(u[0], 0.0)
+               >= (DOCKER_POLL_INTERVAL if self._is_pending(u[0])
+                   else DOCKER_POLL_IDLE_INTERVAL)]
+        if due:
+            running_dirs = self._compose_running_dirs(reg)
+            for unit, cwd, service_url in due:
+                if running_dirs is None:
+                    # 라벨을 못 읽는 환경(옛 도커 등): 예전 방식으로 물러선다.
+                    running = self._compose_ps_running(reg, unit, cwd)
                 else:
+                    running = _norm_dir(cwd) in running_dirs
                     self._docker_error.pop(unit, None)
-            except Exception as exc:  # 도커 미설치 등 예상 못한 예외도 "중지"로 간주
-                running = False
-                self._docker_error[unit] = str(exc)
-            if running:
-                # 컨테이너가 떠 있어도 안의 웹서버가 아직 준비 전일 수 있다
-                # (재배포 직후가 대표적). "실행 중" 판정은 실제로 그 포트가
-                # 응답할 때로 미룬다 - 그래야 토글이 웹에 접속 가능해진
-                # 시점에 파란색이 된다. 판정 불가(curl 없음 등)면 컨테이너
-                # 상태를 그대로 쓴다(기능이 죽는 것보다 낫다).
-                ready = self._service_http_ready(reg, service_url)
-                if ready is not None:
-                    running = ready
-            self._docker_running[unit] = running
-            self._docker_checked_at[unit] = now
+                if running:
+                    # 컨테이너가 떠 있어도 안의 웹서버가 아직 준비 전일 수 있다
+                    # (재배포 직후가 대표적). "실행 중" 판정은 실제로 그 포트가
+                    # 응답할 때로 미룬다 - 그래야 토글이 웹에 접속 가능해진
+                    # 시점에 파란색이 된다. 판정 불가(curl 없음 등)면 컨테이너
+                    # 상태를 그대로 쓴다(기능이 죽는 것보다 낫다).
+                    ready = self._service_http_ready(reg, service_url)
+                    if ready is not None:
+                        running = ready
+                self._docker_running[unit] = running
+                self._docker_checked_at[unit] = now
 
         for unit, _cwd, _svc in docker_units:
             self._resolve_pending(unit, self._docker_running.get(unit, False))
+
+    @staticmethod
+    def _compose_running_dirs(reg) -> set[str] | None:
+        """지금 떠 있는 compose 컨테이너들의 작업 폴더 집합. 못 읽으면 None.
+
+        compose가 컨테이너에 붙여 두는 라벨을 그대로 읽는다. 이 값은 앱이
+        서비스에 저장한 작업 폴더(cwd)와 같은 경로다.
+        """
+        try:
+            res = reg.runner.run(
+                ["docker", "ps", "--format",
+                 '{{.Label "com.docker.compose.project.working_dir"}}'],
+                timeout=POLL_TIMEOUT)
+        except Exception:
+            return None
+        if res.exit_code != 0:
+            return None
+        return {_norm_dir(line) for line in res.stdout.splitlines() if line.strip()}
+
+    def _compose_ps_running(self, reg, unit: str, cwd: str) -> bool:
+        """폴백: 프로젝트 폴더에서 직접 조회한다(라벨을 못 읽는 환경)."""
+        try:
+            res = reg.runner.run(["docker", "compose", "ps", "-q"], cwd=cwd,
+                                 timeout=POLL_TIMEOUT)
+        except Exception as exc:  # 도커 미설치 등도 "중지"로 간주
+            self._docker_error[unit] = str(exc)
+            return False
+        if res.exit_code != 0:
+            # C4: 폴링 경로 실패는 파일에 남기지 않고 메모리에만 보관한다
+            # (도커 유닛은 로그 로테이션 대상도 아니라 무한 성장 위험이 큼).
+            self._docker_error[unit] = res.stderr.strip() or res.stdout.strip()
+            return False
+        self._docker_error.pop(unit, None)
+        return bool(res.stdout.strip())
 
     @staticmethod
     def _service_http_ready(reg, service_url: str) -> bool | None:
@@ -626,6 +662,15 @@ class ProcessManager:
         unit = reg.unit_service(owner, route.id)
         desired = self._docker_running.get(unit, False) if route.server.kind == "docker" else True
         self._set_pending(unit, desired, PENDING_TIMEOUT_DOCKER)
+
+    def clear_service_pending(self, owner: str, route: RouteMeta) -> None:
+        """전이 중 표시를 즉시 해제한다.
+
+        시작·정지가 실패했을 때 쓴다. 그대로 두면 토글이 최대 3분(도커 전이
+        제한 시간) 동안 "켜지는 중"으로 남아, 실패한 줄 모르게 된다.
+        """
+        reg = self._registry()
+        self._pending.pop(reg.unit_service(owner, route.id), None)
 
     def append_service_log(self, owner: str, route: RouteMeta, text: str) -> None:
         """서비스 로그에 한 줄 남긴다(배포 진행 상황 등을 로그 탭에서 보게)."""

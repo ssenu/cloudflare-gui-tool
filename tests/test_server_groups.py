@@ -110,8 +110,9 @@ def test_tick_polls_group_servers(qapp, tmp_path):
     """그룹 서버도 도커 폴링 대상에 들어가야 상태가 갱신된다."""
     group = ServerGroupMeta(id="aabbccdd", name="백엔드", servers=[docker_server()])
     win = make_window(qapp, tmp_path, groups=[group])
-    win.ctx.runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(
-        0, "abc123\n", "")
+    # 상태는 라벨 조회 한 번으로 받는다(프로젝트마다 compose ps를 날리지 않는다)
+    win.ctx.runner.run_results[("docker", "ps", "--format",
+                                '{{.Label "com.docker.compose.project.working_dir"}}')] =         RunResult(0, "/srv/api\n", "")
 
     win.ctx.manager.refresh([], groups=[group])
 
@@ -342,3 +343,43 @@ def test_tunnel_watch_reports_until_running(qapp, tmp_path):
 
     assert "켜졌" in win.info_label.text()
     assert win._progress_watches == []
+
+
+# ---- 재배포·토글 중 창이 멈추지 않아야 한다 ----
+# SSH 연결 하나를 상태 폴링과 공유하고 락으로 줄을 세운다. 그래서 GUI
+# 스레드가 원격 호출을 직접 하면, 파이가 빌드로 바쁠 때 그 한 번이 몇 초가
+# 되고 그동안 창 전체가 굳는다. 사용자 조작은 워커로 넘긴다.
+
+def test_server_toggle_does_not_call_remote_on_the_gui_thread(qapp, tmp_path):
+    import threading
+
+    group = ServerGroupMeta(id="aabbccdd", name="백엔드", servers=[docker_server()])
+    win = make_window(qapp, tmp_path, groups=[group])
+    gui_thread = threading.current_thread()
+    where = []
+    win.ctx.manager.start_service = lambda o, r: where.append(threading.current_thread())
+    win.ctx.manager.service_running = lambda o, r: False
+    win.ctx.manager.service_pending = lambda o, r: True
+
+    win.server_cards[0].route_rows[0]._on_server_toggled(True)
+    deadline = __import__("time").monotonic() + 3
+    while not where and __import__("time").monotonic() < deadline:
+        QApplication.processEvents()
+
+    assert where, "start_service가 아예 불리지 않았다"
+    assert where[0] is not gui_thread, "GUI 스레드에서 원격 호출을 했다"
+
+
+def test_toggle_marks_pending_immediately(qapp, tmp_path):
+    """워커로 넘기더라도 토글은 즉시 '전이 중'으로 보여야 한다."""
+    group = ServerGroupMeta(id="aabbccdd", name="백엔드", servers=[docker_server()])
+    win = make_window(qapp, tmp_path, groups=[group])
+    marked = []
+    win.ctx.manager.mark_service_pending = lambda o, r: marked.append(r.id)
+    win.ctx.manager.start_service = lambda o, r: None
+    win.ctx.manager.service_running = lambda o, r: False
+    win.ctx.manager.service_pending = lambda o, r: True
+
+    win.server_cards[0].route_rows[0]._on_server_toggled(True)
+
+    assert marked == [group.servers[0].id]

@@ -6,6 +6,10 @@ from app.core.store import RouteMeta, ServiceSpec, TunnelMeta
 from tests.fake_runner import FakeRunner
 
 
+DOCKER_PS = ("docker", "ps", "--format",
+             '{{.Label "com.docker.compose.project.working_dir"}}')
+
+
 def make_mgr(runner: FakeRunner | None = None):
     runner = runner or FakeRunner()
     reg = RunRegistry(runner)
@@ -151,11 +155,12 @@ def test_docker_service_running_when_ps_outputs_container_id():
     mgr, runner, reg = make_mgr()
     route = docker_route(cwd="/srv/app")
     runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(0, "abc123\n", "")
+    runner.run_results[DOCKER_PS] = RunResult(0, "/srv/app\n/srv/api\n/srv/apps/a\n/srv/apps/b\n/srv/apps/x\n", "")
 
     mgr.refresh([meta("t1", [route])])
 
     assert mgr.service_running("t1", route) is True
-    assert (("docker", "compose", "ps", "-q"), "/srv/app") in runner.run_calls
+    assert [c for c in runner.run_calls if c[0] == DOCKER_PS]
 
 
 def test_docker_service_stopped_when_ps_output_empty():
@@ -176,6 +181,7 @@ def test_docker_service_command_failure_treated_as_stopped_and_kept_in_memory_on
     route = docker_route(cwd="/srv/app")
     runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(
         1, "", "docker: command not found")
+    runner.run_results[DOCKER_PS] = RunResult(1, "", "labels unavailable")
 
     mgr.refresh([meta("t1", [route])])
 
@@ -569,6 +575,7 @@ def test_docker_stop_service_optimistically_stopped_before_refresh():
     mgr, runner, reg = make_mgr()
     route = docker_route(cwd="/srv/app")
     runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(0, "abc\n", "")
+    runner.run_results[DOCKER_PS] = RunResult(0, "/srv/app\n/srv/api\n/srv/apps/a\n/srv/apps/b\n/srv/apps/x\n", "")
     mgr.refresh([meta("t1", [route])])
     assert mgr.service_running("t1", route) is True
 
@@ -627,6 +634,7 @@ def test_docker_ps_failure_does_not_grow_log_file_across_ticks():
     mgr, runner, reg = make_mgr()
     route = docker_route(cwd="/srv/app")
     runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(1, "", "boom")
+    runner.run_results[DOCKER_PS] = RunResult(1, "", "labels unavailable")
 
     for _ in range(3):
         mgr._docker_checked_at.clear()  # 캐시를 매번 무효화해 실제로 재조회되게 함
@@ -643,6 +651,7 @@ def test_docker_ps_not_requeried_within_cache_window():
     mgr, runner, reg = make_mgr()
     route = docker_route(cwd="/srv/app")
     runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(0, "abc\n", "")
+    runner.run_results[DOCKER_PS] = RunResult(0, "/srv/app\n/srv/api\n/srv/apps/a\n/srv/apps/b\n/srv/apps/x\n", "")
 
     mgr.refresh([meta("t1", [route])])
     calls_after_first = len(runner.run_calls)
@@ -688,6 +697,7 @@ def test_service_pending_clears_when_docker_actual_matches_desired():
     assert mgr.service_pending("t1", route) is True
 
     runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(0, "abc\n", "")
+    runner.run_results[DOCKER_PS] = RunResult(0, "/srv/app\n/srv/api\n/srv/apps/a\n/srv/apps/b\n/srv/apps/x\n", "")
     mgr.refresh([meta("t1", [route])])
 
     assert mgr.service_pending("t1", route) is False
@@ -772,6 +782,7 @@ def _docker_setup():
     mgr = ProcessManager(lambda: RunRegistry(runner))
     # 컨테이너는 떠 있는 상태
     runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(0, "abc123\n", "")
+    runner.run_results[DOCKER_PS] = RunResult(0, "/srv/app\n/srv/api\n/srv/apps/a\n/srv/apps/b\n/srv/apps/x\n", "")
     return runner, mgr, meta, route
 
 CURL = ("curl", "-s", "-I", "-m", "2", "http://localhost:8001")
@@ -848,6 +859,7 @@ def test_non_http_service_uses_container_state():
     meta = TunnelMeta(name="t1", routes=[route])
     mgr = ProcessManager(lambda: RunRegistry(runner))
     runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(0, "abc\n", "")
+    runner.run_results[DOCKER_PS] = RunResult(0, "/srv/app\n/srv/api\n/srv/apps/a\n/srv/apps/b\n/srv/apps/x\n", "")
 
     mgr.refresh([meta])
 
@@ -875,12 +887,13 @@ def test_group_docker_service_polls_and_reports_running():
     route = docker_route(cwd="/srv/api")
     group = ServerGroupMeta(id="aabbccdd", name="백엔드", servers=[route])
     runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(0, "abc123\n", "")
+    runner.run_results[DOCKER_PS] = RunResult(0, "/srv/app\n/srv/api\n/srv/apps/a\n/srv/apps/b\n/srv/apps/x\n", "")
     owner = group_owner_key(group.id)
 
     mgr.refresh([], groups=[group])
 
     assert mgr.service_running(owner, route) is True
-    assert (("docker", "compose", "ps", "-q"), "/srv/api") in runner.run_calls
+    assert [c for c in runner.run_calls if c[0] == DOCKER_PS]
 
 
 def test_group_command_service_start_and_stop():
@@ -909,3 +922,54 @@ def test_refresh_without_groups_still_works():
     mgr, runner, reg = make_mgr()
     mgr.refresh([meta("t1")])
     assert mgr.tunnel_state("t1") == TunnelState.STOPPED
+
+
+# ---- 폴링 비용: 도커 상태를 한 번에 조회 ----
+# 프로젝트마다 `docker compose ps -q`를 따로 날리면 SSH 왕복이 유닛 수만큼
+# 생긴다(실측 5개 500ms). 컨테이너에 붙은 compose 라벨로 한 번에 받는다(59ms).
+
+
+def test_docker_state_comes_from_a_single_call():
+    mgr, runner, reg = make_mgr()
+    a = docker_route("r1", cwd="/srv/apps/a")
+    b = docker_route("r2", cwd="/srv/apps/b")
+    runner.run_results[DOCKER_PS] = RunResult(0, "/srv/apps/a\n", "")
+
+    mgr.refresh([meta("t1", [a, b])])
+
+    assert mgr.service_running("t1", a) is True    # 라벨에 있음
+    assert mgr.service_running("t1", b) is False   # 없음
+    # 프로젝트별 compose ps는 더 이상 쓰지 않는다
+    assert not [c for c in runner.run_calls if c[0][:3] == ("docker", "compose", "ps")]
+
+
+def test_docker_ps_is_called_once_for_many_units():
+    mgr, runner, reg = make_mgr()
+    routes = [docker_route(f"r{i}", cwd=f"/srv/apps/{i}") for i in range(5)]
+    runner.run_results[DOCKER_PS] = RunResult(0, "", "")
+
+    mgr.refresh([meta("t1", routes)])
+
+    assert len([c for c in runner.run_calls if c[0] == DOCKER_PS]) == 1
+
+
+def test_trailing_slash_in_cwd_still_matches():
+    mgr, runner, reg = make_mgr()
+    route = docker_route("r1", cwd="/srv/apps/a/")
+    runner.run_results[DOCKER_PS] = RunResult(0, "/srv/apps/a\n", "")
+
+    mgr.refresh([meta("t1", [route])])
+
+    assert mgr.service_running("t1", route) is True
+
+
+def test_falls_back_to_compose_ps_when_labels_are_unavailable():
+    """옛 도커나 라벨이 없는 환경에서도 상태 판정이 죽으면 안 된다."""
+    mgr, runner, reg = make_mgr()
+    route = docker_route("r1", cwd="/srv/apps/a")
+    runner.run_results[DOCKER_PS] = RunResult(1, "", "unknown flag")
+    runner.run_results[("docker", "compose", "ps", "-q")] = RunResult(0, "abc\n", "")
+
+    mgr.refresh([meta("t1", [route])])
+
+    assert mgr.service_running("t1", route) is True
