@@ -14,6 +14,7 @@ from app.core.store import (RouteMeta, ServerGroupMeta, ServiceSpec,
                             SettingsStore, new_route_id)
 from app.ui.main_window import MainWindow, ServerGroupCard
 from tests.fake_runner import FakeRunner
+from tests.qt_helpers import refresh_now
 
 LIST_TUNNELS_CMD = ("cloudflared", "tunnel", "list", "--output", "json")
 
@@ -40,7 +41,7 @@ def make_window(qapp, tmp_path, tunnels_json="[]", groups=None):
         ctx.store.settings.server_groups_for(runner.name).append(g)
     win = MainWindow(ctx)
     win._timer.stop()
-    win.refresh()
+    refresh_now(win)
     return win
 
 

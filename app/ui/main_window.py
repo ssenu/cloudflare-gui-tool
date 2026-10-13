@@ -908,6 +908,11 @@ class MainWindow(QWidget):
         # 마지막 tunnel list 결과와 마지막으로 그린 내용의 지문(성능).
         self._tunnel_cache = None
         self._render_sig: tuple | None = None
+        # 이 대상에 자격증명 파일이 있는 터널 id. refresh(fetch=True)가 터널
+        # 목록과 함께 워커에서 받아 와 채운다 - 카드를 그릴 때마다 원격 디렉터리를
+        # 읽으면(실측: 파이가 빌드 중일 때 2.2초) 다이얼로그를 닫을 때마다 창이 굳는다.
+        self._cred_cache: set[str] = set()
+        self._refresh_queued = False
         # 접속 확인 워커들(요청이 끝날 때까지 참조를 유지해야 GC되지 않는다)
         self._site_pollers: list[BackgroundPoller] = []
         # 라우트가 바뀌어 재시작이 필요한 터널 이름. 카드를 다시 그려도
@@ -1054,6 +1059,12 @@ class MainWindow(QWidget):
         # QTimer.singleShot(0, self.refresh) 대신 창에 붙인 타이머를 쓴다.
         # 정적 singleShot은 창이 그 사이에 사라져도 예약이 남아, 이미 파괴된
         # 객체의 메서드를 호출하며 프로세스가 죽는다(테스트에서 실측).
+        # 터널 목록(cloudflared tunnel list)과 자격증명 디렉터리 읽기는 원격
+        # 왕복이다. 파이가 빌드 중이면 17초까지도 걸린다(실측). GUI 스레드에서
+        # 기다리면 그동안 창이 통째로 굳으므로 워커에서 받아 온다.
+        self._refresh_poller = BackgroundPoller(self)
+        self._refresh_poller.finished.connect(self._on_refresh_done)
+
         self._first_load = QTimer(self)
         self._first_load.setSingleShot(True)
         self._first_load.timeout.connect(self.refresh)
@@ -1360,17 +1371,9 @@ class MainWindow(QWidget):
                     card.setVisible(not collapsed)
 
     # ---- 목록 ----
-    def _credential_ids(self) -> set[str]:
-        """이 대상에 자격증명 파일이 있는 터널 id 집합.
-
-        예전에는 터널마다 file_exists()를 한 번씩 불렀는데, SSH 대상에서는
-        터널 수만큼 왕복이 생겨 새로고침이 눈에 띄게 굼떴다. 디렉터리를 한 번
-        읽어 이름만 비교한다(왕복 1회).
-        """
-        try:
-            names = self.ctx.runner.list_dir(self.ctx.client.config_dir())
-        except Exception:
-            return set()
+    @staticmethod
+    def _ids_from_names(names) -> set[str]:
+        """자격증명 디렉터리의 파일 이름 -> 터널 id 집합 (<uuid>.json)."""
         return {n[:-5] for n in names if n.endswith(".json")}
 
     def refresh(self, fetch: bool = True):
@@ -1378,29 +1381,54 @@ class MainWindow(QWidget):
 
         fetch=False면 계정 터널 목록을 다시 받아오지 않고 마지막 결과를 쓴다.
         라우트 편집·설정 변경처럼 '계정의 터널 구성이 바뀔 수 없는' 경로에서
-        네트워크 왕복(수백 ms~수 초)을 없애기 위한 것이다.
+        네트워크 왕복(수백 ms~수 초)을 없애기 위한 것이다. 이 경로는 원격
+        호출이 하나도 없어 즉시 끝난다.
+
+        fetch=True는 워커에서 받아 오고, 결과는 _on_refresh_done이 그린다.
+        그래서 이 함수는 바로 돌아온다 - 호출 직후에 self.cards가 새것이라고
+        가정하면 안 된다(테스트는 tests/qt_helpers.refresh_now를 쓴다).
         """
         if not fetch and self._tunnel_cache is not None:
             self._render_cards(self._tunnel_cache)
             return
-        try:
-            self.setCursor(Qt.CursorShape.WaitCursor)
-            infos = self.ctx.client.list_tunnels()
+        if self._refresh_poller.is_busy():
+            # 한 번에 하나만. 끝나면 한 번 더 돌려 최신 요청을 반영한다 -
+            # 그냥 버리면 "터널을 만들었는데 목록에 안 보임"이 된다.
+            self._refresh_queued = True
+            return
+        if not (self.cards or self.server_cards):
+            self._set_list_status(LOADING_TEXT)
+        client, runner = self.ctx.client, self.ctx.runner
+
+        def fetch_all():
+            infos = client.list_tunnels()
+            try:
+                names = runner.list_dir(client.config_dir())
+            except Exception:
+                names = []
+            return infos, names
+
+        self._refresh_poller.run(fetch_all)
+
+    def _on_refresh_done(self, ok: bool, result, error: str):
+        if ok:
+            infos, names = result
+            self._cred_cache = self._ids_from_names(names)
             # _tick()의 연결 오류 배너와 위젯을 공유한다. _tick()이 이미
             # 폴링 백오프 상태(연결 끊김으로 판단)라면 이 refresh()의 성공이
             # 그 배너를 조용히 지워버리지 않도록 둔다 - 다음 _tick()이
             # 스스로 판단해서 켜고 끈다.
             if not self._poll_backoff_active:
                 self.banner.hide()
-        except Exception as ex:
-            self.banner.setText(f"터널 목록 조회 실패: {ex}")
+        else:
+            self.banner.setText(f"터널 목록 조회 실패: {error}")
             self.banner.show()
             infos = []
-        finally:
-            self.unsetCursor()
-
         self._tunnel_cache = infos
         self._render_cards(infos)
+        if self._refresh_queued:
+            self._refresh_queued = False
+            self.refresh()
 
     def _render_cards(self, infos):
         self._update_repos_btn()
@@ -1415,7 +1443,7 @@ class MainWindow(QWidget):
         # O3/성능: 자격증명 확인은 카드를 그릴 때 한 번만 한다(1초 폴링에서는
         # 하지 않는다). 게다가 터널마다 stat을 날리지 않고 디렉터리 한 번 읽기로
         # 끝낸다 - SSH 대상에서 왕복 수가 터널 수에 비례하던 것을 1로 줄인다.
-        cred_ids = self._credential_ids()
+        cred_ids = self._cred_cache
         rows: list[tuple[str, object, TunnelMeta, bool]] = []
         for info in infos:
             meta = metas.get(info.name)
@@ -2349,5 +2377,6 @@ class MainWindow(QWidget):
         # 워커가 돌고 있는 채로 연결을 닫으면 그 안에서 예외가 난다.
         self._timer.stop()
         self._poller.stop()
+        self._refresh_poller.stop()
         self.ctx.set_local()  # SSH 연결 정리 (원격 프로세스는 그대로 유지됨)
         event.accept()

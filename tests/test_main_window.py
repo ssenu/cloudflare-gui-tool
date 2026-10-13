@@ -14,6 +14,7 @@ from app.core.store import (RouteMeta, ServiceSpec, SettingsStore, SshProfile,
                             TunnelMeta, new_route_id)
 from app.ui.main_window import MainWindow
 from tests.fake_runner import FakeRunner
+from tests.qt_helpers import refresh_now, wait_refresh
 
 LIST_TUNNELS_CMD = ("cloudflared", "tunnel", "list", "--output", "json")
 
@@ -40,7 +41,7 @@ def make_window(qapp, tmp_path, runner: FakeRunner | None = None) -> MainWindow:
     win._timer.stop()  # 테스트 중 실제 QTimer가 돌지 않도록 (수동으로 _tick 호출)
     # 첫 조회는 창을 먼저 띄우려고 이벤트 루프로 미뤄져 있다(성능). 테스트는
     # 이벤트 루프를 돌리지 않으므로 여기서 대신 한 번 불러 준다.
-    win.refresh()
+    refresh_now(win)
     return win
 
 
@@ -159,7 +160,7 @@ def test_delete_route_rolls_back_when_config_write_fails(qapp, tmp_path, monkeyp
     ctx.store.settings.tunnels_for(ctx.runner.name)["t1"] = meta
     win = MainWindow(ctx)
     win._timer.stop()
-    win.refresh()
+    refresh_now(win)
     card = win.cards[0]
     assert len(card.meta.routes) == 1
 
@@ -225,7 +226,7 @@ def test_refresh_uses_metas_for_current_target(qapp, tmp_path):
                         service="http://localhost:1111")
     win.ctx.store.settings.tunnels_for("local")["t1"] = TunnelMeta(
         name="t1", routes=[route_a])
-    win.refresh()
+    refresh_now(win)
     assert win.cards[0].meta.routes[0].hostname == "a.local.example.com"
 
     # 대상을 SSH 프로필로 바꾼다 (실제 SSH 연결 없이 러너만 교체)
@@ -239,7 +240,7 @@ def test_refresh_uses_metas_for_current_target(qapp, tmp_path):
         name="t1", routes=[route_b])
     win.ctx.runner = runner_b
 
-    win.refresh()
+    refresh_now(win)
     # 대상이 바뀌었으므로 카드는 로컬이 아니라 ssh:rpi 대상의 메타(다른 hostname)를 써야 한다
     assert win.cards[0].meta.routes[0].hostname == "b.rpi.example.com"
     assert win.cards[0].meta.routes[0].hostname != "a.local.example.com"
@@ -285,7 +286,7 @@ def test_group_header_shows_owner_device(qapp, tmp_path):
     win = make_window(qapp, tmp_path, runner)
     win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1")
     win.ctx.store.settings.tunnel_owners["tid1"] = "local"
-    win.refresh()
+    refresh_now(win)
 
     # 카드에는 '만든 곳' 문구가 없고, 대신 카테고리 머리글이 기기를 알려준다
     assert [h.label_text for h in win.group_headers] == ["이 PC"]
@@ -302,7 +303,7 @@ def test_group_header_falls_back_when_owner_not_recorded(qapp, tmp_path):
     # 자격증명이 없어야 backfill이 일어나지 않고 owner가 기록되지 않은 채로 남는다
     win = make_window(qapp, tmp_path, runner)
     win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1")
-    win.refresh()
+    refresh_now(win)
 
     assert [h.label_text for h in win.group_headers] == ["기기 미확인"]
     assert win.ctx.store.settings.tunnel_owners == {}
@@ -319,7 +320,7 @@ def test_groups_split_by_owner_and_unknown_goes_last(qapp, tmp_path):
     win.ctx.store.settings.ssh_profiles.append(SshProfile(name="webPi", host="1.2.3.4"))
     win.ctx.store.settings.tunnel_owners["tid-pi"] = "ssh:webPi"
     win.ctx.store.settings.tunnel_owners["tid-pc"] = "local"
-    win.refresh()
+    refresh_now(win)
 
     # 이 PC → 등록된 SSH 프로필 순 → 소유 기기를 모르는 것은 항상 마지막
     assert [h.label_text for h in win.group_headers] == ["이 PC", "webPi", "기기 미확인"]
@@ -336,7 +337,7 @@ def test_card_shows_cannot_run_and_disables_toggle_without_credentials(qapp, tmp
     win = make_window(qapp, tmp_path, runner)
     win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1")
     win.ctx.store.settings.tunnel_owners["tid1"] = "ssh:webPi"
-    win.refresh()
+    refresh_now(win)
 
     card = win.cards[0]
     assert not card.cannot_run_label.isHidden()
@@ -363,7 +364,7 @@ def test_owner_group_survives_target_switch(qapp, tmp_path):
 
     win = make_window(qapp, tmp_path, runner_a)
     win.ctx.store.settings.tunnels_for("local")["t1"] = TunnelMeta(name="t1")
-    win.refresh()  # backfill: tunnel_owners["tid-shared"] = "local"
+    refresh_now(win)  # backfill: tunnel_owners["tid-shared"] = "local"
 
     assert win.ctx.store.settings.tunnel_owners["tid-shared"] == "local"
     assert [h.label_text for h in win.group_headers] == ["이 PC"]
@@ -376,7 +377,7 @@ def test_owner_group_survives_target_switch(qapp, tmp_path):
     # B에는 자격증명이 없다 - 그래도 owner는 "이 PC"로 보여야 한다(A가 만든 것)
     win.ctx.store.settings.tunnels_for("ssh:webPi")["t1"] = TunnelMeta(name="t1")
     win.ctx.runner = runner_b
-    win.refresh()
+    refresh_now(win)
 
     # 여전히 대상 A(local)가 만든 것으로 분류된다 - 지금 보고 있는 대상이 B라도
     assert [h.label_text for h in win.group_headers] == ["이 PC"]
@@ -395,7 +396,7 @@ def test_backfill_never_overwrites_existing_owner(qapp, tmp_path):
     win = make_window(qapp, tmp_path, runner)
     win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1")
     win.ctx.store.settings.tunnel_owners["tid1"] = "ssh:webPi"  # 이미 다른 대상이 owner
-    win.refresh()
+    refresh_now(win)
 
     # backfill 조건("id가 없을 때만")에 해당하지 않으므로 덮어쓰지 않는다
     assert win.ctx.store.settings.tunnel_owners["tid1"] == "ssh:webPi"
@@ -410,7 +411,7 @@ def test_refresh_backfills_owner_when_credentials_present(qapp, tmp_path):
 
     win = make_window(qapp, tmp_path, runner)
     win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1")
-    win.refresh()
+    refresh_now(win)
 
     assert win.ctx.store.settings.tunnel_owners["tid1"] == "fake"  # 현재 대상(runner.name)
 
@@ -445,7 +446,7 @@ def test_credentials_check_is_one_listing_per_refresh_not_per_tunnel(qapp, tmp_p
     # 생성자가 이벤트 루프로 미뤄 둔 첫 조회를 먼저 흘려보낸 뒤에 센다.
     QApplication.processEvents()
     listings["n"] = 0
-    win.refresh()
+    refresh_now(win)
 
     assert listings["n"] == 1  # 터널이 3개여도 조회는 1회
     assert len(win.cards) == 3
@@ -481,7 +482,7 @@ def test_repos_button_enabled_on_remote_target(qapp, tmp_path):
     remote.run_results[LIST_TUNNELS_CMD] = RunResult(0, "[]", "")
     win.ctx.runner = remote
     assert win.ctx.is_remote
-    win.refresh()
+    refresh_now(win)
 
     assert win.repos_btn.isEnabled()
     assert win.repos_btn.toolTip() == ""
@@ -510,7 +511,7 @@ def test_repos_button_enabled_on_remote_target(qapp, tmp_path):
     remote.run_results[LIST_TUNNELS_CMD] = RunResult(0, "[]", "")
     win.ctx.runner = remote
     assert win.ctx.is_remote
-    win.refresh()
+    refresh_now(win)
 
     assert win.repos_btn.isEnabled()
     assert win.repos_btn.toolTip() == ""
@@ -526,7 +527,7 @@ def test_card_shows_no_route_badge_when_tunnel_has_no_routes(qapp, tmp_path):
 
     win = make_window(qapp, tmp_path, runner)
     win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(name="t1", routes=[])
-    win.refresh()
+    refresh_now(win)
 
     card = win.cards[0]
     assert not card.no_route_label.isHidden()
@@ -546,7 +547,7 @@ def test_card_hides_no_route_badge_when_routes_exist(qapp, tmp_path):
     win = make_window(qapp, tmp_path, runner)
     win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
         name="t1", routes=[route])
-    win.refresh()
+    refresh_now(win)
 
     assert win.cards[0].no_route_label.isHidden()
 
@@ -564,7 +565,7 @@ def _two_group_window(qapp, tmp_path):
     win.ctx.store.settings.ssh_profiles.append(SshProfile(name="webPi", host="1.2.3.4"))
     win.ctx.store.settings.tunnel_owners["tid-pc"] = "local"
     win.ctx.store.settings.tunnel_owners["tid-pi"] = "ssh:webPi"
-    win.refresh()
+    refresh_now(win)
     return win
 
 
@@ -588,7 +589,7 @@ def test_manual_toggle_expands_and_survives_refresh(qapp, tmp_path):
     assert not cards["t-pi"].isHidden()
 
     # 다시 그려도 사용자가 편 상태가 유지되어야 한다
-    win.refresh()
+    refresh_now(win)
     headers = {h.owner_key: h for h in win.group_headers}
     assert headers["ssh:webPi"].collapsed is False
 
@@ -612,7 +613,7 @@ def test_switching_target_recollapses_by_new_rule(qapp, tmp_path):
     remote.run_results[LIST_TUNNELS_CMD] = win.ctx.runner.run_results[LIST_TUNNELS_CMD]
     win.ctx.runner = remote
     win._reset_group_collapse()  # _switch_target이 하는 일
-    win.refresh()
+    refresh_now(win)
 
     cards = {c.tunnel_name: c for c in win.cards}
     assert cards["t-pc"].isHidden()      # 이 PC 그룹은 접힘
@@ -649,7 +650,7 @@ def test_unchanged_refresh_keeps_same_card_widgets(qapp, tmp_path):
     win = make_window(qapp, tmp_path, runner)
     first = win.cards[0]
 
-    win.refresh()
+    refresh_now(win)
 
     assert win.cards[0] is first
 
@@ -680,7 +681,7 @@ def test_empty_state_label_visible_without_tunnels(qapp, tmp_path):
     runner = win.ctx.runner
     runner.run_results[LIST_TUNNELS_CMD] = RunResult(
         0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
-    win.refresh()
+    refresh_now(win)
     assert win.list_status.isHidden()
 
 
@@ -692,6 +693,7 @@ def test_refresh_button_actually_refetches(qapp, tmp_path):
 
     before = sum(1 for c, _ in runner.run_calls if c == LIST_TUNNELS_CMD)
     win.refresh_btn.click()
+    wait_refresh(win)   # 조회는 워커에서 돈다
     after = sum(1 for c, _ in runner.run_calls if c == LIST_TUNNELS_CMD)
 
     assert after == before + 1
@@ -731,7 +733,7 @@ def test_server_toggle_shows_pending(qapp, tmp_path):
     win = make_window(qapp, tmp_path, runner)
     win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
         name="t1", routes=[route])
-    win.refresh()
+    refresh_now(win)
     row = win.cards[0].route_rows[0]
 
     win.ctx.manager.service_pending = lambda _t, _r: True
@@ -761,7 +763,7 @@ def test_clicking_domain_opens_site(qapp, tmp_path, monkeypatch):
     win = make_window(qapp, tmp_path, runner)
     win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
         name="t1", routes=[route])
-    win.refresh()
+    refresh_now(win)
 
     opened = []
     monkeypatch.setattr("app.ui.main_window.webbrowser.open", opened.append)
@@ -788,7 +790,7 @@ def test_right_click_on_domain_does_not_open(qapp, tmp_path, monkeypatch):
     win = make_window(qapp, tmp_path, runner)
     win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
         name="t1", routes=[route])
-    win.refresh()
+    refresh_now(win)
 
     opened = []
     monkeypatch.setattr("app.ui.main_window.webbrowser.open", opened.append)
@@ -809,7 +811,7 @@ def test_route_without_hostname_is_not_a_link(qapp, tmp_path):
     win = make_window(qapp, tmp_path, runner)
     win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
         name="t1", routes=[route])
-    win.refresh()
+    refresh_now(win)
 
     label = win.cards[0].route_rows[0].domain_label
     assert "underline" not in label.styleSheet()
@@ -850,7 +852,7 @@ def test_pending_knob_shows_requested_direction_and_stays(qapp, tmp_path):
     win = make_window(qapp, tmp_path, runner)
     win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
         name="t1", routes=[route])
-    win.refresh()
+    refresh_now(win)
     row = win.cards[0].route_rows[0]
     switch = row.server_switch
 
@@ -887,7 +889,7 @@ def test_pending_stop_keeps_knob_on_off_side(qapp, tmp_path):
     win = make_window(qapp, tmp_path, runner)
     win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
         name="t1", routes=[route])
-    win.refresh()
+    refresh_now(win)
     row = win.cards[0].route_rows[0]
 
     # 끄는 중: 프로세스가 아직 살아있어도 노브는 꺼짐 자리로 간다
@@ -929,7 +931,7 @@ def test_failed_start_leaves_knob_off(qapp, tmp_path, monkeypatch):
     win = make_window(qapp, tmp_path, runner)
     win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
         name="t1", routes=[route])
-    win.refresh()
+    refresh_now(win)
     row = win.cards[0].route_rows[0]
 
     def boom(_t, _r):
@@ -961,7 +963,7 @@ def test_real_manager_click_moves_knob_once(qapp, tmp_path):
     win = make_window(qapp, tmp_path, runner)
     win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
         name="t1", routes=[route])
-    win.refresh()
+    refresh_now(win)
     row = win.cards[0].route_rows[0]
     switch = row.server_switch
     assert switch._display_checked is False
@@ -1086,7 +1088,7 @@ def _card_window(qapp, tmp_path, routes=None):
     win = make_window(qapp, tmp_path, runner)
     win.ctx.store.settings.tunnels_for("fake")["t1"] = TunnelMeta(
         name="t1", routes=routes or [])
-    win.refresh()
+    refresh_now(win)
     return win
 
 
@@ -1473,3 +1475,59 @@ def test_new_banner_cancels_pending_auto_hide(qapp, tmp_path):
 
     assert not win._info_hide_timer.isActive()  # 이전 예약 취소
     assert not win.info_banner.isHidden()
+
+
+# ---- refresh()는 창을 멈추지 않는다 ----
+# 실측: 파이가 빌드 중일 때 cloudflared tunnel list 17초, 자격증명 디렉터리
+# 읽기 2.2초. 예전에는 둘 다 GUI 스레드에서 기다렸고, 자격증명 읽기는 카드를
+# 그릴 때마다(다이얼로그를 닫을 때마다) 반복됐다.
+
+def test_refresh_without_fetch_makes_no_remote_call(qapp, tmp_path):
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(
+        0, '[{"id":"tid1","name":"t1","created_at":"","connections":[]}]', "")
+    win = make_window(qapp, tmp_path, runner)
+    runner.run_calls.clear()
+    listed = []
+    runner.list_dir = lambda p: listed.append(p) or []
+
+    win.refresh(fetch=False)
+
+    assert runner.run_calls == []
+    assert listed == []
+    assert len(win.cards) == 1   # 캐시로 그린다
+
+
+def test_refresh_fetch_runs_remote_calls_off_the_gui_thread(qapp, tmp_path):
+    import threading
+
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(0, "[]", "")
+    threads = []
+    orig = runner.run
+
+    def spy(cmd, **kw):
+        if tuple(cmd) == LIST_TUNNELS_CMD:
+            threads.append(threading.current_thread())
+        return orig(cmd, **kw)
+
+    runner.run = spy
+    win = make_window(qapp, tmp_path, runner)   # 안에서 refresh_now가 돈다
+
+    assert threads and all(t is not threading.main_thread() for t in threads)
+
+
+def test_refresh_requested_while_busy_runs_again_afterwards(qapp, tmp_path):
+    """바쁜 중에 들어온 요청을 버리면 '터널을 만들었는데 목록에 없음'이 된다."""
+    runner = FakeRunner(home="/home/fake")
+    runner.run_results[LIST_TUNNELS_CMD] = RunResult(0, "[]", "")
+    win = make_window(qapp, tmp_path, runner)
+    before = sum(1 for c, _ in runner.run_calls if c == LIST_TUNNELS_CMD)
+
+    win.refresh()          # 워커 시작
+    win.refresh()          # 바쁜 동안 한 번 더 -> 예약
+    wait_refresh(win)      # 첫 번째 끝 -> 예약된 두 번째 실행
+    wait_refresh(win)
+
+    after = sum(1 for c, _ in runner.run_calls if c == LIST_TUNNELS_CMD)
+    assert after == before + 2

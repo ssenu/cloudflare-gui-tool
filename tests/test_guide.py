@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+from tests.qt_helpers import refresh_now
+
 import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QScrollArea
@@ -33,7 +35,7 @@ def make_window(tmp_path, size=(820, 620)) -> MainWindow:
     ctx.local_runner = runner
     win = MainWindow(ctx)
     win._timer.stop()
-    win.refresh()
+    refresh_now(win)
     win.resize(*size)
     win.show()
     QApplication.processEvents()

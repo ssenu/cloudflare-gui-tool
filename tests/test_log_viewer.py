@@ -12,6 +12,7 @@ from app.core.store import (RouteMeta, ServiceSpec, SettingsStore, TunnelMeta,
                             new_route_id)
 from app.ui.log_viewer import LogViewer, _ComposeLogTab, _LogTab
 from tests.fake_runner import FakeRunner
+from tests.qt_helpers import refresh_now
 
 # 첫 읽기 명령. 이후 폴링은 --since로 새 줄만 받는다.
 COMPOSE_LOGS = ("docker", "compose", "logs", "--no-color", "-t",
@@ -122,7 +123,7 @@ def test_docker_route_log_has_app_and_build_subtabs(qapp, tmp_path):
         name="t1", routes=[route])
     win = MainWindow(ctx)
     win._timer.stop()
-    win.refresh()
+    refresh_now(win)
 
     opened = {}
     win._open_log_viewer = lambda key, title, paths: opened.update(paths)
@@ -288,7 +289,7 @@ def _win(qapp, tmp_path, routes):
     win = MainWindow(ctx)
     win._timer.stop()
     win._first_load.stop()   # 창을 안 닫고 두면 나중 테스트에서 뒤늦게 터진다
-    win.refresh()
+    refresh_now(win)
     return win
 
 
