@@ -15,6 +15,7 @@ from app.core.runner import RunResult
 from app.core.store import RouteMeta, SettingsStore, TunnelMeta, new_route_id
 from app.ui.route_dialog import RouteDialog
 from tests.fake_runner import FakeRunner
+from tests.qt_helpers import save_now
 
 LIST_CMD = ("cloudflared", "tunnel", "list", "--output", "json")
 CONFIG = "/home/fake/.cloudflared/config-web.yml"
@@ -57,7 +58,7 @@ def test_first_route_creates_missing_config(qapp, tmp_path):
     dlg, runner = make_dialog(tmp_path, tunnel, {CRED: "{}"})  # config 없음
     fill(dlg)
 
-    dlg._on_save()
+    save_now(dlg)
 
     cfg = parse_config(runner.files[CONFIG])
     assert cfg["tunnel"] == "tid1"
@@ -79,7 +80,7 @@ def test_second_route_is_appended_to_existing_config(qapp, tmp_path):
     })
     fill(dlg, sub="b")
 
-    dlg._on_save()
+    save_now(dlg)
 
     routes = get_routes(parse_config(runner.files[CONFIG]))
     assert routes == [("a.example.com", "http://localhost:1111"),
@@ -93,7 +94,7 @@ def test_no_credentials_blocks_save_and_writes_nothing(qapp, tmp_path):
     dlg, runner = make_dialog(tmp_path, tunnel, {})  # config도 자격증명도 없음
     fill(dlg)
 
-    dlg._on_save()
+    save_now(dlg)
 
     assert CONFIG not in runner.files
     assert tunnel.routes == []
@@ -105,7 +106,7 @@ def test_unknown_tunnel_blocks_save(qapp, tmp_path):
     dlg, runner = make_dialog(tmp_path, tunnel, {})
     fill(dlg)
 
-    dlg._on_save()
+    save_now(dlg)
 
     assert "/home/fake/.cloudflared/config-ghost.yml" not in runner.files
     assert dlg.saved_route is None
@@ -116,7 +117,30 @@ def test_dns_is_registered_for_new_route(qapp, tmp_path):
     dlg, runner = make_dialog(tmp_path, tunnel, {CRED: "{}"})
     fill(dlg)
 
-    dlg._on_save()
+    save_now(dlg)
 
     assert (("cloudflared", "tunnel", "route", "dns", "web", "app.example.com"), None) \
         in runner.run_calls
+
+
+def test_save_runs_remote_calls_off_the_gui_thread(qapp, tmp_path):
+    """저장의 원격 호출(DNS 등록 등)이 GUI 스레드에서 돌면 파이가 바쁠 때 창이 굳는다."""
+    import threading
+
+    dlg, runner = make_dialog(tmp_path, TunnelMeta(name="web"), files={CONFIG: "ingress: []\n"})
+    seen = []
+    orig = runner.run
+
+    def spy(cmd, **kw):
+        seen.append((tuple(cmd)[:3], threading.current_thread()))
+        return orig(cmd, **kw)
+
+    runner.run = spy
+    fill(dlg)
+
+    save_now(dlg)
+
+    dns = [t for c, t in seen if c[:3] == ("cloudflared", "tunnel", "route")]
+    assert dns, "DNS 등록이 불리지 않았다"
+    assert all(t is not threading.main_thread() for t in dns)
+    assert dlg.saved_route is not None

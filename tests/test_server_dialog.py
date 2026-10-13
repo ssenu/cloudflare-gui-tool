@@ -12,6 +12,7 @@ from app.context import AppContext
 from app.core.store import RouteMeta, ServerGroupMeta, ServiceSpec, SettingsStore
 from app.ui.server_dialog import ServerDialog
 from tests.fake_runner import FakeRunner
+from tests.qt_helpers import save_now
 
 
 @pytest.fixture(scope="module")
@@ -89,7 +90,7 @@ def test_saving_appends_server_without_touching_dns_or_config(qapp, ctx, monkeyp
     monkeypatch.setattr("app.ui.server_dialog.detect_service_port",
                         lambda ctx_, cwd: None)
 
-    dlg._on_save()
+    save_now(dlg)
 
     assert len(group.servers) == 1
     saved = group.servers[0]
@@ -113,7 +114,7 @@ def test_editing_keeps_the_same_server_id(qapp, ctx, monkeypatch):
     dlg = ServerDialog(ctx, group, server=existing)
     dlg.start_cmd_edit.setText("new-cmd")
 
-    dlg._on_save()
+    save_now(dlg)
 
     assert len(group.servers) == 1
     assert group.servers[0].id == "11112222"

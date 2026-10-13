@@ -23,3 +23,13 @@ def wait_refresh(win, timeout: float = 3.0) -> None:
         QApplication.processEvents()
         time.sleep(0.005)
     QApplication.processEvents()
+
+
+def save_now(dlg, timeout: float = 3.0) -> None:
+    """다이얼로그의 저장을 누르고, 워커 단계들이 다 끝날 때까지 기다린다."""
+    dlg._on_save()
+    end = time.monotonic() + timeout
+    while (dlg._saving or dlg._poller.is_busy()) and time.monotonic() < end:
+        QApplication.processEvents()
+        time.sleep(0.005)
+    QApplication.processEvents()

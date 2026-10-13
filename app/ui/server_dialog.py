@@ -20,6 +20,7 @@ from app.core.run_registry import group_owner_key
 from app.core.store import (RouteMeta, ServerGroupMeta, ServiceSpec,
                             new_route_id)
 from app.core.wizard_logic import validate_service
+from app.ui.poller import BackgroundPoller
 from app.ui.repo_picker import CwdPickerRow, detect_service_port
 from app.ui.route_dialog import (DOCKER_START_DEFAULT, DOCKER_STOP_DEFAULT,
                                  KIND_LABELS)
@@ -41,6 +42,9 @@ class ServerDialog(QDialog):
         self.group = group
         self.server = server
         self.saved_server: RouteMeta | None = None
+        self._saving = False
+        self._poller = BackgroundPoller(self)
+        self._poller.finished.connect(lambda *a: None)
         self.setWindowTitle("서버 편집" if server else "서버 추가")
         self.setMinimumWidth(480)
 
@@ -127,6 +131,30 @@ class ServerDialog(QDialog):
         return ""
 
     # ---- 저장 ----
+    # 원격 호출(포트 감지, 서버 정지)은 워커에서 한다. 파이가 빌드 중이면
+    # 각각 몇 초라 GUI 스레드에서 기다리면 창이 굳는다. 흐름은 RouteDialog와
+    # 같되 도메인·DNS·설정 파일 단계가 없다.
+
+    def _bg(self, fn, done):
+        def wrapped():
+            try:
+                return (None, fn())
+            except Exception as ex:
+                return (ex, None)
+
+        def _finish(ok, result, error):
+            exc, value = result if ok else (RuntimeError(error), None)
+            done(exc, value)
+
+        self._poller.finished.disconnect()
+        self._poller.finished.connect(_finish)
+        self._poller.run(wrapped)
+
+    def _set_busy(self, busy: bool):
+        self._saving = busy
+        self.setEnabled(not busy)
+        self.err_label.setText("저장하는 중..." if busy else "")
+
     def _on_save(self):
         err = self._validate()
         if err:
@@ -134,10 +162,7 @@ class ServerDialog(QDialog):
             return
         self.err_label.clear()
 
-        name = self.name_edit.text().strip()
-        service = self.service_edit.text().strip()
         kind = self.kind_combo.currentData()
-        cwd = self.cwd_edit.text().strip()
         start_cmd = self.start_cmd_edit.text().strip()
         stop_cmd = self.stop_cmd_edit.text().strip()
         if kind == "docker":
@@ -146,54 +171,73 @@ class ServerDialog(QDialog):
             # 카드에서 무엇이 실행되는지 보이는 편이 낫다.
             start_cmd = start_cmd or DOCKER_START_DEFAULT
             stop_cmd = stop_cmd or DOCKER_STOP_DEFAULT
-
+        f = self._form = {
+            "name": self.name_edit.text().strip(),
+            "service": self.service_edit.text().strip(),
+            "kind": kind, "cwd": self.cwd_edit.text().strip(),
+            "start_cmd": start_cmd, "stop_cmd": stop_cmd,
+        }
+        self._set_busy(True)
         # 도커라면 compose가 실제로 여는 포트와 대조한다. 다르면 상태 판정이
         # 쓰는 주소에 아무도 없어 영영 "실행 중"이 되지 않는다.
-        if kind == "docker" and cwd:
-            detected = detect_service_port(self.ctx, cwd)
-            warn = port_mismatch(service, detected)
-            if warn:
-                ok = QMessageBox.question(
-                    self, "포트가 다릅니다",
-                    warn + "\n\n그래도 이대로 저장할까요?")
-                if ok != QMessageBox.StandardButton.Yes:
-                    return
+        if kind == "docker" and f["cwd"]:
+            self._bg(lambda: detect_service_port(self.ctx, f["cwd"]), self._after_detect)
+        else:
+            self._after_detect(None, "")
+
+    def _after_detect(self, exc, detected):
+        f = self._form
+        warn = port_mismatch(f["service"], detected or "") if exc is None else ""
+        if warn:
+            self._set_busy(False)
+            ok = QMessageBox.question(
+                self, "포트가 다릅니다", warn + "\n\n그래도 이대로 저장할까요?")
+            if ok != QMessageBox.StandardButton.Yes:
+                return
+            self._set_busy(True)
 
         owner = group_owner_key(self.group.id)
-        is_new = self.server is None
-
         # 실행 중인 서버의 실행 설정을 바꾸면 기존 프로세스(또는 컨테이너)가
         # GUI에서 더 이상 손댈 수 없는 고아가 된다 (RouteDialog의 I8과 같은 이유).
-        if not is_new and self.ctx.manager.service_running(owner, self.server):
+        need_stop = False
+        if self.server is not None and self.ctx.manager.service_running(owner, self.server):
             spec = self.server.server
-            changed = (kind != spec.kind or start_cmd != spec.start_cmd
-                       or stop_cmd != spec.stop_cmd or cwd != spec.cwd)
-            if changed:
+            need_stop = (f["kind"] != spec.kind or f["start_cmd"] != spec.start_cmd
+                         or f["stop_cmd"] != spec.stop_cmd or f["cwd"] != spec.cwd)
+            if need_stop:
+                self._set_busy(False)
                 ok = QMessageBox.question(
                     self, "서버 중지 필요",
                     "변경을 적용하려면 서버를 중지해야 합니다. 지금 중지할까요?")
                 if ok != QMessageBox.StandardButton.Yes:
                     return
-                try:
-                    self.ctx.manager.stop_service(owner, self.server)
-                except Exception as ex:
-                    QMessageBox.critical(self, "중지 실패", str(ex))
-                    return
+                self._set_busy(True)
+        if need_stop:
+            self._bg(lambda: self.ctx.manager.stop_service(owner, self.server),
+                     self._after_stop)
+        else:
+            self._after_stop(None, None)
 
-        if is_new:
+    def _after_stop(self, exc, _value):
+        self._set_busy(False)
+        if exc is not None:
+            QMessageBox.critical(self, "중지 실패", str(exc))
+            return
+        f = self._form
+        if self.server is None:
             server = RouteMeta(
-                id=new_route_id(), hostname="", service=service, label=name,
-                server=ServiceSpec(kind=kind, start_cmd=start_cmd,
-                                   stop_cmd=stop_cmd, cwd=cwd, autostart=False))
+                id=new_route_id(), hostname="", service=f["service"], label=f["name"],
+                server=ServiceSpec(kind=f["kind"], start_cmd=f["start_cmd"],
+                                   stop_cmd=f["stop_cmd"], cwd=f["cwd"], autostart=False))
             self.group.servers.append(server)
             self.saved_server = server
         else:
-            self.server.service = service
-            self.server.label = name
-            self.server.server.kind = kind
-            self.server.server.start_cmd = start_cmd
-            self.server.server.stop_cmd = stop_cmd
-            self.server.server.cwd = cwd
+            self.server.service = f["service"]
+            self.server.label = f["name"]
+            self.server.server.kind = f["kind"]
+            self.server.server.start_cmd = f["start_cmd"]
+            self.server.server.stop_cmd = f["stop_cmd"]
+            self.server.server.cwd = f["cwd"]
             self.saved_server = self.server
 
         self.ctx.store.save()
