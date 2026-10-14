@@ -105,6 +105,10 @@ class Settings:
     # 마지막 창 크기/위치 (x, y, w, h). 비어 있으면 기본값으로 연다.
     # 매번 같은 크기로 시작하면 넓게 놓고 쓰는 사람은 켤 때마다 다시 늘려야 한다.
     window_geometry: list[int] = field(default_factory=list)
+    # 켤 때 하루 한 번 GitHub 릴리스를 보고 새 버전을 알려줄지.
+    auto_update_check: bool = True
+    # 마지막으로 업데이트를 확인한 시각(epoch 초). 0이면 한 번도 안 함.
+    last_update_check: float = 0.0
 
     def skip_prereq_check(self, target_key: str) -> bool:
         return target_key in self.prereq_skip
@@ -401,6 +405,9 @@ class SettingsStore:
                     tunnel_owners=tunnel_owners,
                     prereq_skip=prereq_skip,
                     window_geometry=window_geometry,
+                    auto_update_check=bool(raw.get("auto_update_check", True)),
+                    last_update_check=float(raw.get("last_update_check", 0) or 0)
+                    if isinstance(raw.get("last_update_check", 0), (int, float)) else 0.0,
                     server_groups=server_groups,
                     card_order=card_order,
                 )
@@ -443,6 +450,8 @@ class SettingsStore:
             "tunnel_owners": dict(self.settings.tunnel_owners),
             "prereq_skip": list(self.settings.prereq_skip),
             "window_geometry": list(self.settings.window_geometry),
+            "auto_update_check": bool(self.settings.auto_update_check),
+            "last_update_check": float(self.settings.last_update_check),
             "server_groups": {
                 target_key: [asdict(g) for g in group_list]
                 for target_key, group_list in self.settings.server_groups.items()

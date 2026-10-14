@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from PyQt6.QtGui import QCloseEvent
-from PyQt6.QtWidgets import (QComboBox, QDialogButtonBox, QFormLayout, QLineEdit,
-                             QMessageBox, QVBoxLayout, QDialog)
+from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialogButtonBox, QFormLayout,
+                             QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+                             QPushButton, QVBoxLayout, QDialog)
 
 from app.context import AppContext
 from app.core.git_repo import validate_repo_root
+from app.version import __version__
 from app.ui.winutil import apply_titlebar_theme
 
 THEME_LABELS = {"dark": "다크", "light": "라이트"}
@@ -38,6 +40,19 @@ class SettingsDialog(QDialog):
         self.theme_combo.setCurrentText(current_label)
         form.addRow("테마", self.theme_combo)
 
+        # 업데이트: 현재 버전 + 지금 확인 버튼 + 켤 때 자동 확인
+        self.version_label = QLabel(f"v{__version__}")
+        self.update_btn = QPushButton("업데이트 확인")
+        self.update_btn.clicked.connect(self._check_update)
+        ver_row = QHBoxLayout()
+        ver_row.addWidget(self.version_label)
+        ver_row.addStretch(1)
+        ver_row.addWidget(self.update_btn)
+        form.addRow("버전", ver_row)
+        self.auto_update_chk = QCheckBox("켤 때 하루 한 번 새 버전 확인")
+        self.auto_update_chk.setChecked(ctx.store.settings.auto_update_check)
+        form.addRow("", self.auto_update_chk)
+
         close = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         close.button(QDialogButtonBox.StandardButton.Close).setText("확인")
         close.rejected.connect(self.reject)
@@ -66,7 +81,16 @@ class SettingsDialog(QDialog):
 
         self.ctx.store.settings.theme = THEME_VALUES.get(
             self.theme_combo.currentText(), "dark")
+        self.ctx.store.settings.auto_update_check = self.auto_update_chk.isChecked()
         self.ctx.store.save()
+
+    def _check_update(self):
+        """지금 바로 확인. 흐름은 메인 창이 들고 있다(설정 창이 닫혀도 이어지게)."""
+        flow = getattr(self.parent(), "update_flow", None)
+        if flow is None:
+            from app.ui.update_flow import UpdateFlow
+            flow = UpdateFlow(self, self.ctx.store)
+        flow.check(manual=True)
 
     def closeEvent(self, event: QCloseEvent):
         self._persist()

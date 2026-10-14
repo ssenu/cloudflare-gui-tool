@@ -1065,6 +1065,16 @@ class MainWindow(QWidget):
         self._refresh_poller = BackgroundPoller(self)
         self._refresh_poller.finished.connect(self._on_refresh_done)
 
+        # 앱 자체 업데이트. 켤 때 하루 한 번 조용히 확인하고, 새 버전이 있을
+        # 때만 배너로 알린다(앱을 쓰는 흐름을 끊지 않도록 대화상자는 안 띄운다).
+        from app.ui.update_flow import UpdateFlow
+        self.update_flow = UpdateFlow(self, ctx.store)
+        self.update_flow.available.connect(self._on_update_available)
+        self._update_check_timer = QTimer(self)
+        self._update_check_timer.setSingleShot(True)
+        self._update_check_timer.timeout.connect(self._auto_check_update)
+        self._update_check_timer.start(5000)   # 첫 목록이 뜬 뒤에
+
         self._first_load = QTimer(self)
         self._first_load.setSingleShot(True)
         self._first_load.timeout.connect(self.refresh)
@@ -1869,6 +1879,20 @@ class MainWindow(QWidget):
                                       timeout=120.0))
         self._site_pollers.append(poller)
 
+    # ---- 앱 업데이트 ----
+    def _auto_check_update(self):
+        from app.core import updater
+        s = self.ctx.store.settings
+        if updater.is_dev(self.update_flow.current):
+            return   # 개발 실행은 버전이 0.0.0이라 매번 "새 버전"이 된다
+        if updater.should_auto_check(s.auto_update_check, s.last_update_check):
+            self.update_flow.check(manual=False)
+
+    def _on_update_available(self, release):
+        self._show_info(
+            f"새 버전 v{release.version}이 있습니다 (지금 v{self.update_flow.current}).",
+            "업데이트", lambda: self.update_flow.offer(release))
+
     # ---- 원격 작업을 워커로 ----
     def _run_bg(self, fn, done=None):
         """원격 호출 하나를 워커 스레드에서 돌린다.
@@ -2378,5 +2402,6 @@ class MainWindow(QWidget):
         self._timer.stop()
         self._poller.stop()
         self._refresh_poller.stop()
+        self._update_check_timer.stop()
         self.ctx.set_local()  # SSH 연결 정리 (원격 프로세스는 그대로 유지됨)
         event.accept()

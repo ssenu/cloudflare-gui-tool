@@ -48,6 +48,11 @@ jobs:
             echo "value=0.0.0-dev" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: 앱에 버전 심기
+        # 앱이 자기 버전을 알아야 업데이트 확인에서 비교할 수 있다.
+        shell: bash
+        run: echo '__version__ = "${{ steps.ver.outputs.value }}"' > app/version.py
+
       - name: 폴더형(onedir) 빌드
         run: pyinstaller --noconfirm CFT-onedir.spec
 

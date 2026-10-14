@@ -71,6 +71,9 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: deskto
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; 앱의 "업데이트"가 /SILENT로 설치본을 돌린 경우: 위 줄은 skipifsilent라 건너뛰므로
+; 여기서 앱을 다시 띄운다. 그래야 업데이트 후 앱이 사라진 채로 남지 않는다.
+Filename: "{app}\{#AppExeName}"; Flags: nowait; Check: WizardSilent
 
 [UninstallDelete]
 ; 앱이 실행 중에 만드는 것들. 설정 파일(%APPDATA%\CloudflareTunnelGUI)은
