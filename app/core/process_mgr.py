@@ -437,8 +437,14 @@ class ProcessManager:
 
         # systemd가 관리하는 터널은 PID 파일이 없다(부팅 때 systemd가 띄운다).
         # 상태는 systemctl is-active 한 번으로 일괄 확인한다.
+        #
+        # 주의: 여기서 빼는 것은 "터널 프로세스의 PID 확인"뿐이다. 그 터널에
+        # 딸린 라우트 서버는 systemd가 아니라 여전히 앱이 띄우고 끈다. 예전에는
+        # 같은 변수를 덮어써 서버까지 폴링에서 빠졌고, 부팅 시 자동 실행을 켠
+        # 터널의 서버가 실제로는 떠 있는데 전부 꺼짐으로 보였다.
+        all_tunnels = list(tunnels)
         boot_tunnels = [t for t in tunnels if getattr(t, "boot_autostart", False)]
-        tunnels = [t for t in tunnels if not getattr(t, "boot_autostart", False)]
+        pid_tunnels = [t for t in tunnels if not getattr(t, "boot_autostart", False)]
         if boot_tunnels:
             units = [autostart.unit_name(t.name) for t in boot_tunnels]
             active = autostart.active_units(reg.runner, units)
@@ -449,10 +455,10 @@ class ProcessManager:
                 self._marker_seen[unit] = running
                 self._resolve_pending(unit, running)
 
-        tunnel_units = [reg.unit_tunnel(t.name) for t in tunnels]
+        tunnel_units = [reg.unit_tunnel(t.name) for t in pid_tunnels]
         command_units: list[str] = []
         docker_units: list[tuple[str, str, str]] = []  # (unit, cwd, 서비스 주소)
-        owned_routes = [(t.name, t.routes) for t in tunnels]
+        owned_routes = [(t.name, t.routes) for t in all_tunnels]
         owned_routes += [(group_owner_key(g.id), g.servers) for g in groups]
         for owner, routes in owned_routes:
             for r in routes:

@@ -973,3 +973,32 @@ def test_falls_back_to_compose_ps_when_labels_are_unavailable():
     mgr.refresh([meta("t1", [route])])
 
     assert mgr.service_running("t1", route) is True
+
+
+# ---- 부팅 시 자동 실행 터널의 서버도 상태를 본다 ----
+# 버그: refresh()가 systemd가 관리하는 터널을 PID 확인 목록에서 빼면서,
+# 같은 변수를 서버 목록에도 써서 그 터널의 라우트 서버까지 통째로 빠졌다.
+# 그래서 webPi 'web' 터널(부팅 시 자동 실행)의 서버 5개가 실제로는 떠 있는데
+# 전부 꺼짐으로 보였다. 터널 프로세스만 systemd 몫이고, 서버는 여전히 앱 몫이다.
+
+def test_servers_of_a_boot_managed_tunnel_are_still_polled():
+    mgr, runner, reg = make_mgr()
+    route = docker_route("r1", cwd="/srv/apps/a")
+    tunnel = TunnelMeta(name="web", routes=[route], boot_autostart=True)
+    runner.run_results[DOCKER_PS] = RunResult(0, "/srv/apps/a\n", "")
+
+    mgr.refresh([tunnel])
+
+    assert mgr.service_running("web", route) is True
+
+
+def test_boot_managed_tunnel_itself_is_not_pid_polled():
+    """터널 프로세스는 systemd가 관리하므로 PID 파일을 보지 않는다(기존 동작 유지)."""
+    mgr, runner, reg = make_mgr()
+    tunnel = TunnelMeta(name="web", routes=[], boot_autostart=True)
+
+    mgr.refresh([tunnel])
+
+    pid_reads = [c for c in runner.run_calls
+                 if c[0][:2] == ("sh", "-c") and "tunnel-web.pid" in c[0][2]]
+    assert pid_reads == []
